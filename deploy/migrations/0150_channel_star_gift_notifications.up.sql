@@ -39,7 +39,7 @@ COMMENT ON TABLE star_gift_channel_notification_jobs IS
 COMMENT ON TABLE star_gift_user_message_refs IS
     'Viewer-local private service-message aliases to saved gift aggregates; the saved gift owner may be that user or an authorized channel.';
 
--- Existing testserver/users already have channel prepaid/upgrade notifications.
+-- Existing deployments/users already have channel prepaid/upgrade notifications.
 -- Backfill only aliases that are cryptographically unnecessary to guess: the
 -- persisted action itself names a channel and saved_id, and that exact pair
 -- must resolve to one saved gift. This changes no message, PTS or outbox row.
