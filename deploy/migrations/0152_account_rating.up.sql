@@ -1,7 +1,6 @@
--- Server-local composite account rating for moderation/operations in the admin
--- panel. This is intentionally not projected into Telegram's userFull
--- stars_rating/stars_my_pending_rating fields: those fields describe official
--- Stars transaction-volume semantics, not this activity/moderation score.
+-- Server-local composite account rating for gramsrv clients and moderation /
+-- operations. This uses gramsrv's own policy rather than claiming to reproduce
+-- Telegram's private rating algorithm.
 --
 -- account_rating is a derived read model: it can always be rebuilt from the
 -- contributing sources (stars_transactions, message counts, moderation state)
@@ -9,15 +8,15 @@
 -- component is kept separately so the admin panel can show why a level was
 -- reached, and so recomputing one signal never silently discards another.
 --
--- 'stars' is the composite score used by the local admin model, not a wallet
--- balance and not an official Telegram Stars Rating value.
+-- 'stars' is the composite score used by the local gramsrv model, not a wallet
+-- balance.
 
 CREATE TABLE public.account_rating (
     user_id bigint PRIMARY KEY REFERENCES public.users(id) ON DELETE CASCADE,
     level integer NOT NULL DEFAULT 0 CHECK (level >= 0),
     stars bigint NOT NULL DEFAULT 0,
     current_level_stars bigint NOT NULL DEFAULT 0 CHECK (current_level_stars >= 0),
-    -- NULL means the top local admin level has been reached.
+    -- NULL means the top local gramsrv level has been reached.
     next_level_stars bigint CHECK (next_level_stars IS NULL OR next_level_stars > 0),
     CHECK (next_level_stars IS NULL OR next_level_stars > current_level_stars),
     -- Signed contributions. penalty_component is stored as a non-negative

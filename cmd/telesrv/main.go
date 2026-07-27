@@ -1030,9 +1030,9 @@ func run(logger *zap.Logger) error {
 			Store:        accountService,
 			Sender:       loginEmailSender,
 		}))
-	// Collectible (NFT) usernames are projected at the protocol edge. The
-	// composite account rating is a separate local admin read model and is never
-	// projected into Telegram's stars_rating fields.
+	// Collectible (NFT) usernames and the gramsrv composite account rating are
+	// optional read models projected at the protocol edge. The rating worker
+	// computes and persists scores; profile reads never recompute them.
 	collectibleUsernameStore := postgres.NewCollectibleUsernameStore(pool)
 	accountRatingStore := postgres.NewAccountRatingStore(pool)
 	usernamesService := usernamesapp.NewService(
@@ -1143,6 +1143,7 @@ func run(logger *zap.Logger) error {
 		Moderation:           moderationService,
 		Users:                usersService,
 		Usernames:            usernamesService,
+		AccountRatings:       ratingService,
 		BotVerifications:     botVerificationService,
 		TelegramLogin:        telegramLoginRPCDependency(telegramLoginService),
 		Updates:              updatesService,

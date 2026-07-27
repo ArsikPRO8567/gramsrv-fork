@@ -544,15 +544,17 @@ path. `TELESRV_PUBLIC_BASE_URL` must resolve to that proxy for moderation freeze
 
 ### Composite account rating and collectible usernames
 
-The account rating is a server-local admin score combining Stars received and spent, bounded account activity, and
-moderation penalties. It is intentionally **not** projected into Telegram's `userFull.stars_rating` or
-`stars_my_pending_rating`: those fields represent official Stars transaction-volume semantics, which this composite
-does not implement. Every component is stored separately so operators can explain and reproduce a level. Collectible
-(NFT) usernames are minted by the operator; no external marketplace, wallet or chain node is configured or contacted.
+The account rating is gramsrv's own local score combining Stars received and spent, bounded account activity, and
+moderation penalties; it does not claim to reproduce Telegram's private algorithm 1:1. The stored level is projected
+through `userFull.stars_rating`, while `stars_my_pending_rating` and its activation date are exposed only to the
+account itself so official clients can render the result without a patch. Profile reads only fetch a projection
+already persisted by the background worker and reuse the existing 30-minute `userFull` projection cache; they never
+recompute or write a rating synchronously. Every component remains separately explainable. Collectible (NFT)
+usernames are minted by the operator; no external marketplace, wallet or chain node is configured or contacted.
 
 | Setting | Type / code default | Description and constraints |
 |---|---|---|
-| `TELESRV_RATING_ENABLED` | bool / `true` | Enables the local admin composite rating. Disabled refuses rating writes; client-facing Telegram rating fields remain unset in either mode. |
+| `TELESRV_RATING_ENABLED` | bool / `true` | Enables the local composite rating and client level projection. Disabled refuses rating writes and leaves client rating flags unset. |
 | `TELESRV_RATING_PENDING_DELAY` | duration / `24h` | How long a local rating increase stays pending before it becomes the visible admin level. A decrease is always applied immediately, so a penalty is never delayed. `0` applies every change at once; must be `0..720h`. |
 | `TELESRV_RATING_RECOMPUTE_INTERVAL` | duration / `15m` | Background recompute worker interval; must be positive. |
 | `TELESRV_RATING_RECOMPUTE_BATCH` | int / `500` | Stale projections recomputed per cycle; must be `1..10000`. |

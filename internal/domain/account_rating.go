@@ -7,14 +7,13 @@ import (
 
 // Composite account rating.
 //
-// This is a server-local moderation/operations score for the admin panel. It is
-// deliberately not Telegram's Stars Rating: the official field describes Stars
-// transaction volume, whereas this model combines Stars, account activity and
-// moderation penalties. Projecting it into userFull.stars_rating would give
-// official clients a materially false meaning, so the RPC edge keeps those
-// fields unset.
+// This is gramsrv's server-local account score. It deliberately uses its own
+// inputs and thresholds (Stars, activity and moderation), rather than claiming
+// to reproduce Telegram's private rating algorithm. The RPC edge exposes the
+// stored level through userFull's existing rating fields so official clients can
+// render it without a client patch.
 const (
-	// MaxAccountRatingLevel bounds the local admin level.
+	// MaxAccountRatingLevel bounds the local gramsrv level.
 	MaxAccountRatingLevel = 50
 	// accountRatingLevelUnit is the score required for level 1. Thresholds grow
 	// quadratically from it: level n needs accountRatingLevelUnit * n^2.
@@ -83,7 +82,7 @@ type AccountRating struct {
 	Version      int64
 }
 
-// AccountRatingLevel is the local admin-facing level snapshot.
+// AccountRatingLevel is the local client/admin-facing level snapshot.
 type AccountRatingLevel struct {
 	Level             int
 	CurrentLevelStars int64
@@ -113,7 +112,7 @@ func RatableAccount(userID int64, bot bool) bool {
 	return userID > 0 && !bot && !IsSystemUserID(userID)
 }
 
-// LevelSnapshot returns the current local admin-facing level.
+// LevelSnapshot returns the current visible local level.
 func (r AccountRating) LevelSnapshot() AccountRatingLevel {
 	return AccountRatingLevel{
 		Level:             r.Level,
@@ -303,7 +302,7 @@ func AccountRatingLevelForStars(stars int64) (level int, currentLevelStars int64
 //
 // A score that dropped is applied at once -- a penalty must not sit behind a
 // delay. A score that grew is parked until delay has elapsed; once the parked
-// window has passed the pending delta is folded into the visible admin rating.
+// window has passed the pending delta is folded into the visible local rating.
 func ResolveAccountRatingPending(prev, computed AccountRating, delay time.Duration, now time.Time) AccountRating {
 	out := computed
 	out.Version = prev.Version + 1

@@ -519,11 +519,11 @@ active key。不要手工编辑 manifest 或 PEM，不要在各实例上分别�
 
 ### 本地账号评分与 collectible username
 
-账号评分是供管理后台使用的本地风控/信誉复合分，组合 Stars 收支、账号活跃和管理处罚。它**不会**投影到 Telegram 的 `userFull.stars_rating` / `stars_my_pending_rating`：官方字段表达 Stars 交易量，当前复合公式不具备同等语义。Collectible username 由管理员签发，本功能不访问外部市场、钱包或区块链节点。
+账号评分是 gramsrv 自己的本地风控/信誉复合分，组合 Stars 收支、账号活跃和管理处罚；它不承诺 1:1 复刻 Telegram 的私有评分算法。已计算的本地等级会投影到 `userFull.stars_rating`，本人还会收到 `stars_my_pending_rating` 与生效时间，让官方客户端直接显示；他人的 pending 永不下发。资料页只读取后台 worker 已持久化的评分并复用现有 30 分钟 `userFull` 投影缓存，不会同步重算或写库。Collectible username 由管理员签发，本功能不访问外部市场、钱包或区块链节点。
 
 | 参数 | 类型 / 代码默认值 | 说明与约束 |
 |---|---|---|
-| `TELESRV_RATING_ENABLED` | bool / `true` | 启用本地后台复合评分；关闭时拒绝评分写入，两种模式都不设置客户端官方 Stars Rating 字段。 |
+| `TELESRV_RATING_ENABLED` | bool / `true` | 启用本地复合评分及客户端等级投影；关闭时拒绝评分写入且客户端 rating flags 保持未设置。 |
 | `TELESRV_RATING_PENDING_DELAY` | duration / `24h` | 本地评分上涨进入可见后台等级前的等待期；下降立即生效。允许 `0..720h`，`0` 表示立即应用。 |
 | `TELESRV_RATING_RECOMPUTE_INTERVAL` | duration / `15m` | 后台重算周期，必须为正数。 |
 | `TELESRV_RATING_RECOMPUTE_BATCH` | int / `500` | 每轮重算的 stale projection 数，必须为 `1..10000`。 |

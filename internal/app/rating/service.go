@@ -2,9 +2,10 @@
 // stored projection, recomputing it from the raw contribution signals, and
 // applying operator adjustments through the contribution ledger.
 //
-// This is an admin-only local model, not Telegram's Stars Rating protocol
-// surface. The service gathers signals, applies the configured weights and
-// pending-delay policy, and persists the result under optimistic concurrency.
+// This is gramsrv's local rating model, not a 1:1 reproduction of Telegram's
+// private algorithm. The service gathers signals, applies the configured
+// weights and pending-delay policy, and persists the result under optimistic
+// concurrency for both admin and read-only client projection.
 package rating
 
 import (

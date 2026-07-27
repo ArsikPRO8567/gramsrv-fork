@@ -981,6 +981,16 @@ type UsernameRegistryService interface {
 	Collectible(ctx context.Context, username string) (domain.CollectibleUsername, error)
 }
 
+// AccountRatingService exposes the stored gramsrv composite rating used by the
+// userFull rating projection.
+//
+// It is deliberately read-only at the RPC boundary: ratings are computed by the
+// bounded background worker, while profile reads only fetch the latest stored
+// projection. A nil service or a read failure leaves every rating flag unset.
+type AccountRatingService interface {
+	Rating(ctx context.Context, userID int64) (domain.AccountRating, error)
+}
+
 // BotVerificationService is the third-party bot verification boundary
 // (core.telegram.org/api/bots/verification): a verifier bot marking peers with its
 // own icon and description, which official clients render as a badge distinct from
@@ -1032,6 +1042,7 @@ type Deps struct {
 	Moderation           ModerationService
 	Users                UsersService
 	Usernames            UsernameRegistryService
+	AccountRatings       AccountRatingService
 	BotVerifications     BotVerificationService
 	TelegramLogin        TelegramLoginService
 	Updates              UpdatesService
