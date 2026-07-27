@@ -312,6 +312,7 @@ func run(logger *zap.Logger) error {
 	logger.Info("telesrv 启动",
 		zap.String("listen", cfg.ListenAddr),
 		zap.Int("dc", cfg.DC),
+		zap.String("default_country_code", cfg.DefaultCountryCode),
 		zap.String("advertise", net.JoinHostPort(cfg.AdvertiseIP, portStr)),
 		zap.Int("tl_layer", tg.Layer),
 		zap.String("git_commit", buildMeta.Commit),
@@ -861,6 +862,7 @@ func run(logger *zap.Logger) error {
 	updatesService := updates.NewService(updateStateStore, updateEventStore, updates.WithLogger(logger.Named("app").Named("updates")))
 	router := rpc.New(rpc.Config{
 		DC:                       cfg.DC,
+		DefaultCountryCode:       cfg.DefaultCountryCode,
 		IP:                       cfg.AdvertiseIP,
 		Port:                     port,
 		OutboundPushTimeout:      cfg.OutboundPushTimeout,

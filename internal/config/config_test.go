@@ -68,6 +68,47 @@ func TestLoadUsesExplicitAdvertiseIP(t *testing.T) {
 	}
 }
 
+func TestLoadDefaultCountryCode(t *testing.T) {
+	t.Run("default", func(t *testing.T) {
+		disableDefaultConfigFile(t)
+		t.Setenv("TELESRV_DEFAULT_COUNTRY_CODE", "")
+
+		cfg, err := Load()
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if cfg.DefaultCountryCode != "CN" {
+			t.Fatalf("DefaultCountryCode = %q, want CN", cfg.DefaultCountryCode)
+		}
+	})
+
+	t.Run("normalized override", func(t *testing.T) {
+		disableDefaultConfigFile(t)
+		t.Setenv("TELESRV_DEFAULT_COUNTRY_CODE", " us ")
+
+		cfg, err := Load()
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if cfg.DefaultCountryCode != "US" {
+			t.Fatalf("DefaultCountryCode = %q, want US", cfg.DefaultCountryCode)
+		}
+	})
+}
+
+func TestLoadRejectsInvalidDefaultCountryCode(t *testing.T) {
+	for _, value := range []string{"+86", "CHN", "C1", "中", "ZZ"} {
+		t.Run(value, func(t *testing.T) {
+			disableDefaultConfigFile(t)
+			t.Setenv("TELESRV_DEFAULT_COUNTRY_CODE", value)
+
+			if _, err := Load(); err == nil {
+				t.Fatalf("Load accepted TELESRV_DEFAULT_COUNTRY_CODE=%q", value)
+			}
+		})
+	}
+}
+
 func TestLoadStrictDCCheck(t *testing.T) {
 	t.Run("defaults off", func(t *testing.T) {
 		disableDefaultConfigFile(t)

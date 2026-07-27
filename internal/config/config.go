@@ -11,10 +11,15 @@ import (
 	"strings"
 	"time"
 
+	"golang.org/x/text/language"
+
 	"telesrv/internal/links"
 )
 
-const defaultConfigFile = ".env"
+const (
+	defaultConfigFile  = ".env"
+	defaultCountryCode = "CN"
+)
 
 // Config 是 telesrv 的运行配置。
 type Config struct {
@@ -31,6 +36,9 @@ type Config struct {
 	RSAKeyPath string
 	// DC 是本 server 的 DC ID。
 	DC int
+	// DefaultCountryCode 是 help.getNearestDc 返回的 ISO 3166-1 alpha-2 国家码。
+	// 客户端登录页据此预选国家和国际电话区号；例如 CN 对应 +86。
+	DefaultCountryCode string
 	// StrictDCCheck enables the default-off key-exchange DC-label diagnostic.
 	// The normal single-backend mode accepts every wire int32 label without
 	// partitioning auth keys, sessions, or business state. See
@@ -461,6 +469,10 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, fmt.Errorf("TELESRV_PUBLIC_APP_NAME: %w", err)
 	}
+	countryCode, err := normalizeDefaultCountryCode(envOr("TELESRV_DEFAULT_COUNTRY_CODE", defaultCountryCode))
+	if err != nil {
+		return Config{}, fmt.Errorf("TELESRV_DEFAULT_COUNTRY_CODE: %w", err)
+	}
 
 	cfg := Config{
 		ListenAddr:      envOr("TELESRV_LISTEN", "0.0.0.0:2398"),
@@ -475,6 +487,7 @@ func Load() (Config, error) {
 		AdvertiseIP:                         envOr("TELESRV_ADVERTISE_IP", "127.0.0.1"),
 		RSAKeyPath:                          envOr("TELESRV_RSA_KEY", "data/server_rsa.pem"),
 		DC:                                  envIntOr("TELESRV_DC", 2),
+		DefaultCountryCode:                  countryCode,
 		StrictDCCheck:                       envBoolOr("TELESRV_STRICT_DC_CHECK", false),
 		MTProtoMaxConnections:               envIntOr("TELESRV_MTPROTO_MAX_CONNECTIONS", 200000),
 		MTProtoMaxConnectionsPerIP:          envIntOr("TELESRV_MTPROTO_MAX_CONNECTIONS_PER_IP", 4096),
@@ -688,6 +701,18 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 	return cfg, nil
+}
+
+func normalizeDefaultCountryCode(raw string) (string, error) {
+	code := strings.ToUpper(strings.TrimSpace(raw))
+	if len(code) != 2 || code[0] < 'A' || code[0] > 'Z' || code[1] < 'A' || code[1] > 'Z' {
+		return "", fmt.Errorf("must be a two-letter ISO 3166-1 alpha-2 code")
+	}
+	region, err := language.ParseRegion(code)
+	if err != nil || !region.IsCountry() {
+		return "", fmt.Errorf("must identify a country or autonomous area")
+	}
+	return region.String(), nil
 }
 
 func validateTelegramLoginConfig(cfg Config) error {
