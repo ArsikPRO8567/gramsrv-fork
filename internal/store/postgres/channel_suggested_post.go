@@ -118,8 +118,12 @@ func (s *ChannelStore) ToggleSuggestedPostApproval(ctx context.Context, req doma
 	if req.ScheduleDate > 0 {
 		scheduleDate = req.ScheduleDate
 	}
-	if !req.Reject && scheduleDate > 0 && (scheduleDate < req.Date+5*60 || scheduleDate > req.Date+31*24*60*60) {
-		return domain.ToggleSuggestedPostApprovalResult{}, domain.ErrSuggestedPostInvalid
+	if !req.Reject {
+		effectiveDate, scheduleErr := domain.EffectiveSuggestedPostPublishDate(scheduleDate, req.Date)
+		if scheduleErr != nil {
+			return domain.ToggleSuggestedPostApprovalResult{}, scheduleErr
+		}
+		scheduleDate = effectiveDate
 	}
 	recipients, err := monoforumManagerRecipientsTx(ctx, tx, parent.ID, original.SavedPeer.ID)
 	if err != nil {
@@ -173,11 +177,6 @@ func (s *ChannelStore) ToggleSuggestedPostApproval(ctx context.Context, req doma
 			}
 		} else {
 			effectivePublishDate := scheduleDate
-			if effectivePublishDate == 0 {
-				// TDesktop's "Publish Now" request has no schedule_date flag, but
-				// its approval service renderer always expects an absolute date.
-				effectivePublishDate = req.Date
-			}
 			original.SuggestedPost.Accepted, original.SuggestedPost.Rejected, original.SuggestedPost.ScheduleDate = true, false, effectivePublishDate
 			original, result.OriginalEvent, err = s.persistSuggestedPostEditTx(ctx, tx, original, req.UserID, req.Date)
 			if err != nil {

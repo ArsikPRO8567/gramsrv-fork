@@ -179,6 +179,89 @@ func TestSuggestedPostLowBalanceRetryScheduleAndRoleMatrix(t *testing.T) {
 	}
 }
 
+func TestSuggestedPostApprovalAcceptsDelayedScheduleAndKeepsPTSIdempotent(t *testing.T) {
+	ctx := context.Background()
+	store, parent, mono, subscriber := newSuggestedPostMemoryFixture(t)
+
+	const now = 1_700_010_000
+	near, err := store.SendMonoforumMessage(ctx, domain.SendMonoforumMessageRequest{
+		MonoforumID: mono.ID, SenderUserID: subscriber.ID, SavedPeer: subscriber,
+		RandomID: 71, Message: "near schedule", SuggestedPost: &domain.SuggestedPost{}, Date: now - 10,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	nearDate := now + 2*60
+	accepted, err := store.ToggleSuggestedPostApproval(ctx, domain.ToggleSuggestedPostApprovalRequest{
+		UserID: 1, MonoforumID: mono.ID, MessageID: near.Message.ID,
+		ScheduleDate: nearDate, Date: now,
+	})
+	if err != nil {
+		t.Fatalf("accept schedule below former five-minute gate: %v", err)
+	}
+	if accepted.State != domain.SuggestedPostStateScheduled || accepted.Published != nil ||
+		accepted.OriginalMessage.SuggestedPost.ScheduleDate != nearDate ||
+		accepted.ServiceMessage.Action == nil ||
+		accepted.ServiceMessage.Action.SuggestedPostScheduleDate != nearDate {
+		t.Fatalf("near schedule approval = %+v, want scheduled at %d", accepted, nearDate)
+	}
+	monoPts, parentPts := store.channels[mono.ID].Pts, store.channels[parent.ID].Pts
+	monoEvents, parentEvents := len(store.events[mono.ID]), len(store.events[parent.ID])
+	replay, err := store.ToggleSuggestedPostApproval(ctx, domain.ToggleSuggestedPostApprovalRequest{
+		UserID: 1, MonoforumID: mono.ID, MessageID: near.Message.ID,
+		ScheduleDate: nearDate, Date: now + 10*60,
+	})
+	if err != nil || !replay.Duplicate {
+		t.Fatalf("late duplicate approval = %+v err=%v", replay, err)
+	}
+	if store.channels[mono.ID].Pts != monoPts || store.channels[parent.ID].Pts != parentPts ||
+		len(store.events[mono.ID]) != monoEvents || len(store.events[parent.ID]) != parentEvents {
+		t.Fatal("late duplicate approval advanced PTS or appended an event")
+	}
+
+	due, err := store.SendMonoforumMessage(ctx, domain.SendMonoforumMessageRequest{
+		MonoforumID: mono.ID, SenderUserID: subscriber.ID, SavedPeer: subscriber,
+		RandomID: 72, Message: "already due", SuggestedPost: &domain.SuggestedPost{}, Date: now + 20,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	approvedAt := now + 30
+	dueResult, err := store.ToggleSuggestedPostApproval(ctx, domain.ToggleSuggestedPostApprovalRequest{
+		UserID: 1, MonoforumID: mono.ID, MessageID: due.Message.ID,
+		ScheduleDate: now - 1, Date: approvedAt,
+	})
+	if err != nil {
+		t.Fatalf("approve already-due schedule: %v", err)
+	}
+	if dueResult.State != domain.SuggestedPostStateCompleted || dueResult.Published == nil ||
+		dueResult.OriginalMessage.SuggestedPost.ScheduleDate != approvedAt ||
+		dueResult.ServiceMessage.Action == nil ||
+		dueResult.ServiceMessage.Action.SuggestedPostScheduleDate != approvedAt {
+		t.Fatalf("due schedule approval = %+v, want immediate publish at %d", dueResult, approvedAt)
+	}
+
+	far, err := store.SendMonoforumMessage(ctx, domain.SendMonoforumMessageRequest{
+		MonoforumID: mono.ID, SenderUserID: subscriber.ID, SavedPeer: subscriber,
+		RandomID: 73, Message: "too far", SuggestedPost: &domain.SuggestedPost{}, Date: now + 40,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	monoPts, parentPts = store.channels[mono.ID].Pts, store.channels[parent.ID].Pts
+	monoEvents, parentEvents = len(store.events[mono.ID]), len(store.events[parent.ID])
+	if _, err := store.ToggleSuggestedPostApproval(ctx, domain.ToggleSuggestedPostApprovalRequest{
+		UserID: 1, MonoforumID: mono.ID, MessageID: far.Message.ID,
+		ScheduleDate: approvedAt + domain.MaxSuggestedPostScheduleDelay + 1, Date: approvedAt,
+	}); !errors.Is(err, domain.ErrSuggestedPostInvalid) {
+		t.Fatalf("far schedule err=%v, want suggested post invalid", err)
+	}
+	if store.channels[mono.ID].Pts != monoPts || store.channels[parent.ID].Pts != parentPts ||
+		len(store.events[mono.ID]) != monoEvents || len(store.events[parent.ID]) != parentEvents {
+		t.Fatal("far schedule rejection advanced PTS or appended an event")
+	}
+}
+
 func TestChannelAuthoredSuggestedPostAcceptedBySubscriber(t *testing.T) {
 	ctx := context.Background()
 	store, _, mono, subscriber := newSuggestedPostMemoryFixture(t)

@@ -124,6 +124,13 @@ func TestPublicChannelPreviewRPCsAllowNonMember(t *testing.T) {
 	if !ok || !historyChat.Left || historyChat.ID != public.Channel.ID {
 		t.Fatalf("history chat = %T %+v, want left public channel", history.Chats[0], history.Chats[0])
 	}
+	readOK, err := r.onChannelsReadHistory(WithUserID(ctx, viewer.ID), &tg.ChannelsReadHistoryRequest{
+		Channel: input,
+		MaxID:   sent.Message.ID,
+	})
+	if err != nil || !readOK {
+		t.Fatalf("non-member readHistory public preview = %v err=%v, want successful no-op", readOK, err)
+	}
 
 	viewerCtx := WithSessionID(WithRawAuthKeyID(WithUserID(ctx, viewer.ID), [8]byte{9, 2}), 9202)
 	diff, err := r.onUpdatesGetChannelDifference(viewerCtx, &tg.UpdatesGetChannelDifferenceRequest{
@@ -264,5 +271,46 @@ func TestPublicChannelPreviewRPCsAllowNonMember(t *testing.T) {
 	joinedChat, ok := joinedPeerDialogs.Chats[0].(*tg.Channel)
 	if !ok || joinedChat.Left || joinedChat.ID != public.Channel.ID {
 		t.Fatalf("joined peer dialog chat = %T %+v, want active channel with left=false", joinedPeerDialogs.Chats[0], joinedPeerDialogs.Chats[0])
+	}
+}
+
+func TestChannelsReadHistoryAllowsSyntheticMonoforumViewers(t *testing.T) {
+	ctx := context.Background()
+	userStore := memory.NewUserStore()
+	owner, err := userStore.Create(ctx, domain.User{AccessHash: 92101, Phone: "15550092101", FirstName: "Owner"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	subscriber, err := userStore.Create(ctx, domain.User{AccessHash: 92102, Phone: "15550092102", FirstName: "Subscriber"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	channelStore := memory.NewChannelStore()
+	channels := appchannels.NewService(channelStore)
+	parent, err := channels.CreateChannel(ctx, owner.ID, domain.CreateChannelRequest{
+		Title: "Monoforum Read RPC", Broadcast: true, Date: 1_700_011_000,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	enabled, err := channelStore.SetPaidMessagesPrice(ctx, owner.ID, parent.Channel.ID, 0, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mono, err := channelStore.GetChannelByID(ctx, enabled.Channel.LinkedMonoforumID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := New(Config{}, Deps{
+		Users: appusers.NewService(userStore), Channels: channels,
+	}, zaptest.NewLogger(t), clock.System)
+	for _, userID := range []int64{owner.ID, subscriber.ID} {
+		ok, err := r.onChannelsReadHistory(WithUserID(ctx, userID), &tg.ChannelsReadHistoryRequest{
+			Channel: &tg.InputChannel{ChannelID: mono.ID, AccessHash: mono.AccessHash},
+			MaxID:   mono.TopMessageID,
+		})
+		if err != nil || !ok {
+			t.Fatalf("synthetic monoforum read for %d = %v err=%v, want successful no-op", userID, ok, err)
+		}
 	}
 }

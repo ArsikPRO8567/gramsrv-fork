@@ -85,8 +85,12 @@ func (s *ChannelStore) toggleSuggestedPostApprovalLocked(req domain.ToggleSugges
 	if req.ScheduleDate > 0 {
 		scheduleDate = req.ScheduleDate
 	}
-	if !req.Reject && scheduleDate > 0 && (scheduleDate < req.Date+5*60 || scheduleDate > req.Date+31*24*60*60) {
-		return domain.ToggleSuggestedPostApprovalResult{}, domain.ErrSuggestedPostInvalid
+	if !req.Reject {
+		effectiveDate, scheduleErr := domain.EffectiveSuggestedPostPublishDate(scheduleDate, req.Date)
+		if scheduleErr != nil {
+			return domain.ToggleSuggestedPostApprovalResult{}, scheduleErr
+		}
+		scheduleDate = effectiveDate
 	}
 	recipients := s.monoforumRecipientsLocked(parent.ID, original.SavedPeer.ID)
 	base := domain.ToggleSuggestedPostApprovalResult{
@@ -136,13 +140,6 @@ func (s *ChannelStore) toggleSuggestedPostApprovalLocked(req domain.ToggleSugges
 	original.SuggestedPost.Accepted = true
 	original.SuggestedPost.Rejected = false
 	effectivePublishDate := scheduleDate
-	if effectivePublishDate == 0 {
-		// TDesktop deliberately omits schedule_date for "Publish Now", but
-		// renders the approval service action as an absolute date.  Persist one
-		// effective publication timestamp across the edited suggestion, action
-		// and approval record instead of leaking an accepted zero date.
-		effectivePublishDate = req.Date
-	}
 	original.SuggestedPost.ScheduleDate = effectivePublishDate
 	original.Pts = s.nextChannelPtsLocked(mono.ID)
 	s.messages[mono.ID][idx] = cloneChannelMessage(original)

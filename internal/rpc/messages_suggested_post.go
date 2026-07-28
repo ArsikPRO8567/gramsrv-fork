@@ -19,8 +19,6 @@ const (
 )
 
 const (
-	minSuggestedPostScheduleDelay = 5 * 60
-	maxSuggestedPostScheduleDelay = 31 * 24 * 60 * 60
 	maxSuggestedPostRejectComment = 1024
 )
 
@@ -54,7 +52,7 @@ func (r *Router) onMessagesToggleSuggestedPostApproval(ctx context.Context, req 
 	}
 	now := int(r.clock.Now().Unix())
 	scheduleDate, hasScheduleDate := req.GetScheduleDate()
-	if hasScheduleDate && (req.Reject || scheduleDate < now+minSuggestedPostScheduleDelay || scheduleDate > now+maxSuggestedPostScheduleDelay) {
+	if hasScheduleDate && (req.Reject || scheduleDate <= 0) {
 		return nil, scheduleDateInvalidErr()
 	}
 	result, err := service.ToggleSuggestedPostApproval(ctx, domain.ToggleSuggestedPostApprovalRequest{

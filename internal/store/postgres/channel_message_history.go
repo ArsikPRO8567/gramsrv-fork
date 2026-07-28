@@ -756,13 +756,22 @@ WHERE (
 }
 
 func (s *ChannelStore) readChannelHistoryOnce(ctx context.Context, req domain.ReadChannelHistoryRequest) (domain.ReadChannelHistoryResult, error) {
-	channel, _, err := s.getChannelForMember(ctx, s.db, req.UserID, req.ChannelID)
+	channel, _, readOnly, err := s.getChannelForViewer(ctx, s.db, req.UserID, req.ChannelID)
 	if err != nil {
 		return domain.ReadChannelHistoryResult{}, err
 	}
 	maxID := req.MaxID
 	if maxID <= 0 || maxID > channel.TopMessageID {
 		maxID = channel.TopMessageID
+	}
+	if readOnly {
+		return domain.ReadChannelHistoryResult{
+			ChannelID: req.ChannelID,
+			MaxID:     maxID,
+			ReadOnly:  true,
+			Pts:       channel.Pts,
+			Forum:     channel.Forum,
+		}, nil
 	}
 	previous, unreadMark, err := s.channelReadHistoryState(ctx, req.ChannelID, req.UserID)
 	if err != nil {

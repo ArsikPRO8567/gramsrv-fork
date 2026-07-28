@@ -75,6 +75,15 @@ func TestPublicChannelAndMegagroupPreviewPostgres(t *testing.T) {
 			if !found || history.Self.Status != domain.ChannelMemberLeft {
 				t.Fatalf("preview history = %+v self=%+v", history.Messages, history.Self)
 			}
+			read, err := channels.ReadChannelHistory(ctx, domain.ReadChannelHistoryRequest{
+				UserID: viewer.ID, ChannelID: public.ID, MaxID: sent.Message.ID, Date: 1700009411 + i,
+			})
+			if err != nil {
+				t.Fatalf("read public preview history: %v", err)
+			}
+			if !read.ReadOnly || read.Changed || read.MaxID != sent.Message.ID {
+				t.Fatalf("public preview read = %+v, want read-only no-op at %d", read, sent.Message.ID)
+			}
 			audience, err := channels.FilterChannelMessageAudienceIDs(ctx, public.ID, []int64{viewer.ID, owner.ID, viewer.ID})
 			if err != nil {
 				t.Fatalf("filter public message audience: %v", err)
@@ -111,14 +120,16 @@ func TestPublicChannelAndMegagroupPreviewPostgres(t *testing.T) {
 				previewDialog.Pts != sent.Event.Pts {
 				t.Fatalf("public preview bootstrap dialog = %+v", previewDialog)
 			}
-			var memberExists bool
+			var memberExists, dialogExists bool
 			if err := pool.QueryRow(ctx, `SELECT EXISTS (
 SELECT 1 FROM channel_members WHERE channel_id = $1 AND user_id = $2
-)`, public.ID, viewer.ID).Scan(&memberExists); err != nil {
+), EXISTS (
+SELECT 1 FROM channel_dialogs WHERE channel_id = $1 AND user_id = $2
+)`, public.ID, viewer.ID).Scan(&memberExists, &dialogExists); err != nil {
 				t.Fatalf("check preview member row: %v", err)
 			}
-			if memberExists {
-				t.Fatal("public preview persisted a channel member row")
+			if memberExists || dialogExists {
+				t.Fatalf("public preview persisted member/dialog = %v/%v", memberExists, dialogExists)
 			}
 			if _, err := channels.JoinChannel(ctx, public.ID, viewer.ID, 1700009420+i); err != nil {
 				t.Fatalf("join public peer: %v", err)

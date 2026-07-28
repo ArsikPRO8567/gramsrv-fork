@@ -3,6 +3,7 @@ package rpc
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/iamxvbaba/td/bin"
 	"github.com/iamxvbaba/td/clock"
@@ -107,6 +108,107 @@ func TestMessagesToggleSuggestedPostApprovalRegisteredAndProjectsLifecycle(t *te
 	// the caller but is never fanned out again.
 	if len(got.Updates) != 3 {
 		t.Fatalf("layer 227 duplicate updates=%d, want 3", len(got.Updates))
+	}
+}
+
+func TestMessagesToggleSuggestedPostApprovalAcceptsDelayedAbsoluteDate(t *testing.T) {
+	ctx := context.Background()
+	users := memory.NewUserStore()
+	owner, err := users.Create(ctx, domain.User{AccessHash: 111, Phone: "15551110111", FirstName: "Owner"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	subscriber, err := users.Create(ctx, domain.User{AccessHash: 112, Phone: "15551110112", FirstName: "Subscriber"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	channelsStore := memory.NewChannelStore()
+	channels := appchannels.NewService(channelsStore)
+	created, err := channels.CreateChannel(ctx, owner.ID, domain.CreateChannelRequest{
+		Title: "Delayed Suggested", Broadcast: true, Date: 1_700_030_000,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	enabled, err := channelsStore.SetPaidMessagesPrice(ctx, owner.ID, created.Channel.ID, 0, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mono, err := channelsStore.GetChannelByID(ctx, enabled.Channel.LinkedMonoforumID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	saved := domain.Peer{Type: domain.PeerTypeUser, ID: subscriber.ID}
+	suggestion, err := channels.SendMonoforumMessage(ctx, domain.SendMonoforumMessageRequest{
+		MonoforumID: mono.ID, SenderUserID: subscriber.ID, SavedPeer: saved,
+		RandomID: 101, Message: "delayed RPC suggestion", SuggestedPost: &domain.SuggestedPost{}, Date: 1_700_030_010,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	const now = 1_700_030_100
+	req := &tg.MessagesToggleSuggestedPostApprovalRequest{
+		Peer:  &tg.InputPeerChannel{ChannelID: mono.ID, AccessHash: mono.AccessHash},
+		MsgID: suggestion.Message.ID,
+	}
+	req.SetScheduleDate(now + 2*60)
+	dispatch := func(t *testing.T, router *Router, layer int) *tg.Updates {
+		t.Helper()
+		var raw bin.Buffer
+		if err := req.Encode(&raw); err != nil {
+			t.Fatal(err)
+		}
+		response, err := router.Dispatch(WithLayer(WithUserID(ctx, owner.ID), layer), [8]byte{}, 0, &raw)
+		if err != nil {
+			t.Fatalf("dispatch delayed approval at Layer %d: %v", layer, err)
+		}
+		updates, ok := response.(*tg.Updates)
+		if !ok {
+			t.Fatalf("delayed approval response=%T", response)
+		}
+		return updates
+	}
+	first := dispatch(t, New(Config{}, Deps{
+		Users: appusers.NewService(users), Channels: channels,
+	}, zaptest.NewLogger(t), fixedClock{now: time.Unix(now, 0)}), 228)
+	if len(first.Updates) != 2 {
+		t.Fatalf("near-future approval updates=%d, want edit + approval service", len(first.Updates))
+	}
+	replay := dispatch(t, New(Config{}, Deps{
+		Users: appusers.NewService(users), Channels: channels,
+	}, zaptest.NewLogger(t), fixedClock{now: time.Unix(now+10*60, 0)}), 227)
+	if len(replay.Updates) != 2 {
+		t.Fatalf("late duplicate updates=%d, want persisted edit + approval service", len(replay.Updates))
+	}
+
+	due, err := channels.SendMonoforumMessage(ctx, domain.SendMonoforumMessageRequest{
+		MonoforumID: mono.ID, SenderUserID: subscriber.ID, SavedPeer: saved,
+		RandomID: 102, Message: "due RPC suggestion", SuggestedPost: &domain.SuggestedPost{}, Date: now + 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	dueReq := &tg.MessagesToggleSuggestedPostApprovalRequest{
+		Peer:  &tg.InputPeerChannel{ChannelID: mono.ID, AccessHash: mono.AccessHash},
+		MsgID: due.Message.ID,
+	}
+	dueReq.SetScheduleDate(now - 1)
+	var dueRaw bin.Buffer
+	if err := dueReq.Encode(&dueRaw); err != nil {
+		t.Fatal(err)
+	}
+	response, err := New(Config{}, Deps{
+		Users: appusers.NewService(users), Channels: channels,
+	}, zaptest.NewLogger(t), fixedClock{now: time.Unix(now+2, 0)}).Dispatch(
+		WithLayer(WithUserID(ctx, owner.ID), 228), [8]byte{}, 0, &dueRaw,
+	)
+	if err != nil {
+		t.Fatalf("dispatch already-due approval: %v", err)
+	}
+	dueUpdates, ok := response.(*tg.Updates)
+	if !ok || len(dueUpdates.Updates) != 3 {
+		t.Fatalf("already-due response=%T %#v, want edit + approval + published", response, response)
 	}
 }
 

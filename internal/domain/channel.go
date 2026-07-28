@@ -1613,6 +1613,23 @@ const (
 	SuggestedPostStateRefunded   SuggestedPostLifecycleState = "refunded"
 )
 
+const MaxSuggestedPostScheduleDelay = 31 * 24 * 60 * 60
+
+// EffectiveSuggestedPostPublishDate validates an approval schedule against the
+// server's bounded future window and converts a missing or already-due absolute
+// date into an immediate publication at now. Client date pickers can legally
+// submit after their selected time has crossed a relative minimum; that delay
+// must not turn a valid approval into an error or persist a past accepted date.
+func EffectiveSuggestedPostPublishDate(scheduleDate, now int) (int, error) {
+	if now <= 0 || scheduleDate > now+MaxSuggestedPostScheduleDelay {
+		return 0, ErrSuggestedPostInvalid
+	}
+	if scheduleDate <= now {
+		return now, nil
+	}
+	return scheduleDate, nil
+}
+
 // ToggleSuggestedPostApprovalResult contains every durable update produced by
 // one command or lifecycle transition.  OriginalEvent is an edit in the
 // monoforum; ServiceEvent is the approval/success/refund service message; an
@@ -2332,7 +2349,11 @@ type ReadChannelHistoryResult struct {
 	MaxID            int
 	StillUnreadCount int
 	Changed          bool
-	Pts              int
+	// ReadOnly marks a synthetic viewer (public preview, linked guest or
+	// monoforum shell). The read is acknowledged without creating member,
+	// dialog, watermark, receipt or update state.
+	ReadOnly bool
+	Pts      int
 	// Forum 标记该频道是否为话题群。RPC 层据此在频道级 readHistory 后顺带推进
 	// General(topic 1) 的话题级已读水位（General 消息即频道根历史，被频道级已读覆盖）。
 	Forum         bool
