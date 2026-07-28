@@ -50,6 +50,192 @@ func decodeRichBlocks(data []byte) ([]tg.PageBlockClass, error) {
 	return out, nil
 }
 
+// richMessageMediaRefs is the media closure referenced by one PageBlock graph.
+// IDs retain first-reference order so every projection is deterministic.
+type richMessageMediaRefs struct {
+	photoIDs    []int64
+	documentIDs []int64
+	photos      map[int64]struct{}
+	documents   map[int64]struct{}
+}
+
+func collectRichMessageMediaRefs(blocks []tg.PageBlockClass) (richMessageMediaRefs, error) {
+	refs := richMessageMediaRefs{
+		photos:    make(map[int64]struct{}),
+		documents: make(map[int64]struct{}),
+	}
+	if err := refs.collectBlocks(blocks); err != nil {
+		return richMessageMediaRefs{}, err
+	}
+	return refs, nil
+}
+
+func (r *richMessageMediaRefs) addPhoto(id int64, required bool) error {
+	if id == 0 {
+		if required {
+			return photoInvalidErr()
+		}
+		return nil
+	}
+	if _, ok := r.photos[id]; ok {
+		return nil
+	}
+	r.photos[id] = struct{}{}
+	r.photoIDs = append(r.photoIDs, id)
+	return nil
+}
+
+func (r *richMessageMediaRefs) addDocument(id int64) error {
+	if id == 0 {
+		return mediaInvalidErr()
+	}
+	if _, ok := r.documents[id]; ok {
+		return nil
+	}
+	r.documents[id] = struct{}{}
+	r.documentIDs = append(r.documentIDs, id)
+	return nil
+}
+
+func (r *richMessageMediaRefs) collectBlocks(blocks []tg.PageBlockClass) error {
+	for _, block := range blocks {
+		switch value := block.(type) {
+		case *tg.PageBlockPhoto:
+			if err := r.addPhoto(value.PhotoID, true); err != nil {
+				return err
+			}
+		case *tg.PageBlockVideo:
+			if err := r.addDocument(value.VideoID); err != nil {
+				return err
+			}
+		case *tg.PageBlockAudio:
+			if err := r.addDocument(value.AudioID); err != nil {
+				return err
+			}
+		case *tg.PageBlockEmbed:
+			if id, ok := value.GetPosterPhotoID(); ok {
+				if err := r.addPhoto(id, false); err != nil {
+					return err
+				}
+			}
+		case *tg.PageBlockEmbedPost:
+			if err := r.addPhoto(value.AuthorPhotoID, false); err != nil {
+				return err
+			}
+			if err := r.collectBlocks(value.Blocks); err != nil {
+				return err
+			}
+		case *tg.PageBlockRelatedArticles:
+			for i := range value.Articles {
+				if id, ok := value.Articles[i].GetPhotoID(); ok {
+					if err := r.addPhoto(id, false); err != nil {
+						return err
+					}
+				}
+			}
+		case *tg.PageBlockList:
+			for _, item := range value.Items {
+				if item, ok := item.(*tg.PageListItemBlocks); ok {
+					if err := r.collectBlocks(item.Blocks); err != nil {
+						return err
+					}
+				}
+			}
+		case *tg.PageBlockOrderedList:
+			for _, item := range value.Items {
+				if item, ok := item.(*tg.PageListOrderedItemBlocks); ok {
+					if err := r.collectBlocks(item.Blocks); err != nil {
+						return err
+					}
+				}
+			}
+		case *tg.PageBlockCover:
+			if err := r.collectBlocks([]tg.PageBlockClass{value.Cover}); err != nil {
+				return err
+			}
+		case *tg.PageBlockCollage:
+			if err := r.collectBlocks(value.Items); err != nil {
+				return err
+			}
+		case *tg.PageBlockSlideshow:
+			if err := r.collectBlocks(value.Items); err != nil {
+				return err
+			}
+		case *tg.PageBlockDetails:
+			if err := r.collectBlocks(value.Blocks); err != nil {
+				return err
+			}
+		case *tg.PageBlockBlockquoteBlocks:
+			if err := r.collectBlocks(value.Blocks); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+type richMessagePhotoBatchProvider interface {
+	GetPhotos(context.Context, []int64) ([]domain.Photo, error)
+}
+
+func (r *Router) resolveRichMessagePhotos(ctx context.Context, ids []int64) ([]domain.Photo, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	resolved := make(map[int64]domain.Photo, len(ids))
+	if batch, ok := r.deps.Files.(richMessagePhotoBatchProvider); ok {
+		photos, err := batch.GetPhotos(ctx, ids)
+		if err != nil {
+			return nil, internalErr()
+		}
+		for _, photo := range photos {
+			resolved[photo.ID] = photo
+		}
+	} else {
+		for _, id := range ids {
+			photo, found, err := r.deps.Files.GetPhoto(ctx, id)
+			if err != nil {
+				return nil, internalErr()
+			}
+			if found {
+				resolved[id] = photo
+			}
+		}
+	}
+	out := make([]domain.Photo, 0, len(ids))
+	for _, id := range ids {
+		photo, ok := resolved[id]
+		if !ok || photo.ID != id || len(photo.Sizes) == 0 {
+			return nil, photoInvalidErr()
+		}
+		out = append(out, photo)
+	}
+	return out, nil
+}
+
+func (r *Router) resolveRichMessageDocuments(ctx context.Context, ids []int64) ([]domain.Document, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	documents, err := r.deps.Files.GetDocuments(ctx, ids)
+	if err != nil {
+		return nil, internalErr()
+	}
+	resolved := make(map[int64]domain.Document, len(documents))
+	for _, document := range documents {
+		resolved[document.ID] = document
+	}
+	out := make([]domain.Document, 0, len(ids))
+	for _, id := range ids {
+		document, ok := resolved[id]
+		if !ok || document.ID != id {
+			return nil, mediaInvalidErr()
+		}
+		out = append(out, document)
+	}
+	return out, nil
+}
+
 func normalizeRichBlocksForClients(blocks []tg.PageBlockClass) {
 	for _, block := range blocks {
 		normalizeRichBlockForClients(block)
@@ -172,7 +358,21 @@ func (r *Router) domainRichMessageFromInput(ctx context.Context, input tg.InputR
 	if err := validateRichMessageBlocks(in.Blocks); err != nil {
 		return nil, err
 	}
-	if (len(in.Photos) > 0 || len(in.Documents) > 0) && r.deps.Files == nil {
+	for _, photo := range in.Photos {
+		if _, ok := inputPhotoID(photo); !ok {
+			return nil, photoInvalidErr()
+		}
+	}
+	for _, document := range in.Documents {
+		if _, ok := inputDocumentID(document); !ok {
+			return nil, mediaInvalidErr()
+		}
+	}
+	refs, err := collectRichMessageMediaRefs(in.Blocks)
+	if err != nil {
+		return nil, err
+	}
+	if (len(refs.photoIDs) > 0 || len(refs.documentIDs) > 0) && r.deps.Files == nil {
 		return nil, notImplementedErr()
 	}
 	normalizeRichBlocksForClients(in.Blocks)
@@ -191,33 +391,13 @@ func (r *Router) domainRichMessageFromInput(ctx context.Context, input tg.InputR
 	if projectionErr == nil {
 		rich.BotAPIProjection = projection
 	}
-	for _, p := range in.Photos {
-		id, ok := inputPhotoID(p)
-		if !ok {
-			return nil, photoInvalidErr()
-		}
-		photo, found, err := r.deps.Files.GetPhoto(ctx, id)
-		if err != nil {
-			return nil, internalErr()
-		}
-		if !found {
-			return nil, photoInvalidErr()
-		}
-		rich.Photos = append(rich.Photos, photo)
+	rich.Photos, err = r.resolveRichMessagePhotos(ctx, refs.photoIDs)
+	if err != nil {
+		return nil, err
 	}
-	for _, d := range in.Documents {
-		id, ok := inputDocumentID(d)
-		if !ok {
-			return nil, mediaInvalidErr()
-		}
-		doc, found, err := r.deps.Files.GetDocument(ctx, id)
-		if err != nil {
-			return nil, internalErr()
-		}
-		if !found {
-			return nil, mediaInvalidErr()
-		}
-		rich.Documents = append(rich.Documents, doc)
+	rich.Documents, err = r.resolveRichMessageDocuments(ctx, refs.documentIDs)
+	if err != nil {
+		return nil, err
 	}
 	if rich.IsZero() {
 		return nil, nil

@@ -128,8 +128,21 @@ func collectRichMessageBlockMetrics(blocks []tg.PageBlockClass, depth int, metri
 			collectRichMessageBlockMetrics(value.Items, depth+1, metrics)
 		case *tg.PageBlockCover:
 			collectRichMessageBlockMetrics([]tg.PageBlockClass{value.Cover}, depth+1, metrics)
+		case *tg.PageBlockEmbed:
+			if id, ok := value.GetPosterPhotoID(); ok && id != 0 {
+				metrics.media++
+			}
 		case *tg.PageBlockEmbedPost:
+			if value.AuthorPhotoID != 0 {
+				metrics.media++
+			}
 			collectRichMessageBlockMetrics(value.Blocks, depth+1, metrics)
+		case *tg.PageBlockRelatedArticles:
+			for i := range value.Articles {
+				if id, ok := value.Articles[i].GetPhotoID(); ok && id != 0 {
+					metrics.media++
+				}
+			}
 		case *tg.PageBlockPhoto, *tg.PageBlockVideo, *tg.PageBlockAudio:
 			metrics.media++
 		}
