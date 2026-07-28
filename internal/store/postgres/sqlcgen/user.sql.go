@@ -364,7 +364,18 @@ func (q *Queries) GetUsersByPhones(ctx context.Context, phones []string) ([]User
 }
 
 const searchUsers = `-- name: SearchUsers :many
-WITH matched AS (
+WITH username_matches AS (
+  SELECT
+    peer_id,
+    bool_or(username_lower = $2::text) AS exact
+  FROM peer_usernames
+  WHERE peer_type = 'user'
+    AND active
+    AND collectible_id IS NOT NULL
+    AND username_lower LIKE $3::text || '%' ESCAPE '\'
+  GROUP BY peer_id
+),
+matched AS (
   SELECT
     u.id,
     u.access_hash,
@@ -394,27 +405,29 @@ WITH matched AS (
     (c.contact_user_id IS NOT NULL)::boolean AS contact,
     COALESCE(c.mutual, false)::boolean AS mutual,
     CASE
-      WHEN $2::text <> '' AND u.phone = $2::text THEN 0
-      WHEN lower(u.username) = $3::text THEN 1
-      WHEN lower(COALESCE(NULLIF(c.contact_first_name, ''), u.first_name)) = $3::text THEN 2
-      WHEN lower(u.first_name) = $3::text THEN 3
+      WHEN $4::text <> '' AND u.phone = $4::text THEN 0
+      WHEN COALESCE(um.exact, false) OR lower(u.username) = $2::text THEN 1
+      WHEN lower(COALESCE(NULLIF(c.contact_first_name, ''), u.first_name)) = $2::text THEN 2
+      WHEN lower(u.first_name) = $2::text THEN 3
       WHEN c.contact_user_id IS NOT NULL THEN 4
       ELSE 5
     END AS rank
   FROM users u
-  LEFT JOIN contacts c ON c.user_id = $4::bigint AND c.contact_user_id = u.id
-  WHERE u.id <> $4::bigint
+  LEFT JOIN contacts c ON c.user_id = $5::bigint AND c.contact_user_id = u.id
+  LEFT JOIN username_matches um ON um.peer_id = u.id
+  WHERE u.id <> $5::bigint
     AND u.deleted_at IS NULL
-    AND $3::text <> ''
+    AND $2::text <> ''
     AND (
-      ($2::text <> '' AND u.phone LIKE $2::text || '%')
-      OR lower(u.username) LIKE $5::text || '%' ESCAPE '\'
-      OR lower(u.first_name) LIKE '%' || $5::text || '%' ESCAPE '\'
-      OR lower(u.last_name) LIKE '%' || $5::text || '%' ESCAPE '\'
-      OR lower(trim(u.first_name || ' ' || u.last_name)) LIKE '%' || $5::text || '%' ESCAPE '\'
-      OR lower(c.contact_first_name) LIKE '%' || $5::text || '%' ESCAPE '\'
-      OR lower(c.contact_last_name) LIKE '%' || $5::text || '%' ESCAPE '\'
-      OR lower(trim(c.contact_first_name || ' ' || c.contact_last_name)) LIKE '%' || $5::text || '%' ESCAPE '\'
+      ($4::text <> '' AND u.phone LIKE $4::text || '%')
+      OR um.peer_id IS NOT NULL
+      OR lower(u.username) LIKE $3::text || '%' ESCAPE '\'
+      OR lower(u.first_name) LIKE '%' || $3::text || '%' ESCAPE '\'
+      OR lower(u.last_name) LIKE '%' || $3::text || '%' ESCAPE '\'
+      OR lower(trim(u.first_name || ' ' || u.last_name)) LIKE '%' || $3::text || '%' ESCAPE '\'
+      OR lower(c.contact_first_name) LIKE '%' || $3::text || '%' ESCAPE '\'
+      OR lower(c.contact_last_name) LIKE '%' || $3::text || '%' ESCAPE '\'
+      OR lower(trim(c.contact_first_name || ' ' || c.contact_last_name)) LIKE '%' || $3::text || '%' ESCAPE '\'
     )
 )
 SELECT
@@ -452,10 +465,10 @@ LIMIT $1
 
 type SearchUsersParams struct {
 	LimitCount    int32
-	PhoneQuery    string
 	QueryLower    string
-	CurrentUserID int64
 	QueryLike     string
+	PhoneQuery    string
+	CurrentUserID int64
 }
 
 type SearchUsersRow struct {
@@ -491,10 +504,10 @@ type SearchUsersRow struct {
 func (q *Queries) SearchUsers(ctx context.Context, arg SearchUsersParams) ([]SearchUsersRow, error) {
 	rows, err := q.db.Query(ctx, searchUsers,
 		arg.LimitCount,
-		arg.PhoneQuery,
 		arg.QueryLower,
-		arg.CurrentUserID,
 		arg.QueryLike,
+		arg.PhoneQuery,
+		arg.CurrentUserID,
 	)
 	if err != nil {
 		return nil, err

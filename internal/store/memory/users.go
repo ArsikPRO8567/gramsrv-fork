@@ -11,9 +11,10 @@ import (
 
 // UserStore 是 store.UserStore 的内存实现。ID 与 PG identity 使用同一业务起点。
 type UserStore struct {
-	mu     sync.RWMutex
-	byID   map[int64]domain.User
-	nextID int64
+	mu               sync.RWMutex
+	byID             map[int64]domain.User
+	nextID           int64
+	usernameRegistry *CollectibleUsernameStore
 }
 
 // NewUserStore 创建内存 UserStore。内置系统账号（777000 / BotFather / Stickers / ChatBot）
@@ -26,6 +27,14 @@ func NewUserStore() *UserStore {
 		}
 	}
 	return s
+}
+
+// AttachUsernameRegistry gives the memory backend the same global username
+// index the PostgreSQL stores share through peer_usernames.
+func (s *UserStore) AttachUsernameRegistry(registry *CollectibleUsernameStore) {
+	s.mu.Lock()
+	s.usernameRegistry = registry
+	s.mu.Unlock()
 }
 
 func (s *UserStore) ByID(_ context.Context, id int64) (domain.User, bool, error) {
@@ -104,16 +113,23 @@ func (s *UserStore) ByPhones(_ context.Context, phones []string) ([]domain.User,
 	return out, nil
 }
 
-func (s *UserStore) ByUsername(_ context.Context, username string) (domain.User, bool, error) {
+func (s *UserStore) ByUsername(ctx context.Context, username string) (domain.User, bool, error) {
 	username = strings.ToLower(strings.TrimSpace(strings.TrimPrefix(username, "@")))
 	if username == "" {
 		return domain.User{}, false, nil
 	}
 	s.mu.RLock()
-	defer s.mu.RUnlock()
+	registry := s.usernameRegistry
 	for _, u := range s.byID {
 		if !u.Deleted && strings.ToLower(u.Username) == username {
+			s.mu.RUnlock()
 			return u, true, nil
+		}
+	}
+	s.mu.RUnlock()
+	if registry != nil {
+		if peer, ok := registry.activeUsernamePeer(username, domain.PeerTypeUser); ok {
+			return s.ByID(ctx, peer.ID)
 		}
 	}
 	return domain.User{}, false, nil
@@ -144,13 +160,21 @@ func (s *UserStore) Search(_ context.Context, currentUserID int64, query, phoneQ
 		return domain.UserSearchResult{}, nil
 	}
 	s.mu.RLock()
+	registry := s.usernameRegistry
+	s.mu.RUnlock()
+	var usernameMatches map[int64]int
+	if registry != nil {
+		usernameMatches = registry.activeUsernameMatches(query, domain.PeerTypeUser)
+	}
+	s.mu.RLock()
 	defer s.mu.RUnlock()
 	users := make([]domain.User, 0)
 	for _, u := range s.byID {
 		if u.ID == currentUserID || u.Deleted {
 			continue
 		}
-		if userMatchesSearch(u, query, phoneQuery) {
+		_, usernameMatch := usernameMatches[u.ID]
+		if usernameMatch || userMatchesSearch(u, query, phoneQuery) {
 			users = append(users, u)
 		}
 	}
@@ -163,7 +187,7 @@ func (s *UserStore) Search(_ context.Context, currentUserID int64, query, phoneQ
 	return domain.UserSearchResult{Results: users}, nil
 }
 
-func (s *UserStore) UpdateUsername(_ context.Context, userID int64, username string) (domain.User, error) {
+func (s *UserStore) UpdateUsername(ctx context.Context, userID int64, username string) (domain.User, error) {
 	username = strings.TrimSpace(strings.TrimPrefix(username, "@"))
 	usernameLower := strings.ToLower(username)
 	s.mu.Lock()
@@ -177,6 +201,11 @@ func (s *UserStore) UpdateUsername(_ context.Context, userID int64, username str
 			if id != userID && strings.ToLower(existing.Username) == usernameLower {
 				return domain.User{}, domain.ErrUsernameOccupied
 			}
+		}
+	}
+	if s.usernameRegistry != nil {
+		if _, err := s.usernameRegistry.SetEditableUsername(ctx, domain.Peer{Type: domain.PeerTypeUser, ID: userID}, username); err != nil {
+			return domain.User{}, err
 		}
 	}
 	u.Username = username

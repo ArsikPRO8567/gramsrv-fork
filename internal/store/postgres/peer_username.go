@@ -69,6 +69,39 @@ func peerUsernameAvailable(ctx context.Context, db sqlcgen.DBTX, usernameLower, 
 	return owner.matches(peerType, peerID), nil
 }
 
+// activeCollectibleUsernamePeerIDs returns the requested peers that own at
+// least one active collectible username. Editable registry rows are excluded:
+// their scalar users.username/channels.username value is the cross-check that
+// prevents a stale registry row from making a private peer public.
+func activeCollectibleUsernamePeerIDs(ctx context.Context, db sqlcgen.DBTX, peerType string, peerIDs []int64) (map[int64]struct{}, error) {
+	out := make(map[int64]struct{})
+	if len(peerIDs) == 0 {
+		return out, nil
+	}
+	rows, err := db.Query(ctx, `
+SELECT DISTINCT peer_id
+FROM peer_usernames
+WHERE peer_type = $1
+  AND active
+  AND collectible_id IS NOT NULL
+  AND peer_id = ANY($2::bigint[])`, peerType, peerIDs)
+	if err != nil {
+		return nil, fmt.Errorf("list peers with active usernames: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var peerID int64
+		if err := rows.Scan(&peerID); err != nil {
+			return nil, fmt.Errorf("scan peer with active username: %w", err)
+		}
+		out[peerID] = struct{}{}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list peers with active usernames: %w", err)
+	}
+	return out, nil
+}
+
 // replacePeerUsernameTx rewrites the peer's editable username slot. username is
 // the display form (original case) and usernameLower its registry key; an empty
 // pair clears the slot.

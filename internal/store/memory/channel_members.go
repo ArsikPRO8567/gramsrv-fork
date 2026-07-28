@@ -902,7 +902,7 @@ func (s *ChannelStore) FilterChannelMessageAudienceIDs(_ context.Context, channe
 	if !ok || channel.Deleted {
 		return nil, nil
 	}
-	public := publicPreviewableChannel(channel)
+	public := s.publicPreviewableChannelLocked(channel)
 	members := s.members[channelID]
 	out := make([]int64, 0, len(userIDs))
 	seen := make(map[int64]struct{}, len(userIDs))

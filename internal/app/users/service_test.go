@@ -45,6 +45,34 @@ func TestServiceUsernameLifecycle(t *testing.T) {
 	if err != nil || !found || resolved.ID != owner.ID {
 		t.Fatalf("ResolveUsername = user %+v found %v err %v, want owner", resolved, found, err)
 	}
+	registry := memory.NewCollectibleUsernameStore()
+	store.AttachUsernameRegistry(registry)
+	peer := domain.Peer{Type: domain.PeerTypeUser, ID: owner.ID}
+	if _, err := registry.SetEditableUsername(ctx, peer, updated.Username); err != nil {
+		t.Fatalf("seed editable username registry: %v", err)
+	}
+	if _, created, err := registry.MintCollectibleUsername(ctx, domain.MintCollectibleUsernameRequest{
+		Username: "nft4",
+		Owner:    peer,
+		Currency: domain.CollectibleCurrencyStars,
+		Amount:   1,
+		Actor:    "test",
+	}); err != nil || !created {
+		t.Fatalf("mint four-character collectible: created=%v err=%v", created, err)
+	}
+	resolved, found, err = svc.ResolveUsername(ctx, other.ID, "@NFT4")
+	if err != nil || !found || resolved.ID != owner.ID {
+		t.Fatalf("ResolveUsername collectible = user %+v found %v err %v, want owner", resolved, found, err)
+	}
+	if _, err := svc.UpdateUsername(ctx, owner.ID, "nft4"); !errors.Is(err, domain.ErrUsernameInvalid) {
+		t.Fatalf("four-character editable username err = %v, want username invalid", err)
+	}
+	if changed, err := registry.SetUsernameActive(ctx, peer, "nft4", false); err != nil || !changed {
+		t.Fatalf("deactivate collectible: changed=%v err=%v", changed, err)
+	}
+	if _, found, err := svc.ResolveUsername(ctx, other.ID, "nft4"); err != nil || found {
+		t.Fatalf("inactive collectible found=%v err=%v, want hidden", found, err)
+	}
 	if _, err := svc.UpdateUsername(ctx, owner.ID, "TAKEN_NAME"); !errors.Is(err, domain.ErrUsernameOccupied) {
 		t.Fatalf("UpdateUsername duplicate err = %v, want username occupied", err)
 	}

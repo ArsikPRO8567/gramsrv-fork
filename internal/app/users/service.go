@@ -577,7 +577,11 @@ func (s *Service) ResolveUsername(ctx context.Context, currentUserID int64, user
 		return domain.User{}, false, err
 	}
 	username = normalizeUsername(username)
-	if !validUsername(username) {
+	// Resolution covers both the editable username slot (5..32) and
+	// Fragment-style collectible usernames (4..32). Keep the stricter
+	// validUsername check on create/update paths; only lookup accepts the
+	// collectible lower bound.
+	if !domain.ValidCollectibleUsername(username) {
 		return domain.User{}, false, domain.ErrUsernameInvalid
 	}
 	u, found, err := s.users.ByUsername(ctx, username)

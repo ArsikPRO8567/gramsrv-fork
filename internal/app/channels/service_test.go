@@ -2904,7 +2904,10 @@ func TestListSendAsChannelsFiltersPostMessageRights(t *testing.T) {
 
 func TestPublicChannelSearchAndResolveUsername(t *testing.T) {
 	ctx := context.Background()
-	service := NewService(memory.NewChannelStore())
+	channelStore := memory.NewChannelStore()
+	registry := memory.NewCollectibleUsernameStore()
+	channelStore.AttachUsernameRegistry(registry)
+	service := NewService(channelStore)
 	created, err := service.CreateMegagroupFromCreateChat(ctx, 1001, domain.CreateChannelRequest{
 		Title:         "CU Public Lab",
 		MemberUserIDs: []int64{1002},
@@ -2944,6 +2947,53 @@ func TestPublicChannelSearchAndResolveUsername(t *testing.T) {
 	resolved, found, err := service.ResolvePublicUsername(ctx, 1003, "@CU_PUBLIC_LAB")
 	if err != nil || !found || resolved.ID != public.ID {
 		t.Fatalf("ResolvePublicUsername = %+v found %v err %v, want public channel", resolved, found, err)
+	}
+	peer := domain.Peer{Type: domain.PeerTypeChannel, ID: public.ID}
+	if _, created, err := registry.MintCollectibleUsername(ctx, domain.MintCollectibleUsernameRequest{
+		Username: "nfc4",
+		Owner:    peer,
+		Currency: domain.CollectibleCurrencyStars,
+		Amount:   1,
+		Actor:    "test",
+	}); err != nil || !created {
+		t.Fatalf("mint channel collectible: created=%v err=%v", created, err)
+	}
+	resolved, found, err = service.ResolvePublicUsername(ctx, 1003, "@NFC4")
+	if err != nil || !found || resolved.ID != public.ID {
+		t.Fatalf("ResolvePublicUsername collectible = %+v found %v err %v, want public channel", resolved, found, err)
+	}
+	collectibleSearch, err := service.SearchPublicChannels(ctx, 1003, "nfc", 10)
+	if err != nil || len(collectibleSearch.Results) != 1 || collectibleSearch.Results[0].ID != public.ID {
+		t.Fatalf("collectible channel search = %+v err=%v, want public channel", collectibleSearch, err)
+	}
+	if _, err := service.UpdateUsername(ctx, 1001, domain.UpdateChannelUsernameRequest{
+		ChannelID: public.ID,
+		Username:  "",
+	}); err != nil {
+		t.Fatalf("clear editable username: %v", err)
+	}
+	resolved, found, err = service.ResolvePublicUsername(ctx, 1003, "nfc4")
+	if err != nil || !found || resolved.ID != public.ID {
+		t.Fatalf("NFT-only ResolvePublicUsername = %+v found=%v err=%v", resolved, found, err)
+	}
+	if view, err := service.GetChannel(ctx, 1003, public.ID); err != nil || view.Channel.ID != public.ID {
+		t.Fatalf("NFT-only public preview = %+v err=%v", view, err)
+	}
+	if _, err := service.UpdateUsername(ctx, 1001, domain.UpdateChannelUsernameRequest{
+		ChannelID: public.ID,
+		Username:  "cu_public_lab",
+	}); err != nil {
+		t.Fatalf("restore editable username: %v", err)
+	}
+	if changed, err := registry.SetUsernameActive(ctx, peer, "nfc4", false); err != nil || !changed {
+		t.Fatalf("deactivate channel collectible: changed=%v err=%v", changed, err)
+	}
+	if _, found, err := service.ResolvePublicUsername(ctx, 1003, "nfc4"); err != nil || found {
+		t.Fatalf("inactive collectible resolve found=%v err=%v, want hidden", found, err)
+	}
+	hiddenSearch, err := service.SearchPublicChannels(ctx, 1003, "nfc4", 10)
+	if err != nil || len(hiddenSearch.Results) != 0 {
+		t.Fatalf("inactive collectible search = %+v err=%v, want empty", hiddenSearch, err)
 	}
 }
 

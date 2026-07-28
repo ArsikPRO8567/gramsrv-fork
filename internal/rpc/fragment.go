@@ -302,8 +302,16 @@ func applyUsernamesFromRegistry(users []tg.UserClass, chats []tg.ChatClass, byPe
 			continue
 		}
 		if vector := tgUsernamesFromRegistry(list, u.Username); len(vector) > 0 {
-			u.Flags.Unset(3)
-			u.Username = ""
+			// Layer 228 defines username as the main active username, not as a
+			// legacy alternative to usernames. TDesktop seeds its local search
+			// index from this scalar before consuming the complete vector, so
+			// both fields must be projected together.
+			if primary := domain.ActiveUsername(list); primary != "" {
+				u.SetUsername(primary)
+			} else {
+				u.Flags.Unset(3)
+				u.Username = ""
+			}
 			u.SetUsernames(vector)
 		}
 	}
@@ -320,8 +328,12 @@ func applyUsernamesFromRegistry(users []tg.UserClass, chats []tg.ChatClass, byPe
 		// when unset, which is exactly the fallback tgUsernamesFromRegistry wants.
 		scalar, _ := ch.GetUsername()
 		if vector := tgUsernamesFromRegistry(list, scalar); len(vector) > 0 {
-			ch.Flags.Unset(6)
-			ch.Username = ""
+			if primary := domain.ActiveUsername(list); primary != "" {
+				ch.SetUsername(primary)
+			} else {
+				ch.Flags.Unset(6)
+				ch.Username = ""
+			}
 			ch.SetUsernames(vector)
 		}
 	}

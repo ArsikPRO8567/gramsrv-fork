@@ -161,6 +161,61 @@ func (s *CollectibleUsernameStore) PeerUsernamesBatch(_ context.Context, peers [
 	return out, nil
 }
 
+// activeUsernamePeer resolves an active registry name for the memory user and
+// channel stores. Keeping lookup on the same registry that owns toggle/reorder
+// state prevents the test backend from silently falling back to scalar-only
+// behavior.
+func (s *CollectibleUsernameStore) activeUsernamePeer(username string, peerType domain.PeerType) (domain.Peer, bool) {
+	key := strings.ToLower(domain.NormalizeUsername(username))
+	if key == "" {
+		return domain.Peer{}, false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	entry, ok := s.registry[key]
+	if !ok || !entry.row.Active || entry.peer.Type != peerType {
+		return domain.Peer{}, false
+	}
+	return entry.peer, true
+}
+
+// activeUsernameMatches returns the best username rank for each peer: exact
+// matches precede prefix matches. Inactive rows stay occupied in the registry
+// but are deliberately absent from client search.
+func (s *CollectibleUsernameStore) activeUsernameMatches(query string, peerType domain.PeerType) map[int64]int {
+	query = strings.ToLower(domain.NormalizeUsername(query))
+	if query == "" {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make(map[int64]int)
+	for username, entry := range s.registry {
+		if !entry.row.Active || entry.peer.Type != peerType || !strings.HasPrefix(username, query) {
+			continue
+		}
+		rank := 1
+		if username == query {
+			rank = 0
+		}
+		if current, ok := out[entry.peer.ID]; !ok || rank < current {
+			out[entry.peer.ID] = rank
+		}
+	}
+	return out
+}
+
+func (s *CollectibleUsernameStore) peerHasActiveCollectibleUsername(peer domain.Peer) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, entry := range s.registry {
+		if entry.peer == peer && entry.row.Active && !entry.row.Editable {
+			return true
+		}
+	}
+	return false
+}
+
 // SetUsernameActive toggles one collectible row. The domain validator owns the
 // rules: the editable slot is off limits and a peer that holds usernames must
 // keep at least one active.

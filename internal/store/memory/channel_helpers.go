@@ -83,6 +83,13 @@ func (s *ChannelStore) SearchPublicChannels(_ context.Context, viewerUserID int6
 		return domain.PublicChannelSearchResult{}, nil
 	}
 	s.mu.RLock()
+	registry := s.usernameRegistry
+	s.mu.RUnlock()
+	var usernameMatches map[int64]int
+	if registry != nil {
+		usernameMatches = registry.activeUsernameMatches(query, domain.PeerTypeChannel)
+	}
+	s.mu.RLock()
 	defer s.mu.RUnlock()
 
 	type item struct {
@@ -92,6 +99,11 @@ func (s *ChannelStore) SearchPublicChannels(_ context.Context, viewerUserID int6
 	items := make([]item, 0, limit)
 	for channelID, channel := range s.channels {
 		rank, ok := publicChannelSearchRank(channel, query)
+		if usernameRank, matched := usernameMatches[channelID]; matched &&
+			!channel.Deleted && (channel.Broadcast || channel.Megagroup) &&
+			(!ok || usernameRank < rank) {
+			rank, ok = usernameRank, true
+		}
 		if !ok {
 			continue
 		}
@@ -426,7 +438,7 @@ func (s *ChannelStore) channelForViewerLocked(userID, channelID int64) (domain.C
 			return channel, syntheticMonoforumUserMember(channel, userID), true, nil
 		}
 	}
-	if !publicPreviewableChannel(channel) {
+	if !s.publicPreviewableChannelLocked(channel) {
 		return domain.Channel{}, domain.ChannelMember{}, false, domain.ErrChannelPrivate
 	}
 	return channel, publicPreviewMember(channel, userID, existing, found), true, nil
@@ -556,8 +568,7 @@ func recommendableChannel(channel domain.Channel) bool {
 
 func publicSearchableChannel(channel domain.Channel) bool {
 	return !channel.Deleted &&
-		(channel.Broadcast || channel.Megagroup) &&
-		strings.TrimSpace(channel.Username) != ""
+		(channel.Broadcast || channel.Megagroup)
 }
 
 func channelRoleOrder(role domain.ChannelMemberRole) int {

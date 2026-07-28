@@ -139,7 +139,7 @@ func (s *ChannelStore) CheckUsername(_ context.Context, userID, channelID int64,
 	return true, nil
 }
 
-func (s *ChannelStore) UpdateUsername(_ context.Context, req domain.UpdateChannelUsernameRequest) (domain.Channel, error) {
+func (s *ChannelStore) UpdateUsername(ctx context.Context, req domain.UpdateChannelUsernameRequest) (domain.Channel, error) {
 	if req.UserID == 0 || req.ChannelID == 0 {
 		return domain.Channel{}, domain.ErrChannelInvalid
 	}
@@ -166,6 +166,11 @@ func (s *ChannelStore) UpdateUsername(_ context.Context, req domain.UpdateChanne
 			if strings.ToLower(existing.Username) == usernameLower && id != req.ChannelID {
 				return domain.Channel{}, domain.ErrUsernameOccupied
 			}
+		}
+	}
+	if s.usernameRegistry != nil {
+		if _, err := s.usernameRegistry.SetEditableUsername(ctx, domain.Peer{Type: domain.PeerTypeChannel, ID: req.ChannelID}, username); err != nil {
+			return domain.Channel{}, err
 		}
 	}
 	prevUsername := channel.Username
@@ -311,14 +316,25 @@ func (s *ChannelStore) ResolvePublicChannelUsername(_ context.Context, viewerUse
 		return domain.Channel{}, false, nil
 	}
 	s.mu.RLock()
-	defer s.mu.RUnlock()
-
+	registry := s.usernameRegistry
 	for _, channel := range s.channels {
 		if !publicSearchableChannel(channel) {
 			continue
 		}
 		if strings.ToLower(channel.Username) == username {
+			s.mu.RUnlock()
 			return cloneChannel(channel), true, nil
+		}
+	}
+	s.mu.RUnlock()
+	if registry != nil {
+		if peer, ok := registry.activeUsernamePeer(username, domain.PeerTypeChannel); ok {
+			s.mu.RLock()
+			channel, found := s.channels[peer.ID]
+			s.mu.RUnlock()
+			if found && !channel.Deleted && (channel.Broadcast || channel.Megagroup) {
+				return cloneChannel(channel), true, nil
+			}
 		}
 	}
 	return domain.Channel{}, false, nil

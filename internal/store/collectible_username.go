@@ -8,7 +8,8 @@ import (
 
 // UsernameRegistryStore reads a peer's full username list. The list is the
 // projection source for the TL usernames vector, so every caller sees the same
-// order the client will render: editable slot first, then collectibles.
+// stored order the client will render. Reorder may promote a collectible ahead
+// of the editable slot; the first active row is also the Layer 228 main scalar.
 type UsernameRegistryStore interface {
 	// PeerUsernames returns the peer's registry rows in projection order.
 	PeerUsernames(ctx context.Context, peer domain.Peer) ([]domain.Username, error)

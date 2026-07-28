@@ -644,6 +644,46 @@ func TestAcceptContactRequiresExistingContactRequest(t *testing.T) {
 	}
 }
 
+func TestSearchFindsOnlyActiveCollectibleUsernames(t *testing.T) {
+	ctx := context.Background()
+	users := memory.NewUserStore()
+	registry := memory.NewCollectibleUsernameStore()
+	users.AttachUsernameRegistry(registry)
+	viewer, err := users.Create(ctx, domain.User{Phone: "15550000101", FirstName: "Viewer"})
+	if err != nil {
+		t.Fatalf("create viewer: %v", err)
+	}
+	target, err := users.Create(ctx, domain.User{Phone: "15550000102", FirstName: "Unrelated", Username: "target_slot"})
+	if err != nil {
+		t.Fatalf("create target: %v", err)
+	}
+	peer := domain.Peer{Type: domain.PeerTypeUser, ID: target.ID}
+	if _, err := registry.SetEditableUsername(ctx, peer, target.Username); err != nil {
+		t.Fatalf("seed editable username: %v", err)
+	}
+	if _, created, err := registry.MintCollectibleUsername(ctx, domain.MintCollectibleUsernameRequest{
+		Username: "nft4",
+		Owner:    peer,
+		Currency: domain.CollectibleCurrencyStars,
+		Amount:   1,
+		Actor:    "test",
+	}); err != nil || !created {
+		t.Fatalf("mint collectible: created=%v err=%v", created, err)
+	}
+	svc := NewService(memory.NewContactStore(), users)
+	found, err := svc.Search(ctx, viewer.ID, "@NFT4", 10)
+	if err != nil || len(found.Results) != 1 || found.Results[0].ID != target.ID {
+		t.Fatalf("search active collectible = %+v err=%v, want target", found, err)
+	}
+	if changed, err := registry.SetUsernameActive(ctx, peer, "nft4", false); err != nil || !changed {
+		t.Fatalf("deactivate collectible: changed=%v err=%v", changed, err)
+	}
+	hidden, err := svc.Search(ctx, viewer.ID, "nft4", 10)
+	if err != nil || len(hidden.Results) != 0 || len(hidden.MyResults) != 0 {
+		t.Fatalf("search inactive collectible = %+v err=%v, want empty", hidden, err)
+	}
+}
+
 func contactByID(t *testing.T, list domain.ContactList, id int64) domain.Contact {
 	t.Helper()
 	for _, contact := range list.Contacts {

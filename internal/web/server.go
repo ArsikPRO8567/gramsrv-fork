@@ -703,15 +703,20 @@ func (h *handler) resolvePublicPeer(ctx context.Context, username string) (publi
 }
 
 func (h *handler) publicUserPeer(ctx context.Context, requested string, u domain.User) (publicPeer, bool, error) {
-	if u.ID == 0 || !strings.EqualFold(strings.TrimSpace(u.Username), requested) || !validUsernamePath(u.Username) {
+	requested = domain.NormalizeUsername(requested)
+	if u.ID == 0 || !validUsernamePath(requested) {
 		return publicPeer{}, false, fmt.Errorf("user username lookup returned invalid owner for %q", requested)
+	}
+	canonicalUsername := requested
+	if strings.EqualFold(strings.TrimSpace(u.Username), requested) && validUsernamePath(u.Username) {
+		canonicalUsername = strings.TrimSpace(u.Username)
 	}
 	title := strings.TrimSpace(u.FirstName + " " + u.LastName)
 	if title == "" {
-		title = u.Username
+		title = canonicalUsername
 	}
 	if err := validatePublicPeerText(title, u.About); err != nil {
-		return publicPeer{}, false, fmt.Errorf("invalid public user %q: %w", u.Username, err)
+		return publicPeer{}, false, fmt.Errorf("invalid public user %q: %w", requested, err)
 	}
 	about := strings.TrimSpace(u.About)
 	photoKind := domain.ProfilePhotoKindProfile
@@ -733,7 +738,7 @@ func (h *handler) publicUserPeer(ctx context.Context, requested string, u domain
 	}
 	peer := publicPeer{
 		kind:     publicPeerUser,
-		username: u.Username,
+		username: canonicalUsername,
 		title:    title,
 		about:    about,
 		verified: u.Verified,
@@ -756,15 +761,20 @@ func (h *handler) publicUserPeer(ctx context.Context, requested string, u domain
 }
 
 func (h *handler) publicChannelPeer(ctx context.Context, requested string, ch domain.Channel) (publicPeer, bool, error) {
-	if ch.ID == 0 || ch.Deleted || ch.ParticipantsCount < 0 || (!ch.Broadcast && !ch.Megagroup) || !strings.EqualFold(strings.TrimSpace(ch.Username), requested) || !validUsernamePath(ch.Username) {
+	requested = domain.NormalizeUsername(requested)
+	if ch.ID == 0 || ch.Deleted || ch.ParticipantsCount < 0 || (!ch.Broadcast && !ch.Megagroup) || !validUsernamePath(requested) {
 		return publicPeer{}, false, fmt.Errorf("channel username lookup returned invalid owner for %q", requested)
 	}
+	canonicalUsername := requested
+	if strings.EqualFold(strings.TrimSpace(ch.Username), requested) && validUsernamePath(ch.Username) {
+		canonicalUsername = strings.TrimSpace(ch.Username)
+	}
 	if err := validatePublicPeerText(ch.Title, ch.About); err != nil {
-		return publicPeer{}, false, fmt.Errorf("invalid public channel %q: %w", ch.Username, err)
+		return publicPeer{}, false, fmt.Errorf("invalid public channel %q: %w", requested, err)
 	}
 	peer := publicPeer{
 		kind:        publicPeerChannel,
-		username:    ch.Username,
+		username:    canonicalUsername,
 		title:       strings.TrimSpace(ch.Title),
 		about:       strings.TrimSpace(ch.About),
 		verified:    ch.Verified,
@@ -1044,21 +1054,7 @@ func validStarGiftSlugPath(slug string) bool {
 }
 
 func validUsernamePath(username string) bool {
-	if username == "" || len(username) < 5 || len(username) > 32 {
-		return false
-	}
-	for i, r := range username {
-		switch {
-		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z':
-		case r >= '0' && r <= '9', r == '_':
-			if i == 0 {
-				return false
-			}
-		default:
-			return false
-		}
-	}
-	return true
+	return domain.ValidCollectibleUsername(domain.NormalizeUsername(username))
 }
 
 func linkKind(set domain.StickerSet) string {

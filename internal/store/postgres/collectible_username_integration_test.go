@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -88,6 +89,164 @@ func registryRows(t *testing.T, pool *pgxpool.Pool, peer domain.Peer) []domain.U
 		t.Fatalf("list peer usernames: %v", err)
 	}
 	return list
+}
+
+func TestCollectibleUsernameResolveAndSearchUseActiveRegistry(t *testing.T) {
+	pool := testPool(t)
+	ctx := context.Background()
+	seed := time.Now().UnixNano() % 1_000_000
+	viewer := collectibleTestUser(t, pool, 3_100_000_000+seed, "")
+	userPeer := collectibleTestUser(t, pool, 3_200_000_000+seed, "")
+	userEditable := fmt.Sprintf("uedit%d", seed)
+	userCollectible := fmt.Sprintf("unft%d", seed)
+	setEditableUsername(t, pool, userPeer, userEditable)
+	cleanupCollectible(t, pool, lowerASCII(userCollectible))
+
+	registry := NewCollectibleUsernameStore(pool)
+	if _, created, err := registry.MintCollectibleUsername(ctx, mintRequest(userCollectible, userPeer, "")); err != nil || !created {
+		t.Fatalf("mint user collectible: created=%v err=%v", created, err)
+	}
+	users := NewUserStore(pool)
+	resolvedUser, found, err := users.ByUsername(ctx, userCollectible)
+	if err != nil || !found || resolvedUser.ID != userPeer.ID {
+		t.Fatalf("resolve user collectible = %+v found=%v err=%v", resolvedUser, found, err)
+	}
+	userSearch, err := users.Search(ctx, viewer.ID, userCollectible, "", 10)
+	if err != nil || len(userSearch.Results) != 1 || userSearch.Results[0].ID != userPeer.ID {
+		t.Fatalf("search user collectible = %+v err=%v", userSearch, err)
+	}
+	if changed, err := registry.SetUsernameActive(ctx, userPeer, userCollectible, false); err != nil || !changed {
+		t.Fatalf("deactivate user collectible: changed=%v err=%v", changed, err)
+	}
+	if _, found, err := users.ByUsername(ctx, userCollectible); err != nil || found {
+		t.Fatalf("resolve inactive user collectible found=%v err=%v", found, err)
+	}
+	if hidden, err := users.Search(ctx, viewer.ID, userCollectible, "", 10); err != nil || len(hidden.Results)+len(hidden.MyResults) != 0 {
+		t.Fatalf("search inactive user collectible = %+v err=%v", hidden, err)
+	}
+
+	channels := NewChannelStore(pool)
+	created, err := channels.CreateChannel(ctx, domain.CreateChannelRequest{
+		CreatorUserID: userPeer.ID,
+		Title:         "Unrelated collectible channel",
+		Broadcast:     true,
+		Date:          int(time.Now().Unix()),
+	})
+	if err != nil {
+		t.Fatalf("create channel: %v", err)
+	}
+	channelPeer := domain.Peer{Type: domain.PeerTypeChannel, ID: created.Channel.ID}
+	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(), `DELETE FROM channels WHERE id = $1`, channelPeer.ID)
+	})
+	channelEditable := fmt.Sprintf("cedit%d", seed)
+	if _, err := channels.UpdateUsername(ctx, domain.UpdateChannelUsernameRequest{
+		UserID:    userPeer.ID,
+		ChannelID: channelPeer.ID,
+		Username:  channelEditable,
+	}); err != nil {
+		t.Fatalf("set channel editable username: %v", err)
+	}
+	channelCollectible := fmt.Sprintf("cnft%d", seed)
+	cleanupCollectible(t, pool, lowerASCII(channelCollectible))
+	if _, created, err := registry.MintCollectibleUsername(ctx, mintRequest(channelCollectible, channelPeer, "")); err != nil || !created {
+		t.Fatalf("mint channel collectible: created=%v err=%v", created, err)
+	}
+	resolvedChannel, found, err := channels.ResolvePublicChannelUsername(ctx, viewer.ID, channelCollectible)
+	if err != nil || !found || resolvedChannel.ID != channelPeer.ID {
+		t.Fatalf("resolve channel collectible = %+v found=%v err=%v", resolvedChannel, found, err)
+	}
+	channelSearch, err := channels.SearchPublicChannels(ctx, viewer.ID, channelCollectible, 10)
+	if err != nil || len(channelSearch.Results) != 1 || channelSearch.Results[0].ID != channelPeer.ID {
+		t.Fatalf("search channel collectible = %+v err=%v", channelSearch, err)
+	}
+	if _, err := channels.UpdateUsername(ctx, domain.UpdateChannelUsernameRequest{
+		UserID:    userPeer.ID,
+		ChannelID: channelPeer.ID,
+		Username:  "",
+	}); err != nil {
+		t.Fatalf("clear channel editable username: %v", err)
+	}
+	if nftOnly, found, err := channels.ResolvePublicChannelUsername(ctx, viewer.ID, channelCollectible); err != nil || !found || nftOnly.ID != channelPeer.ID {
+		t.Fatalf("resolve NFT-only channel = %+v found=%v err=%v", nftOnly, found, err)
+	}
+	if view, err := channels.GetChannel(ctx, viewer.ID, channelPeer.ID); err != nil || view.Channel.ID != channelPeer.ID {
+		t.Fatalf("preview NFT-only channel = %+v err=%v", view, err)
+	}
+	if _, err := channels.UpdateUsername(ctx, domain.UpdateChannelUsernameRequest{
+		UserID:    userPeer.ID,
+		ChannelID: channelPeer.ID,
+		Username:  channelEditable,
+	}); err != nil {
+		t.Fatalf("restore channel editable username: %v", err)
+	}
+	if changed, err := registry.SetUsernameActive(ctx, channelPeer, channelCollectible, false); err != nil || !changed {
+		t.Fatalf("deactivate channel collectible: changed=%v err=%v", changed, err)
+	}
+	if _, found, err := channels.ResolvePublicChannelUsername(ctx, viewer.ID, channelCollectible); err != nil || found {
+		t.Fatalf("resolve inactive channel collectible found=%v err=%v", found, err)
+	}
+	if hidden, err := channels.SearchPublicChannels(ctx, viewer.ID, channelCollectible, 10); err != nil || len(hidden.Results) != 0 {
+		t.Fatalf("search inactive channel collectible = %+v err=%v", hidden, err)
+	}
+}
+
+func TestCollectibleUsernameSearchPrefixUsesActiveRegistryIndex(t *testing.T) {
+	pool := testPool(t)
+	ctx := context.Background()
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx, `
+WITH names AS (
+  SELECT
+    CASE WHEN n = 1 THEN 'nftplanfixture' ELSE 'otherplanfixture' || n::text END AS username,
+    9100000000 + n AS owner_peer_id
+  FROM generate_series(1, 5000) AS n
+),
+assets AS (
+  INSERT INTO collectible_usernames (
+    username, username_lower, status, owner_peer_type, owner_peer_id,
+    purchase_date, currency, amount,
+    original_owner_peer_type, original_owner_peer_id,
+    created_at, updated_at
+  )
+  SELECT
+    username, username, 'owned', 'user', owner_peer_id,
+    now(), 'XTR', 1,
+    'user', owner_peer_id,
+    now(), now()
+  FROM names
+  RETURNING id, username, username_lower, owner_peer_id
+)
+INSERT INTO peer_usernames (
+  username_lower, username, peer_type, peer_id,
+  active, editable, sort_order, collectible_id
+)
+SELECT
+  username_lower, username, 'user', owner_peer_id,
+  true, false, 0, id
+FROM assets`); err != nil {
+		t.Fatalf("seed username plan fixture: %v", err)
+	}
+	if _, err := tx.Exec(ctx, "ANALYZE peer_usernames"); err != nil {
+		t.Fatalf("analyze username plan fixture: %v", err)
+	}
+	if _, err := tx.Exec(ctx, "SET LOCAL enable_seqscan = off"); err != nil {
+		t.Fatalf("disable seqscan: %v", err)
+	}
+	plan := explainText(t, ctx, tx, `
+SELECT peer_id
+FROM peer_usernames
+WHERE peer_type = 'user'
+  AND active
+  AND collectible_id IS NOT NULL
+  AND username_lower LIKE $1 || '%' ESCAPE '\'`, "nft")
+	if !strings.Contains(plan, "peer_usernames_active_search_idx") {
+		t.Fatalf("active username prefix plan = %s, want peer_usernames_active_search_idx", plan)
+	}
 }
 
 // TestCollectibleUsernameMintIntoVault covers a vault mint: the asset exists, the

@@ -26,8 +26,8 @@ func TestNotifyPeerUsernamesChangedUserPushesPreloadedVector(t *testing.T) {
 	}
 	registry := newFakeUsernameRegistry()
 	registry.byPeer[domain.Peer{Type: domain.PeerTypeUser, ID: targetID}] = []domain.Username{
-		{Username: "owner_slot", Editable: true, Active: true},
-		{Username: "nft", Active: true, CollectibleID: 7},
+		{Username: "owner_slot", Editable: true, Active: true, SortOrder: 1},
+		{Username: "nft4", Active: true, SortOrder: 0, CollectibleID: 7},
 	}
 	sessions := &captureSessions{onlineUserIDs: []int64{targetID, viewerID}}
 	r := New(Config{}, Deps{Users: users, Usernames: registry, Sessions: sessions}, zap.NewNop(), clock.System)
@@ -42,11 +42,11 @@ func TestNotifyPeerUsernamesChangedUserPushesPreloadedVector(t *testing.T) {
 	}
 	updates := sessions.lastUserPush().(*tg.Updates)
 	user := updates.Users[0].(*tg.User)
-	if scalar, ok := user.GetUsername(); ok || scalar != "" {
-		t.Fatalf("pushed scalar username = %q (set %v), want absent", scalar, ok)
+	if scalar, ok := user.GetUsername(); !ok || scalar != "nft4" {
+		t.Fatalf("pushed scalar username = %q (set %v), want primary collectible nft4", scalar, ok)
 	}
 	vector, ok := user.GetUsernames()
-	if !ok || len(vector) != 2 || vector[1].Username != "nft" {
+	if !ok || len(vector) != 2 || vector[0].Username != "nft4" {
 		t.Fatalf("pushed username vector = %+v (set %v)", vector, ok)
 	}
 }
@@ -63,8 +63,8 @@ func TestNotifyPeerUsernamesChangedChannelPushesPreloadedVector(t *testing.T) {
 	}}
 	registry := newFakeUsernameRegistry()
 	registry.byPeer[domain.Peer{Type: domain.PeerTypeChannel, ID: channelID}] = []domain.Username{
-		{Username: "channel_slot", Editable: true, Active: true},
-		{Username: "collectible", Active: true, CollectibleID: 9},
+		{Username: "channel_slot", Editable: true, Active: true, SortOrder: 1},
+		{Username: "collectible", Active: true, SortOrder: 0, CollectibleID: 9},
 	}
 	sessions := &captureSessions{
 		onlineUserIDs:  []int64{ownerID, memberID},
@@ -84,11 +84,11 @@ func TestNotifyPeerUsernamesChangedChannelPushesPreloadedVector(t *testing.T) {
 	}
 	updates := sessions.lastUserPush().(*tg.Updates)
 	channel := updates.Chats[0].(*tg.Channel)
-	if scalar, ok := channel.GetUsername(); ok || scalar != "" {
-		t.Fatalf("pushed scalar username = %q (set %v), want absent", scalar, ok)
+	if scalar, ok := channel.GetUsername(); !ok || scalar != "collectible" {
+		t.Fatalf("pushed scalar username = %q (set %v), want primary collectible", scalar, ok)
 	}
 	vector, ok := channel.GetUsernames()
-	if !ok || len(vector) != 2 || vector[1].Username != "collectible" {
+	if !ok || len(vector) != 2 || vector[0].Username != "collectible" {
 		t.Fatalf("pushed username vector = %+v (set %v)", vector, ok)
 	}
 }

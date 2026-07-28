@@ -13,6 +13,7 @@ import (
 	appprivacy "telesrv/internal/app/privacy"
 	appstories "telesrv/internal/app/stories"
 	appupdates "telesrv/internal/app/updates"
+	usernamesapp "telesrv/internal/app/usernames"
 	"telesrv/internal/app/userprojection"
 	appusers "telesrv/internal/app/users"
 	"telesrv/internal/domain"
@@ -24,6 +25,8 @@ import (
 func TestContactsSearchFindsUsers(t *testing.T) {
 	ctx := context.Background()
 	users := memory.NewUserStore()
+	registry := memory.NewCollectibleUsernameStore()
+	users.AttachUsernameRegistry(registry)
 	owner, err := users.Create(ctx, domain.User{AccessHash: 1, Phone: "15550000001", FirstName: "Owner"})
 	if err != nil {
 		t.Fatalf("create owner: %v", err)
@@ -32,12 +35,29 @@ func TestContactsSearchFindsUsers(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create friend: %v", err)
 	}
+	friendPeer := domain.Peer{Type: domain.PeerTypeUser, ID: friend.ID}
+	if _, err := registry.SetEditableUsername(ctx, friendPeer, friend.Username); err != nil {
+		t.Fatalf("seed editable username: %v", err)
+	}
+	if _, created, err := registry.MintCollectibleUsername(ctx, domain.MintCollectibleUsernameRequest{
+		Username: "nft4",
+		Owner:    friendPeer,
+		Currency: domain.CollectibleCurrencyStars,
+		Amount:   1,
+		Actor:    "test",
+	}); err != nil || !created {
+		t.Fatalf("mint collectible: created=%v err=%v", created, err)
+	}
 	r := New(Config{}, Deps{
 		Contacts: appcontacts.NewService(memory.NewContactStore(), users),
+		Usernames: usernamesapp.NewService(
+			usernamesapp.WithRegistryStore(registry),
+			usernamesapp.WithCollectibleStore(registry),
+		),
 	}, zaptest.NewLogger(t), clock.System)
 
 	var in bin.Buffer
-	if err := (&tg.ContactsSearchRequest{Q: "@search", Limit: 20}).Encode(&in); err != nil {
+	if err := (&tg.ContactsSearchRequest{Q: "@NFT4", Limit: 20}).Encode(&in); err != nil {
 		t.Fatalf("encode request: %v", err)
 	}
 	enc, err := r.Dispatch(WithUserID(ctx, owner.ID), [8]byte{}, 0, &in)
@@ -54,6 +74,14 @@ func TestContactsSearchFindsUsers(t *testing.T) {
 	peer, ok := box.Results[0].(*tg.PeerUser)
 	if !ok || peer.UserID != friend.ID {
 		t.Fatalf("peer = %T %+v, want friend", box.Results[0], box.Results[0])
+	}
+	user := box.Users[0].(*tg.User)
+	if scalar, ok := user.GetUsername(); !ok || scalar != "search_friend" {
+		t.Fatalf("search result scalar username = %q (set %v), want search_friend", scalar, ok)
+	}
+	vector, ok := user.GetUsernames()
+	if !ok || len(vector) != 2 || vector[1].Username != "nft4" || !vector[1].Active {
+		t.Fatalf("search result username vector = %+v (set %v), want active nft4 alias", vector, ok)
 	}
 }
 

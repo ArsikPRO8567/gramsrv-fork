@@ -150,11 +150,28 @@ func (s *ChannelStore) SearchPublicChannels(ctx context.Context, viewerUserID in
 	queryPrefix := escapeLike(queryLower) + "%"
 	queryLike := "%" + escapeLike(queryLower) + "%"
 	rows, err := s.db.Query(ctx, `
+WITH username_matches AS (
+  SELECT
+    peer_id,
+    MIN(CASE
+      WHEN username_lower = $2 THEN 0
+      ELSE 1
+    END) AS rank
+  FROM peer_usernames
+  WHERE peer_type = 'channel'
+    AND active
+    AND collectible_id IS NOT NULL
+    AND (
+      username_lower = $2
+      OR username_lower LIKE $3 ESCAPE '\'
+    )
+  GROUP BY peer_id
+)
 SELECT `+channelColumns+`
 FROM channels c
+LEFT JOIN username_matches um ON um.peer_id = c.id
 WHERE NOT c.deleted
   AND (c.broadcast OR c.megagroup)
-  AND COALESCE(c.username, '') <> ''
   AND NOT EXISTS (
     SELECT 1
     FROM channel_members m
@@ -163,15 +180,16 @@ WHERE NOT c.deleted
       AND m.status = 'active'
   )
   AND (
-    lower(c.username) = $2
+    um.peer_id IS NOT NULL
+    OR lower(c.username) = $2
     OR lower(c.username) LIKE $3 ESCAPE '\'
     OR lower(c.title) LIKE $3 ESCAPE '\'
     OR lower(c.username) LIKE $4 ESCAPE '\'
     OR lower(c.title) LIKE $4 ESCAPE '\'
   )
 ORDER BY CASE
-    WHEN lower(c.username) = $2 THEN 0
-    WHEN lower(c.username) LIKE $3 ESCAPE '\' THEN 1
+    WHEN um.rank = 0 OR lower(c.username) = $2 THEN 0
+    WHEN um.rank = 1 OR lower(c.username) LIKE $3 ESCAPE '\' THEN 1
     WHEN lower(c.username) LIKE $4 ESCAPE '\' THEN 2
     WHEN lower(c.title) LIKE $3 ESCAPE '\' THEN 3
     ELSE 4
@@ -421,7 +439,12 @@ func (s *ChannelStore) getChannelForViewer(ctx context.Context, db sqlcgen.DBTX,
 			return ch, syntheticMonoforumUserMember(ch, viewerUserID), true, nil
 		}
 	}
-	if !publicPreviewableChannel(ch) {
+	publicUsernameIDs, err := activeCollectibleUsernamePeerIDs(ctx, db, peerUsernameTypeChannel, []int64{ch.ID})
+	if err != nil {
+		return domain.Channel{}, domain.ChannelMember{}, false, err
+	}
+	_, hasActiveUsername := publicUsernameIDs[ch.ID]
+	if !publicPreviewableChannel(ch, hasActiveUsername) {
 		return domain.Channel{}, domain.ChannelMember{}, false, domain.ErrChannelPrivate
 	}
 	member, err = s.getPublicPreviewMember(ctx, db, viewerUserID, ch)

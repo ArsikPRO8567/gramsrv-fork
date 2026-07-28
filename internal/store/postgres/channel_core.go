@@ -395,6 +395,10 @@ WHERE c.id = ANY($2::bigint[]) AND NOT c.deleted`, viewerUserID, ids)
 	if err != nil {
 		return nil, err
 	}
+	publicUsernameIDs, err := activeCollectibleUsernamePeerIDs(ctx, s.db, peerUsernameTypeChannel, remaining)
+	if err != nil {
+		return nil, err
+	}
 	for _, channel := range channels {
 		if member, ok := linkedGuests[channel.ID]; ok {
 			views[channel.ID] = domain.ChannelView{
@@ -427,7 +431,8 @@ WHERE c.id = ANY($2::bigint[]) AND NOT c.deleted`, viewerUserID, ids)
 				continue
 			}
 		}
-		if !publicPreviewableChannel(channel) {
+		_, hasActiveUsername := publicUsernameIDs[channel.ID]
+		if !publicPreviewableChannel(channel, hasActiveUsername) {
 			continue
 		}
 		existing, found := previewMembers[channel.ID]
@@ -514,10 +519,10 @@ func finishChannelScan(ch *domain.Channel, rights, reactionPolicy string, wallpa
 	}
 }
 
-func publicPreviewableChannel(channel domain.Channel) bool {
+func publicPreviewableChannel(channel domain.Channel, hasActiveUsername bool) bool {
 	return !channel.Deleted &&
 		(channel.Broadcast || channel.Megagroup) &&
-		strings.TrimSpace(channel.Username) != ""
+		(strings.TrimSpace(channel.Username) != "" || hasActiveUsername)
 }
 
 func refreshChannelCountsTx(ctx context.Context, tx pgx.Tx, channel domain.Channel) (domain.Channel, error) {

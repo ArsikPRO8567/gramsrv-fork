@@ -510,6 +510,9 @@ func (s *ChannelStore) ResolvePublicChannelUsername(ctx context.Context, viewerU
 	if !found || owner.peerType != peerUsernameTypeChannel {
 		return domain.Channel{}, false, nil
 	}
+	if !owner.active {
+		return domain.Channel{}, false, nil
+	}
 	ch, err := getChannelByID(ctx, s.db, owner.peerID)
 	if err != nil {
 		if errors.Is(err, domain.ErrChannelInvalid) {
@@ -517,7 +520,7 @@ func (s *ChannelStore) ResolvePublicChannelUsername(ctx context.Context, viewerU
 		}
 		return domain.Channel{}, false, fmt.Errorf("resolve public channel username channel: %w", err)
 	}
-	if !publicPreviewableChannel(ch) {
+	if !publicPreviewableChannel(ch, true) {
 		return domain.Channel{}, false, nil
 	}
 	// A collectible row is authoritative for its own name: the channel's scalar
@@ -525,9 +528,6 @@ func (s *ChannelStore) ResolvePublicChannelUsername(ctx context.Context, viewerU
 	// would make collectible names unresolvable. The scalar comparison stays for
 	// the editable slot, where it guards against a stale registry row.
 	if !owner.collectible && !strings.EqualFold(ch.Username, usernameLower) {
-		return domain.Channel{}, false, nil
-	}
-	if owner.collectible && !owner.active {
 		return domain.Channel{}, false, nil
 	}
 	return ch, true, nil

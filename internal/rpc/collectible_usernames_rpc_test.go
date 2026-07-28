@@ -234,12 +234,12 @@ func TestUsersGetUsersProjectsCollectibleUsernamesInOneBatch(t *testing.T) {
 	registry := newFakeUsernameRegistry()
 	f := newUsernameProjectionFixture(t, registry)
 	registry.byPeer[domain.Peer{Type: domain.PeerTypeUser, ID: f.owner.ID}] = []domain.Username{
-		{Username: "owner_slot", Editable: true, Active: true},
-		{Username: "nft", Active: true, SortOrder: 0, CollectibleID: 7},
+		{Username: "owner_slot", Editable: true, Active: true, SortOrder: 1},
+		{Username: "nft4", Active: true, SortOrder: 0, CollectibleID: 7},
 	}
 	registry.byPeer[domain.Peer{Type: domain.PeerTypeUser, ID: f.friend.ID}] = []domain.Username{
 		{Username: "friend_slot", Editable: true, Active: true},
-		{Username: "gem", Active: false, SortOrder: 0, CollectibleID: 8},
+		{Username: "gem4", Active: false, SortOrder: 1, CollectibleID: 8},
 	}
 	ctx := WithUserID(context.Background(), f.owner.ID)
 
@@ -254,26 +254,29 @@ func TestUsersGetUsersProjectsCollectibleUsernamesInOneBatch(t *testing.T) {
 		t.Fatalf("users = %d, want 2", len(out))
 	}
 	self := out[0].(*tg.User)
-	if _, ok := self.GetUsername(); ok {
-		t.Fatalf("self scalar username is set together with collectible vector")
+	if scalar, ok := self.GetUsername(); !ok || scalar != "nft4" {
+		t.Fatalf("self scalar username = %q (set %v), want primary collectible nft4", scalar, ok)
 	}
 	vector, ok := self.GetUsernames()
 	if !ok {
 		t.Fatalf("self usernames unset, want registry vector")
 	}
-	if got := usernameStrings(vector); len(got) != 2 || got[0] != "owner_slot" || got[1] != "nft" {
-		t.Fatalf("self usernames = %v, want [owner_slot nft]", got)
+	if got := usernameStrings(vector); len(got) != 2 || got[0] != "nft4" || got[1] != "owner_slot" {
+		t.Fatalf("self usernames = %v, want [nft4 owner_slot]", got)
 	}
-	if !vector[0].Editable || !vector[0].Active {
-		t.Fatalf("editable slot flags = %+v, want editable+active", vector[0])
+	if vector[0].Editable || !vector[0].Active {
+		t.Fatalf("primary collectible flags = %+v, want non-editable+active", vector[0])
 	}
-	if vector[1].Editable || !vector[1].Active {
-		t.Fatalf("collectible flags = %+v, want non-editable+active", vector[1])
+	if !vector[1].Editable || !vector[1].Active {
+		t.Fatalf("editable slot flags = %+v, want editable+active", vector[1])
 	}
 	friend := out[1].(*tg.User)
+	if scalar, ok := friend.GetUsername(); !ok || scalar != "friend_slot" {
+		t.Fatalf("friend scalar username = %q (set %v), want friend_slot", scalar, ok)
+	}
 	friendVector, _ := friend.GetUsernames()
-	if got := usernameStrings(friendVector); len(got) != 2 || got[1] != "gem" {
-		t.Fatalf("friend usernames = %v, want [friend_slot gem]", got)
+	if got := usernameStrings(friendVector); len(got) != 2 || got[1] != "gem4" {
+		t.Fatalf("friend usernames = %v, want [friend_slot gem4]", got)
 	}
 	if friendVector[1].Active {
 		t.Fatalf("inactive collectible projected active: %+v", friendVector[1])
@@ -663,7 +666,7 @@ func TestChannelsGetChannelsProjectsCollectibleUsernames(t *testing.T) {
 	r, owner, channel := newCollectibleChannelFixture(t, registry)
 	ctx := WithUserID(context.Background(), owner.ID)
 	registry.byPeer[domain.Peer{Type: domain.PeerTypeChannel, ID: channel.ID}] = []domain.Username{
-		{Username: "chan_slot", Editable: true, Active: true},
+		{Username: "chan_slot", Editable: true, Active: true, SortOrder: 1},
 		{Username: "chan_nft", Active: true, SortOrder: 0, CollectibleID: 44},
 	}
 
@@ -681,11 +684,11 @@ func TestChannelsGetChannelsProjectsCollectibleUsernames(t *testing.T) {
 	if !ok {
 		t.Fatalf("channel usernames unset, want registry vector")
 	}
-	if got := usernameStrings(vector); len(got) != 2 || got[0] != "chan_slot" || got[1] != "chan_nft" {
-		t.Fatalf("channel usernames = %v, want [chan_slot chan_nft]", got)
+	if got := usernameStrings(vector); len(got) != 2 || got[0] != "chan_nft" || got[1] != "chan_slot" {
+		t.Fatalf("channel usernames = %v, want [chan_nft chan_slot]", got)
 	}
-	if scalar, ok := out[0].(*tg.Channel).GetUsername(); ok || scalar != "" {
-		t.Fatalf("scalar channel username = %q (set %v), want absent with collectible vector", scalar, ok)
+	if scalar, ok := out[0].(*tg.Channel).GetUsername(); !ok || scalar != "chan_nft" {
+		t.Fatalf("scalar channel username = %q (set %v), want primary collectible chan_nft", scalar, ok)
 	}
 }
 

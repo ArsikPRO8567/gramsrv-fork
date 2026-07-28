@@ -224,7 +224,7 @@ func (s *ChannelStore) SearchJoinedMessages(_ context.Context, viewerUserID int6
 		}
 		member, ok := s.members[channelID][viewerUserID]
 		joined := ok && member.Status == domain.ChannelMemberActive && !member.BannedRights.ViewMessages
-		publicPreview := req.AllowPublicPreview && publicPreviewableChannel(channel) &&
+		publicPreview := req.AllowPublicPreview && s.publicPreviewableChannelLocked(channel) &&
 			(!ok || member.Status != domain.ChannelMemberKicked && !member.BannedRights.ViewMessages)
 		if !joined && !publicPreview {
 			continue

@@ -101,12 +101,21 @@ type ChannelStore struct {
 	// topicReads 是 per-(channel,user,topic) 已读水位（forum 话题独立已读，不碰频道级 member 水位）。
 	topicReads map[int64]map[int64]map[int]memoryTopicRead
 	// polls 是共享 poll 权威（与 MessageStore 同一实例）；nil 时 poll 链路按未接入处理。
-	polls *PollStore
+	polls            *PollStore
+	usernameRegistry *CollectibleUsernameStore
 }
 
 // AttachPollStore 注入共享 poll 权威。
 func (s *ChannelStore) AttachPollStore(polls *PollStore) {
 	s.polls = polls
+}
+
+// AttachUsernameRegistry gives the memory backend the same global username
+// index the PostgreSQL stores share through peer_usernames.
+func (s *ChannelStore) AttachUsernameRegistry(registry *CollectibleUsernameStore) {
+	s.mu.Lock()
+	s.usernameRegistry = registry
+	s.mu.Unlock()
 }
 
 // NewChannelStore creates an in-memory ChannelStore.
