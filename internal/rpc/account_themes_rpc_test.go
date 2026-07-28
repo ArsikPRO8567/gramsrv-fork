@@ -11,6 +11,7 @@ import (
 	"go.uber.org/zap/zaptest"
 
 	themesapp "telesrv/internal/app/themes"
+	"telesrv/internal/compat/tdesktop"
 	"telesrv/internal/domain"
 	"telesrv/internal/store/memory"
 )
@@ -228,6 +229,204 @@ func TestAccountGetThemesTDesktopExcludesDocumentlessDefaults(t *testing.T) {
 		t.Fatalf("tdesktop getThemes with hash=0 = NotModified, want themes")
 	default:
 		t.Fatalf("tdesktop getThemes = %T, want *tg.AccountThemes", desktop)
+	}
+}
+
+func TestAccountGetThemesIOSProjectsOpaqueARGBAndRefreshesByContent(t *testing.T) {
+	const userID = 1000008
+	r := newThemeRouter(t, &fakeFiles{})
+	iosCtx := WithClientInfo(
+		WithUserID(context.Background(), userID),
+		ClientInfo{Type: ClientTypeIOS, AppVersion: "12.9.2 (10000)"},
+	)
+
+	first, err := r.onAccountGetThemes(iosCtx, &tg.AccountGetThemesRequest{Format: "ios"})
+	if err != nil {
+		t.Fatalf("getThemes ios err = %v", err)
+	}
+	themes, ok := first.(*tg.AccountThemes)
+	if !ok || len(themes.Themes) == 0 {
+		t.Fatalf("getThemes ios = %#v, want non-empty themes", first)
+	}
+	assertThemeAccentColorsOpaque(t, themes.Themes)
+
+	source := tdesktop.DefaultThemeList()
+	sourceSettings, _ := source[0].GetSettings()
+	projectedSettings, _ := themes.Themes[0].GetSettings()
+	if got, want := uint32(int32(projectedSettings[0].AccentColor))&0x00ffffff, uint32(sourceSettings[0].AccentColor); got != want {
+		t.Fatalf("projected RGB = %#06x, want source RGB %#06x", got, want)
+	}
+	if uint32(int32(sourceSettings[0].AccentColor))>>24 != 0 {
+		t.Fatalf("source Android/TDesktop accent unexpectedly changed to ARGB: %#08x", uint32(int32(sourceSettings[0].AccentColor)))
+	}
+
+	again, err := r.onAccountGetThemes(iosCtx, &tg.AccountGetThemesRequest{Format: "ios", Hash: themes.Hash})
+	if err != nil {
+		t.Fatalf("getThemes ios matching hash err = %v", err)
+	}
+	if _, ok := again.(*tg.AccountThemesNotModified); !ok {
+		t.Fatalf("getThemes ios matching hash = %T, want notModified", again)
+	}
+}
+
+func TestAccountGetChatThemesIOSInvalidatesTransparentCatalogCache(t *testing.T) {
+	const userID = 1000009
+	r := newThemeRouter(t, &fakeFiles{})
+	base, ok := tdesktop.ChatThemes(0).(*tg.AccountThemes)
+	if !ok {
+		t.Fatalf("base ChatThemes = %T, want *tg.AccountThemes", tdesktop.ChatThemes(0))
+	}
+
+	iosCtx := WithClientInfo(
+		WithUserID(context.Background(), userID),
+		ClientInfo{Type: ClientTypeIOS, AppVersion: "12.9.2 (10000)"},
+	)
+	projected, err := r.onAccountGetChatThemes(iosCtx, base.Hash)
+	if err != nil {
+		t.Fatalf("getChatThemes ios err = %v", err)
+	}
+	themes, ok := projected.(*tg.AccountThemes)
+	if !ok {
+		t.Fatalf("getChatThemes ios with old hash = %T, want refreshed themes", projected)
+	}
+	if themes.Hash == base.Hash {
+		t.Fatalf("iOS projected hash = old catalog hash %d, want cache invalidation", themes.Hash)
+	}
+	assertThemeAccentColorsOpaque(t, themes.Themes)
+
+	again, err := r.onAccountGetChatThemes(iosCtx, themes.Hash)
+	if err != nil {
+		t.Fatalf("getChatThemes ios matching hash err = %v", err)
+	}
+	if _, ok := again.(*tg.AccountThemesNotModified); !ok {
+		t.Fatalf("getChatThemes ios matching hash = %T, want notModified", again)
+	}
+
+	androidCtx := WithClientInfo(WithUserID(context.Background(), userID), ClientInfo{Type: ClientTypeAndroid})
+	android, err := r.onAccountGetChatThemes(androidCtx, base.Hash)
+	if err != nil {
+		t.Fatalf("getChatThemes android old hash err = %v", err)
+	}
+	if _, ok := android.(*tg.AccountThemesNotModified); !ok {
+		t.Fatalf("getChatThemes android old hash = %T, want unchanged notModified", android)
+	}
+}
+
+func TestThemesListHashIncludesVisibleContentAndIgnoresOrder(t *testing.T) {
+	first := tg.Theme{ID: 1, AccessHash: 11, Slug: "one", Title: "One"}
+	first.SetSettings([]tg.ThemeSettings{{
+		BaseTheme:   &tg.BaseThemeClassic{},
+		AccentColor: 0x29b071,
+	}})
+	second := tg.Theme{ID: 2, AccessHash: 22, Slug: "two", Title: "Two"}
+
+	hashA, err := themesListHash([]tg.Theme{first, second})
+	if err != nil {
+		t.Fatalf("themesListHash initial: %v", err)
+	}
+	hashReordered, err := themesListHash([]tg.Theme{second, first})
+	if err != nil {
+		t.Fatalf("themesListHash reordered: %v", err)
+	}
+	if hashA != hashReordered {
+		t.Fatalf("hash changed with order: %d != %d", hashA, hashReordered)
+	}
+
+	changed := first
+	changedSettings, _ := changed.GetSettings()
+	changedSettings = append([]tg.ThemeSettings(nil), changedSettings...)
+	changedSettings[0].AccentColor = 0x329ed7
+	changed.SetSettings(changedSettings)
+	hashChanged, err := themesListHash([]tg.Theme{changed, second})
+	if err != nil {
+		t.Fatalf("themesListHash changed: %v", err)
+	}
+	if hashChanged == hashA {
+		t.Fatalf("hash did not change after accent update: %d", hashA)
+	}
+}
+
+func TestAccountSingleThemeResponsesUseIOSARGBProjection(t *testing.T) {
+	const userID = 1000011
+	r := newThemeRouter(t, &fakeFiles{})
+	androidCtx := WithClientInfo(WithUserID(context.Background(), userID), ClientInfo{Type: ClientTypeAndroid})
+	iosCtx := WithClientInfo(WithUserID(context.Background(), userID), ClientInfo{Type: ClientTypeIOS})
+
+	input := tg.InputThemeSettings{
+		BaseTheme:   &tg.BaseThemeDay{},
+		AccentColor: 0x3997d3,
+	}
+	input.SetOutboxAccentColor(0x4cb064)
+	create := &tg.AccountCreateThemeRequest{Title: "Cross-platform"}
+	create.SetSettings([]tg.InputThemeSettings{input})
+	created, err := r.onAccountCreateTheme(androidCtx, create)
+	if err != nil {
+		t.Fatalf("create Android theme: %v", err)
+	}
+	androidSettings, _ := created.GetSettings()
+	if color := uint32(int32(androidSettings[0].AccentColor)); color>>24 != 0 {
+		t.Fatalf("Android create response accent = %#08x, want unchanged RGB24", color)
+	}
+
+	got, err := r.onAccountGetTheme(iosCtx, &tg.AccountGetThemeRequest{
+		Format: "ios",
+		Theme:  &tg.InputTheme{ID: created.ID, AccessHash: created.AccessHash},
+	})
+	if err != nil {
+		t.Fatalf("get iOS theme: %v", err)
+	}
+	assertThemeAccentColorsOpaque(t, []tg.Theme{*got})
+	iosSettings, _ := got.GetSettings()
+	if color := uint32(int32(iosSettings[0].AccentColor)); color != 0xff3997d3 {
+		t.Fatalf("iOS getTheme accent = %#08x, want 0xff3997d3", color)
+	}
+	if color, ok := iosSettings[0].GetOutboxAccentColor(); !ok || uint32(int32(color)) != 0xff4cb064 {
+		t.Fatalf("iOS getTheme outbox accent = %#08x ok=%v, want 0xff4cb064", uint32(int32(color)), ok)
+	}
+
+	iosCreate := &tg.AccountCreateThemeRequest{Title: "Created on iOS"}
+	iosCreate.SetSettings([]tg.InputThemeSettings{input})
+	createdOnIOS, err := r.onAccountCreateTheme(iosCtx, iosCreate)
+	if err != nil {
+		t.Fatalf("create iOS theme: %v", err)
+	}
+	assertThemeAccentColorsOpaque(t, []tg.Theme{*createdOnIOS})
+
+	updatedInput := tg.InputThemeSettings{
+		BaseTheme:   &tg.BaseThemeTinted{},
+		AccentColor: 0x8660ad,
+	}
+	update := &tg.AccountUpdateThemeRequest{
+		Format: "ios",
+		Theme:  &tg.InputTheme{ID: created.ID, AccessHash: created.AccessHash},
+	}
+	update.SetSettings([]tg.InputThemeSettings{updatedInput})
+	updated, err := r.onAccountUpdateTheme(iosCtx, update)
+	if err != nil {
+		t.Fatalf("update iOS theme: %v", err)
+	}
+	assertThemeAccentColorsOpaque(t, []tg.Theme{*updated})
+	updatedSettings, _ := updated.GetSettings()
+	if color := uint32(int32(updatedSettings[0].AccentColor)); color != 0xff8660ad {
+		t.Fatalf("iOS updateTheme accent = %#08x, want 0xff8660ad", color)
+	}
+}
+
+func assertThemeAccentColorsOpaque(t *testing.T, themes []tg.Theme) {
+	t.Helper()
+	for _, theme := range themes {
+		settings, ok := theme.GetSettings()
+		if !ok {
+			continue
+		}
+		for i := range settings {
+			if color := uint32(int32(settings[i].AccentColor)); color>>24 == 0 {
+				t.Fatalf("theme %d settings[%d] accent remains transparent: %#08x", theme.ID, i, color)
+			}
+			if color, ok := settings[i].GetOutboxAccentColor(); ok && uint32(int32(color))>>24 == 0 {
+				t.Fatalf("theme %d settings[%d] outbox accent remains transparent: %#08x", theme.ID, i, uint32(int32(color)))
+			}
+		}
 	}
 }
 

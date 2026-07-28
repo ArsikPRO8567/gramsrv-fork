@@ -217,12 +217,7 @@ func (r *Router) registerAccount(d *tlprofile.Dispatcher) {
 	registerRPC[*tg.AccountGetChatThemesRequest](d, tlprofile.SemanticMethodAccountGetChatThemes, func(ctx context.Context, layerRequest *tg.AccountGetChatThemesRequest) (any, error) {
 		hash := layerRequest.
 			Hash
-		_ = hash
-
-		if _, _, err := r.currentUserID(ctx); err != nil {
-			return nil, internalErr()
-		}
-		return tdesktop.ChatThemes(hash), nil
+		return r.onAccountGetChatThemes(ctx, hash)
 	})
 	registerRPC[
 
