@@ -515,6 +515,15 @@ func (r *Router) forwardSourcesFromPrivateMessages(ctx context.Context, userID i
 	if fromPeer.Type != domain.PeerTypeUser || fromPeer.ID == 0 {
 		return nil, domain.ErrMessageIDInvalid
 	}
+	if svc, ok := r.deps.Messages.(PrivateNoForwardsService); ok {
+		state, err := svc.GetPrivateNoForwards(ctx, userID, fromPeer.ID)
+		if err != nil {
+			return nil, err
+		}
+		if state.Enabled() {
+			return nil, domain.ErrChatForwardsRestricted
+		}
+	}
 	byID := make(map[int]domain.Message, len(messages))
 	for _, msg := range messages {
 		byID[msg.ID] = msg

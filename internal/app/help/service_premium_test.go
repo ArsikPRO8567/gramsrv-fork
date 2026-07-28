@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"testing"
+
+	"telesrv/internal/domain"
 )
 
 // TestAppConfigPremiumKeys 断言 premium / Stars 相关 key 完整下发且 hash 已递增：
@@ -25,6 +27,9 @@ func TestAppConfigPremiumKeys(t *testing.T) {
 	var decoded map[string]any
 	if err := json.Unmarshal(cfg.JSON, &decoded); err != nil {
 		t.Fatalf("app config json invalid: %v", err)
+	}
+	if period, ok := decoded["no_forwards_request_expire_period"].(float64); !ok || int(period) != domain.PrivateNoForwardsRequestExpirePeriod {
+		t.Fatalf("no_forwards_request_expire_period = %v, want %d", decoded["no_forwards_request_expire_period"], domain.PrivateNoForwardsRequestExpirePeriod)
 	}
 	if blocked, ok := decoded["premium_purchase_blocked"].(bool); !ok || blocked {
 		t.Fatalf("premium_purchase_blocked = %v, want false (star gift 送礼入口耦合此 flag)", decoded["premium_purchase_blocked"])

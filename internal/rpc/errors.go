@@ -297,6 +297,8 @@ func replyMessageIDInvalidErr() error { return tgerr.New(400, "REPLY_MESSAGE_ID_
 
 func chatForwardsRestrictedErr() error { return tgerr.New(400, "CHAT_FORWARDS_RESTRICTED") }
 
+func requestMsgExpiredErr() error { return tgerr.New(400, "REQUEST_MSG_EXPIRED") }
+
 func inputRequestInvalidErr() error { return tgerr.New(400, "INPUT_REQUEST_INVALID") }
 
 func inputRequestTooLongErr() error { return tgerr.New(400, "INPUT_REQUEST_TOO_LONG") }

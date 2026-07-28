@@ -604,6 +604,13 @@ type MessagesService interface {
 	DeleteSavedHistory(ctx context.Context, userID int64, req domain.DeleteSavedHistoryRequest) (domain.DeleteSavedHistoryResult, error)
 }
 
+// PrivateNoForwardsService is an optional messages capability used by the
+// private-user branch of messages.toggleNoForwards and userFull projection.
+type PrivateNoForwardsService interface {
+	GetPrivateNoForwards(ctx context.Context, userID, peerUserID int64) (domain.PrivateNoForwardsState, error)
+	TogglePrivateNoForwards(ctx context.Context, userID int64, req domain.TogglePrivateNoForwardsRequest) (domain.TogglePrivateNoForwardsResult, error)
+}
+
 // TranslationService owns read-only translation and the durable per-account
 // peer preference. It only exposes domain values to the RPC edge.
 type TranslationService interface {

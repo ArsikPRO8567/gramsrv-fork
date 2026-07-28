@@ -114,10 +114,18 @@ func cloneRequestedPeerMedia(media *domain.MessageMedia) *domain.MessageMedia {
 		video.Attributes = append([]domain.DocumentAttribute(nil), media.LivePhotoVideo.Attributes...)
 		clone.LivePhotoVideo = &video
 	}
-	if media.ServiceAction == nil || media.ServiceAction.RequestedPeer == nil {
+	if media.ServiceAction == nil {
 		return &clone
 	}
 	action := *media.ServiceAction
+	if media.ServiceAction.NoForwards != nil {
+		noForwards := *media.ServiceAction.NoForwards
+		action.NoForwards = &noForwards
+	}
+	if media.ServiceAction.RequestedPeer == nil {
+		clone.ServiceAction = &action
+		return &clone
+	}
 	requested := *media.ServiceAction.RequestedPeer
 	requested.Peers = append([]domain.Peer(nil), requested.Peers...)
 	requested.Details = append([]domain.MessageRequestedPeerDetails(nil), requested.Details...)

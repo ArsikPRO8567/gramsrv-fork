@@ -265,6 +265,17 @@ func (r *Router) buildUserFullProjection(ctx context.Context, currentUserID int6
 		Settings:       tg.PeerSettings{},
 		NotifySettings: *tdesktop.NotifySettings(),
 	}
+	if u.ID != currentUserID {
+		if svc, ok := r.deps.Messages.(PrivateNoForwardsService); ok {
+			state, err := svc.GetPrivateNoForwards(ctx, currentUserID, u.ID)
+			if err != nil {
+				return tg.UserFull{}, internalErr()
+			}
+			myEnabled, peerEnabled := state.ForViewer(currentUserID)
+			full.SetNoforwardsMyEnabled(myEnabled)
+			full.SetNoforwardsPeerEnabled(peerEnabled)
+		}
+	}
 	// 通话入口：客户端不见 phone_calls_available=true 不显示通话按钮（P1 前置项）。
 	// phone_calls_private 标记对端禁 P2P（p2p_allowed 真值在通话确认时另行计算）。
 	if !u.Bot && u.ID != currentUserID {

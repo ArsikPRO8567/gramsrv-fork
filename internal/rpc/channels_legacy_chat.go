@@ -625,25 +625,6 @@ func (r *Router) enqueueChannelWallpaperFanout(ctx context.Context, originUserID
 		})
 }
 
-func (r *Router) onMessagesToggleNoForwards(ctx context.Context, req *tg.MessagesToggleNoForwardsRequest) (tg.UpdatesClass, error) {
-	if r.deps.Channels == nil {
-		return nil, notImplementedErr()
-	}
-	userID, _, err := r.currentUserID(ctx)
-	if err != nil {
-		return nil, internalErr()
-	}
-	channelID, err := r.channelIDFromLegacyInputPeerChecked(ctx, userID, req.Peer)
-	if err != nil {
-		return nil, err
-	}
-	channel, err := r.deps.Channels.SetNoForwards(ctx, userID, channelID, req.Enabled)
-	if err != nil {
-		return nil, channelAdminErr(err)
-	}
-	return r.channelStateMutationUpdates(ctx, userID, channel), nil
-}
-
 func (r *Router) onMessagesSetChatAvailableReactions(ctx context.Context, req *tg.MessagesSetChatAvailableReactionsRequest) (tg.UpdatesClass, error) {
 	if r.deps.Channels == nil {
 		return nil, notImplementedErr()

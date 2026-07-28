@@ -558,6 +558,10 @@ const (
 	// MessageServiceActionSetChatTheme 映射 messageActionSetChatTheme：
 	// 私聊双方共享的 chat theme token 变更。
 	MessageServiceActionSetChatTheme MessageServiceActionKind = "set_chat_theme"
+	// MessageServiceActionNoForwardsToggle / Request 映射私聊内容保护的
+	// 状态切换与关闭请求。会话级保护不能写入普通消息的 NoForwards 字段。
+	MessageServiceActionNoForwardsToggle  MessageServiceActionKind = "no_forwards_toggle"
+	MessageServiceActionNoForwardsRequest MessageServiceActionKind = "no_forwards_request"
 	// MessageServiceActionStarGift 映射 messageActionStarGift：收到一份 Star 礼物。
 	// 礼物快照（贴纸/星价）内嵌在 action 里，收礼人无需额外拉取即可渲染气泡。
 	MessageServiceActionStarGift MessageServiceActionKind = "star_gift"
@@ -629,6 +633,15 @@ type MessageRequestedPeerDetails struct {
 	Photo     *Photo `json:"photo,omitempty"`
 }
 
+// MessageNoForwardsAction 是私聊内容保护 service action 的协议中立载荷。
+// ExpiresAt 只用于 request 的读取时绝对过期投影；toggle 保持为 0。
+type MessageNoForwardsAction struct {
+	PrevValue bool `json:"prev_value"`
+	NewValue  bool `json:"new_value"`
+	Expired   bool `json:"expired,omitempty"`
+	ExpiresAt int  `json:"expires_at,omitempty"`
+}
+
 // MessageServiceAction 是私聊服务消息动作的协议中立表示。
 type MessageServiceAction struct {
 	Kind                  MessageServiceActionKind            `json:"kind"`
@@ -639,6 +652,7 @@ type MessageServiceAction struct {
 	WebViewData           *MessageWebViewDataAction           `json:"web_view_data,omitempty"`
 	RequestedPeer         *MessageRequestedPeerAction         `json:"requested_peer,omitempty"`
 	ChatThemeEmoticon     string                              `json:"chat_theme_emoticon,omitempty"`
+	NoForwards            *MessageNoForwardsAction            `json:"no_forwards,omitempty"`
 	StarGift              *MessageStarGiftAction              `json:"star_gift,omitempty"`
 	StarGiftUnique        *MessageStarGiftUniqueAction        `json:"star_gift_unique,omitempty"`
 	StarGiftOffer         *MessageStarGiftOfferAction         `json:"star_gift_offer,omitempty"`

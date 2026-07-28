@@ -407,6 +407,47 @@ type ForwardPrivateMessagesResult struct {
 	ReplayDeleteEvents []*UpdateEvent
 }
 
+const PrivateNoForwardsRequestExpirePeriod = 24 * 60 * 60
+
+// PrivateNoForwardsState 是一对普通用户唯一的内容保护权威。
+// EnabledByUserID 为 0 或参与者之一；非零时双方共享的会话均受保护。
+type PrivateNoForwardsState struct {
+	UserLowID       int64
+	UserHighID      int64
+	EnabledByUserID int64
+}
+
+func (s PrivateNoForwardsState) Enabled() bool {
+	return s.EnabledByUserID != 0
+}
+
+func (s PrivateNoForwardsState) ForViewer(viewerUserID int64) (myEnabled, peerEnabled bool) {
+	if s.EnabledByUserID == 0 {
+		return false, false
+	}
+	return s.EnabledByUserID == viewerUserID, s.EnabledByUserID != viewerUserID
+}
+
+// TogglePrivateNoForwardsRequest 是私聊内容保护的原子状态+服务消息命令。
+type TogglePrivateNoForwardsRequest struct {
+	ActorUserID     int64
+	PeerUserID      int64
+	Enabled         bool
+	RequestMsgID    int
+	RandomID        int64
+	Date            int
+	OriginAuthKeyID [8]byte
+	OriginSessionID int64
+}
+
+// TogglePrivateNoForwardsResult 同时返回提交后的权威状态与本次真实服务消息。
+// Changed=false 且 Send 为空表示官方定义的 no-op。
+type TogglePrivateNoForwardsResult struct {
+	State   PrivateNoForwardsState
+	Changed bool
+	Send    SendPrivateTextResult
+}
+
 // ReadHistoryRequest 是账号视角的 messages.readHistory 命令。
 type ReadHistoryRequest struct {
 	OwnerUserID     int64

@@ -222,6 +222,42 @@ func (s *Service) SetChatTheme(ctx context.Context, userID int64, req domain.Set
 	return out, nil
 }
 
+// GetPrivateNoForwards returns the canonical content-protection state for one
+// ordinary private chat.
+func (s *Service) GetPrivateNoForwards(ctx context.Context, userID, peerUserID int64) (domain.PrivateNoForwardsState, error) {
+	if s == nil || s.messages == nil || userID == 0 || peerUserID == 0 || userID == peerUserID {
+		return domain.PrivateNoForwardsState{}, domain.ErrMessageIDInvalid
+	}
+	backend, ok := s.messages.(store.PrivateNoForwardsStore)
+	if !ok {
+		return domain.PrivateNoForwardsState{}, nil
+	}
+	return backend.GetPrivateNoForwards(ctx, userID, peerUserID)
+}
+
+// TogglePrivateNoForwards atomically mutates the pair state and appends the
+// corresponding service message when the official state machine requires one.
+func (s *Service) TogglePrivateNoForwards(ctx context.Context, userID int64, req domain.TogglePrivateNoForwardsRequest) (domain.TogglePrivateNoForwardsResult, error) {
+	if s == nil || s.messages == nil || userID == 0 {
+		return domain.TogglePrivateNoForwardsResult{}, domain.ErrMessageIDInvalid
+	}
+	if req.ActorUserID == 0 {
+		req.ActorUserID = userID
+	}
+	if req.ActorUserID != userID || req.PeerUserID == 0 || req.PeerUserID == userID ||
+		req.RequestMsgID < 0 || req.RequestMsgID > domain.MaxMessageBoxID {
+		return domain.TogglePrivateNoForwardsResult{}, domain.ErrMessageIDInvalid
+	}
+	if err := s.ensureCanSend(ctx, userID); err != nil {
+		return domain.TogglePrivateNoForwardsResult{}, err
+	}
+	backend, ok := s.messages.(store.PrivateNoForwardsStore)
+	if !ok {
+		return domain.TogglePrivateNoForwardsResult{}, domain.ErrMessageIDInvalid
+	}
+	return backend.TogglePrivateNoForwards(ctx, req)
+}
+
 func chatThemeServiceMedia(emoticon string) *domain.MessageMedia {
 	return &domain.MessageMedia{
 		Kind: domain.MessageMediaKindService,
