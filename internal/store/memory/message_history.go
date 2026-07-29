@@ -232,28 +232,64 @@ func (s *MessageStore) DeleteHistory(_ context.Context, req domain.DeleteHistory
 		}
 		return true
 	}
+	var anchors map[int64]memoryHistoryClearAnchor
+	fullJustClear := req.JustClear && req.MaxID <= 0 && req.MinDate <= 0 && req.MaxDate <= 0
+	if fullJustClear {
+		anchors = make(map[int64]memoryHistoryClearAnchor, 2)
+		if anchor, found := s.memoryHistoryClearAnchorLocked(req.OwnerUserID, req.Peer); found {
+			anchors[req.OwnerUserID] = anchor
+		}
+		if req.Revoke && req.Peer.ID != req.OwnerUserID {
+			peer := domain.Peer{Type: domain.PeerTypeUser, ID: req.OwnerUserID}
+			if anchor, found := s.memoryHistoryClearAnchorLocked(req.Peer.ID, peer); found {
+				anchors[req.Peer.ID] = anchor
+			}
+		}
+	}
 	deleted, revokeUIDs, more := s.deleteMemoryMessagesLocked(req.OwnerUserID, domain.MaxDeleteHistoryBatch, func(msg domain.Message) bool {
+		if anchor, ok := anchors[req.OwnerUserID]; ok && msg.ID == anchor.message.ID {
+			return false
+		}
 		return msg.Peer == req.Peer && (req.MaxID <= 0 || msg.ID <= req.MaxID) && inDateRange(msg)
 	})
 	if req.Revoke {
-		if len(revokeUIDs) > 0 {
+		if req.MaxID > 0 && len(revokeUIDs) > 0 {
 			deleted = append(deleted, s.deleteMemoryMessagesByUIDLocked(revokeUIDs, req.OwnerUserID)...)
 		}
 		// 与 PG 同语义：全量/按日期的双向清史直扫对端残余，我方早已
 		// 单向删除的消息不能在对端残留。
 		if req.MaxID <= 0 && req.Peer.ID != req.OwnerUserID {
 			peerDeleted, _, peerMore := s.deleteMemoryMessagesLocked(req.Peer.ID, domain.MaxDeleteHistoryBatch, func(msg domain.Message) bool {
+				if anchor, ok := anchors[req.Peer.ID]; ok && msg.ID == anchor.message.ID {
+					return false
+				}
 				return msg.Peer == (domain.Peer{Type: domain.PeerTypeUser, ID: req.OwnerUserID}) && inDateRange(msg)
 			})
 			deleted = append(deleted, peerDeleted...)
 			more = more || peerMore
 		}
 	}
-	res = s.finishMemoryDeleteLocked(res, deleted, req.Date, req.JustClear)
+	res = s.finishMemoryDeleteLocked(res, deleted, req.Date, anchors)
 	if more {
 		res.Offset = 1
 	}
 	return res, nil
+}
+
+func (s *MessageStore) memoryHistoryClearAnchorLocked(userID int64, peer domain.Peer) (memoryHistoryClearAnchor, bool) {
+	var top domain.Message
+	for _, msg := range s.m[userID] {
+		if msg.Peer == peer && msg.ID > top.ID {
+			top = msg
+		}
+	}
+	if top.ID == 0 {
+		return memoryHistoryClearAnchor{}, false
+	}
+	return memoryHistoryClearAnchor{
+		message:      cloneMessage(top),
+		materialized: domain.IsHistoryClearServiceMessage(top),
+	}, true
 }
 
 func filterMessageList(messages []domain.Message, filter domain.MessageFilter) domain.MessageList {

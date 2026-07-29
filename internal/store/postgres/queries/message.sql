@@ -1343,6 +1343,7 @@ WITH target AS (
   WHERE m.owner_user_id = sqlc.arg(owner_user_id)::bigint
     AND m.peer_type = sqlc.arg(peer_type)::text
     AND m.peer_id = sqlc.arg(peer_id)::bigint
+    AND (sqlc.arg(keep_box_id)::int <= 0 OR m.box_id <> sqlc.arg(keep_box_id)::int)
     AND (sqlc.arg(max_id)::int <= 0 OR m.box_id <= sqlc.arg(max_id)::int)
     AND (sqlc.arg(min_date)::int <= 0 OR m.message_date >= sqlc.arg(min_date)::int)
     AND (sqlc.arg(max_date)::int <= 0 OR m.message_date <= sqlc.arg(max_date)::int)
@@ -1382,6 +1383,7 @@ SELECT EXISTS (
   WHERE m.owner_user_id = sqlc.arg(owner_user_id)::bigint
     AND m.peer_type = sqlc.arg(peer_type)::text
     AND m.peer_id = sqlc.arg(peer_id)::bigint
+    AND (sqlc.arg(keep_box_id)::int <= 0 OR m.box_id <> sqlc.arg(keep_box_id)::int)
     AND (sqlc.arg(max_id)::int <= 0 OR m.box_id <= sqlc.arg(max_id)::int)
     AND (sqlc.arg(min_date)::int <= 0 OR m.message_date >= sqlc.arg(min_date)::int)
     AND (sqlc.arg(max_date)::int <= 0 OR m.message_date <= sqlc.arg(max_date)::int)

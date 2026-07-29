@@ -520,10 +520,36 @@ func (s *MessageStore) DeleteHistory(ctx context.Context, req domain.DeleteHisto
 	maxID := pgInt32NonNegative(req.MaxID)
 	minDate := pgInt32NonNegative(req.MinDate)
 	maxDate := pgInt32NonNegative(req.MaxDate)
+	var anchors map[int64]historyClearAnchor
+	// TDesktop 的完整 Clear history 形态固定为 just_clear + max_id=0 且
+	// 不带日期范围；按日期删除只销毁选中区间，不在本地生成 history-clear
+	// 服务消息。只有完整清空才跨批保留 top 锚点。
+	fullJustClear := req.JustClear && req.MaxID <= 0 && req.MinDate <= 0 && req.MaxDate <= 0
+	if fullJustClear {
+		anchors = make(map[int64]historyClearAnchor, 2)
+		if anchor, found, err := s.loadHistoryClearAnchor(ctx, qtx, req.OwnerUserID, req.Peer); err != nil {
+			return res, err
+		} else if found {
+			anchors[req.OwnerUserID] = anchor
+		}
+		if req.Revoke && req.Peer.ID != req.OwnerUserID {
+			peer := domain.Peer{Type: domain.PeerTypeUser, ID: req.OwnerUserID}
+			if anchor, found, err := s.loadHistoryClearAnchor(ctx, qtx, req.Peer.ID, peer); err != nil {
+				return res, err
+			} else if found {
+				anchors[req.Peer.ID] = anchor
+			}
+		}
+	}
+	ownerKeepBoxID := int32(0)
+	if anchor, ok := anchors[req.OwnerUserID]; ok {
+		ownerKeepBoxID = int32(anchor.boxID)
+	}
 	rows, err := qtx.DeleteMessageBoxesByPeerBatch(ctx, sqlcgen.DeleteMessageBoxesByPeerBatchParams{
 		OwnerUserID: req.OwnerUserID,
 		PeerType:    string(req.Peer.Type),
 		PeerID:      req.Peer.ID,
+		KeepBoxID:   ownerKeepBoxID,
 		MaxID:       maxID,
 		MinDate:     minDate,
 		MaxDate:     maxDate,
@@ -534,7 +560,10 @@ func (s *MessageStore) DeleteHistory(ctx context.Context, req domain.DeleteHisto
 	}
 	deleted := deletedRowsFromPeerBatchRows(rows)
 	if req.Revoke {
-		if len(deleted) > 0 {
+		// max_id>0 是 owner-local box 边界，只能通过逻辑 private-message
+		// 映射删除对端副本。max_id=0 则双方按同一日期范围各扫一批，避免
+		// linked delete 与双方保留锚点互相删除。
+		if req.MaxID > 0 && len(deleted) > 0 {
 			peerRows, err := qtx.DeleteMessageBoxesByPrivateMessages(ctx, privateMessageDeleteParams(deleted))
 			if err != nil {
 				return res, fmt.Errorf("delete revoked private history boxes: %w", err)
@@ -547,10 +576,15 @@ func (s *MessageStore) DeleteHistory(ctx context.Context, req domain.DeleteHisto
 		// 适用同一区间，box_id 上限则是 owner 私有序无法映射，部分
 		// max_id 清史保持反查模型（官方 UI 无此入口）。
 		if req.MaxID <= 0 && req.Peer.ID != req.OwnerUserID {
+			peerKeepBoxID := int32(0)
+			if anchor, ok := anchors[req.Peer.ID]; ok {
+				peerKeepBoxID = int32(anchor.boxID)
+			}
 			peerSideRows, err := qtx.DeleteMessageBoxesByPeerBatch(ctx, sqlcgen.DeleteMessageBoxesByPeerBatchParams{
 				OwnerUserID: req.Peer.ID,
 				PeerType:    string(domain.PeerTypeUser),
 				PeerID:      req.OwnerUserID,
+				KeepBoxID:   peerKeepBoxID,
 				MaxID:       0,
 				MinDate:     minDate,
 				MaxDate:     maxDate,
@@ -562,7 +596,7 @@ func (s *MessageStore) DeleteHistory(ctx context.Context, req domain.DeleteHisto
 			deleted = append(deleted, deletedRowsFromPeerBatchRows(peerSideRows)...)
 		}
 	}
-	res, err = s.finishDeleteMessagesTx(ctx, tx, qtx, req.OwnerUserID, req.OriginAuthKeyID, req.OriginSessionID, req.Date, deleted, req.JustClear)
+	res, err = s.finishDeleteMessagesTx(ctx, tx, qtx, req.OwnerUserID, req.OriginAuthKeyID, req.OriginSessionID, req.Date, deleted, anchors)
 	if err != nil {
 		return res, err
 	}
@@ -570,6 +604,7 @@ func (s *MessageStore) DeleteHistory(ctx context.Context, req domain.DeleteHisto
 		OwnerUserID: req.OwnerUserID,
 		PeerType:    string(req.Peer.Type),
 		PeerID:      req.Peer.ID,
+		KeepBoxID:   ownerKeepBoxID,
 		MaxID:       maxID,
 		MinDate:     minDate,
 		MaxDate:     maxDate,
@@ -578,10 +613,15 @@ func (s *MessageStore) DeleteHistory(ctx context.Context, req domain.DeleteHisto
 		return res, fmt.Errorf("check remaining history after delete: %w", err)
 	}
 	if !more && req.Revoke && req.MaxID <= 0 && req.Peer.ID != req.OwnerUserID {
+		peerKeepBoxID := int32(0)
+		if anchor, ok := anchors[req.Peer.ID]; ok {
+			peerKeepBoxID = int32(anchor.boxID)
+		}
 		more, err = qtx.HasDeletableMessageBoxByPeer(ctx, sqlcgen.HasDeletableMessageBoxByPeerParams{
 			OwnerUserID: req.Peer.ID,
 			PeerType:    string(domain.PeerTypeUser),
 			PeerID:      req.OwnerUserID,
+			KeepBoxID:   peerKeepBoxID,
 			MaxID:       0,
 			MinDate:     minDate,
 			MaxDate:     maxDate,

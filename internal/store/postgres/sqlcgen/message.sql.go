@@ -886,12 +886,13 @@ WITH target AS (
   WHERE m.owner_user_id = $1::bigint
     AND m.peer_type = $2::text
     AND m.peer_id = $3::bigint
-    AND ($4::int <= 0 OR m.box_id <= $4::int)
-    AND ($5::int <= 0 OR m.message_date >= $5::int)
-    AND ($6::int <= 0 OR m.message_date <= $6::int)
+    AND ($4::int <= 0 OR m.box_id <> $4::int)
+    AND ($5::int <= 0 OR m.box_id <= $5::int)
+    AND ($6::int <= 0 OR m.message_date >= $6::int)
+    AND ($7::int <= 0 OR m.message_date <= $7::int)
     AND NOT m.deleted
   ORDER BY m.box_id DESC
-  LIMIT $7::int
+  LIMIT $8::int
   FOR UPDATE SKIP LOCKED
 ),
 updated AS (
@@ -923,6 +924,7 @@ type DeleteMessageBoxesByPeerBatchParams struct {
 	OwnerUserID int64
 	PeerType    string
 	PeerID      int64
+	KeepBoxID   int32
 	MaxID       int32
 	MinDate     int32
 	MaxDate     int32
@@ -943,6 +945,7 @@ func (q *Queries) DeleteMessageBoxesByPeerBatch(ctx context.Context, arg DeleteM
 		arg.OwnerUserID,
 		arg.PeerType,
 		arg.PeerID,
+		arg.KeepBoxID,
 		arg.MaxID,
 		arg.MinDate,
 		arg.MaxDate,
@@ -2108,9 +2111,10 @@ SELECT EXISTS (
   WHERE m.owner_user_id = $1::bigint
     AND m.peer_type = $2::text
     AND m.peer_id = $3::bigint
-    AND ($4::int <= 0 OR m.box_id <= $4::int)
-    AND ($5::int <= 0 OR m.message_date >= $5::int)
-    AND ($6::int <= 0 OR m.message_date <= $6::int)
+    AND ($4::int <= 0 OR m.box_id <> $4::int)
+    AND ($5::int <= 0 OR m.box_id <= $5::int)
+    AND ($6::int <= 0 OR m.message_date >= $6::int)
+    AND ($7::int <= 0 OR m.message_date <= $7::int)
     AND NOT m.deleted
   LIMIT 1
 )::boolean AS more
@@ -2120,6 +2124,7 @@ type HasDeletableMessageBoxByPeerParams struct {
 	OwnerUserID int64
 	PeerType    string
 	PeerID      int64
+	KeepBoxID   int32
 	MaxID       int32
 	MinDate     int32
 	MaxDate     int32
@@ -2130,6 +2135,7 @@ func (q *Queries) HasDeletableMessageBoxByPeer(ctx context.Context, arg HasDelet
 		arg.OwnerUserID,
 		arg.PeerType,
 		arg.PeerID,
+		arg.KeepBoxID,
 		arg.MaxID,
 		arg.MinDate,
 		arg.MaxDate,

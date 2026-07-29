@@ -3137,11 +3137,12 @@ func summarizeDeleteResult(res domain.DeleteMessagesResult) []any {
 	for _, item := range res.Deleted {
 		ids := append([]int(nil), item.MessageIDs...)
 		sort.Ints(ids)
+		pts, ptsCount := item.AffectedPts()
 		out = append(out, map[string]any{
 			"user_id":     item.UserID,
 			"message_ids": ids,
-			"pts":         item.Event.Pts,
-			"pts_count":   item.Event.PtsCount,
+			"pts":         pts,
+			"pts_count":   ptsCount,
 		})
 	}
 	return out

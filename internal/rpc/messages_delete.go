@@ -34,10 +34,11 @@ func (r *Router) onMessagesDeleteMessages(ctx context.Context, req *tg.MessagesD
 		return nil, internalErr()
 	}
 	self := res.Self()
-	if len(self.MessageIDs) == 0 || self.Event.Pts == 0 {
+	pts, ptsCount := self.AffectedPts()
+	if len(self.MessageIDs) == 0 || pts == 0 {
 		return r.affectedMessages(ctx, authKeyID, userID)
 	}
-	return &tg.MessagesAffectedMessages{Pts: self.Event.Pts, PtsCount: self.Event.PtsCount}, nil
+	return &tg.MessagesAffectedMessages{Pts: pts, PtsCount: ptsCount}, nil
 }
 
 func (r *Router) onMessagesDeleteHistory(ctx context.Context, req *tg.MessagesDeleteHistoryRequest) (*tg.MessagesAffectedHistory, error) {
@@ -109,12 +110,13 @@ func (r *Router) onMessagesDeleteHistory(ctx context.Context, req *tg.MessagesDe
 		return nil, internalErr()
 	}
 	self := res.Self()
-	if len(self.MessageIDs) == 0 || self.Event.Pts == 0 {
+	pts, ptsCount := self.AffectedPts()
+	if pts == 0 {
 		return r.affectedHistory(ctx, authKeyID, userID, 0)
 	}
 	return &tg.MessagesAffectedHistory{
-		Pts:      self.Event.Pts,
-		PtsCount: self.Event.PtsCount,
+		Pts:      pts,
+		PtsCount: ptsCount,
 		Offset:   res.Offset,
 	}, nil
 }

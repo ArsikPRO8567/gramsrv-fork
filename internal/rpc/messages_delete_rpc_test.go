@@ -149,6 +149,8 @@ func TestMessagesDeleteHistoryPassesJustClearContext(t *testing.T) {
 			UserID:     userID,
 			MessageIDs: []int{1, 2, 3},
 			Event:      domain.UpdateEvent{Pts: 12, PtsCount: 3},
+			Pts:        14,
+			PtsCount:   5,
 		}},
 	}}
 	r := New(Config{}, Deps{Messages: messages}, zaptest.NewLogger(t), clock.System)
@@ -171,8 +173,8 @@ func TestMessagesDeleteHistoryPassesJustClearContext(t *testing.T) {
 	if !ok {
 		t.Fatalf("response = %T, want *tg.MessagesAffectedHistory", enc)
 	}
-	if got.Pts != 12 || got.PtsCount != 3 {
-		t.Fatalf("affected = %+v, want pts=12 pts_count=3", got)
+	if got.Pts != 14 || got.PtsCount != 5 {
+		t.Fatalf("affected = %+v, want aggregate pts=14 pts_count=5", got)
 	}
 	reqGot := messages.deleteHistoryReq
 	if reqGot.OwnerUserID != userID || reqGot.Peer.ID != peerID || reqGot.MaxID != 15 || !reqGot.JustClear || !reqGot.Revoke || reqGot.OriginSessionID != 88 || reqGot.OriginAuthKeyID != authKeyID {

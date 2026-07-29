@@ -537,6 +537,11 @@ type MessageServiceActionKind string
 
 const (
 	MessageServiceActionSuggestProfilePhoto MessageServiceActionKind = "suggest_profile_photo"
+	// MessageServiceActionHistoryClear 映射 messageActionHistoryClear。私聊
+	// messages.deleteHistory(just_clear) 复用清理开始时的 top box id，把它
+	// 原位转换成 owner-local 服务消息，使 getDialogs/getHistory 在冷启动时
+	// 仍能从真实 top message 重建会话。
+	MessageServiceActionHistoryClear MessageServiceActionKind = "history_clear"
 	// MessageServiceActionPinMessage 映射 messageActionPinMessage：非
 	// pm_oneside 私聊置顶生成的服务消息，被置顶消息经 reply_to 指向。
 	MessageServiceActionPinMessage MessageServiceActionKind = "pin_message"
