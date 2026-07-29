@@ -122,7 +122,7 @@ func tgChannelDifference(viewerUserID int64, diff domain.ChannelDifference) tg.U
 			Users:    tgUsersForViewer(viewerUserID, diff.Users),
 		}
 	}
-	if len(diff.Events) == 0 && len(diff.NewMessages) == 0 && len(diff.OtherUpdates) == 0 && diff.AvailableMinID == 0 {
+	if len(diff.Events) == 0 && len(diff.NewMessages) == 0 && len(diff.OtherUpdates) == 0 {
 		return &tg.UpdatesChannelDifferenceEmpty{
 			Final:   diff.Final,
 			Pts:     diff.Pts,
@@ -147,12 +147,6 @@ func tgChannelDifference(viewerUserID int64, diff domain.ChannelDifference) tg.U
 		if update := tgChannelUpdate(viewerUserID, event); update != nil {
 			updates = append(updates, update)
 		}
-	}
-	if diff.AvailableMinID > 0 {
-		updates = append(updates, &tg.UpdateChannelAvailableMessages{
-			ChannelID:      diff.Channel.ID,
-			AvailableMinID: diff.AvailableMinID,
-		})
 	}
 	chats := tgChannelDifferenceChats(viewerUserID, diff)
 	users := tgUsersForViewer(viewerUserID, diff.Users)

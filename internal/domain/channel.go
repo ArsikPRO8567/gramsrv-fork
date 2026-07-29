@@ -1335,17 +1335,13 @@ type ChannelDifference struct {
 	Events       []ChannelUpdateEvent
 	NewMessages  []ChannelMessage
 	OtherUpdates []ChannelUpdateEvent
-	// AvailableMinID is an owner-local, absolute no-PTS boundary appended to a
-	// normal channel difference. It must never be represented as a synthetic
-	// ChannelUpdateEvent because updateChannelAvailableMessages has no pts.
-	AvailableMinID int
-	Users          []User
-	Channels       []Channel
-	Pts            int
-	Final          bool
-	TooLong        bool
-	Dialog         ChannelDialog
-	Timeout        int
+	Users        []User
+	Channels     []Channel
+	Pts          int
+	Final        bool
+	TooLong      bool
+	Dialog       ChannelDialog
+	Timeout      int
 }
 
 // DirtyChannel identifies an active channel with shared channel updates and/or

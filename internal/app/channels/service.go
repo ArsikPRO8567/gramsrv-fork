@@ -2302,14 +2302,6 @@ func (s *Service) GetDifference(ctx context.Context, userID int64, req domain.Ch
 		return domain.ChannelDifference{}, err
 	}
 	diff = s.filterBotChannelDifference(ctx, userID, diff)
-	if diff.Self.HistoryClearAnchorID > 0 &&
-		diff.Self.HistoryClearAnchorID == diff.Self.AvailableMinID &&
-		!diff.TooLong {
-		// updateChannelAvailableMessages is an absolute no-PTS update. Keep it
-		// outside ChannelUpdateEvent so channel difference continuity remains
-		// defined solely by real channel events.
-		diff.AvailableMinID = diff.Self.AvailableMinID
-	}
 	return diff, nil
 }
 

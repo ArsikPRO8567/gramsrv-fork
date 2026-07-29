@@ -273,32 +273,21 @@ func TestChannelsDeleteHistoryLocalClearEmitsAvailableMessagesUpdate(t *testing.
 		t.Fatalf("offline account state = %+v, want unchanged pts=%d and non-regressing date", offlineDiff.State, stateBefore.Pts)
 	}
 
-	channelOffline, err := r.onUpdatesGetChannelDifference(WithUserID(ctx, owner.ID), &tg.UpdatesGetChannelDifferenceRequest{
-		Channel: &tg.InputChannel{ChannelID: channel.ID, AccessHash: channel.AccessHash},
-		Filter:  &tg.ChannelMessagesFilterEmpty{},
-		Pts:     newChannelUpdate.Pts,
-		Limit:   100,
-	})
-	if err != nil {
-		t.Fatalf("channel difference after offline local clear: %v", err)
-	}
-	channelDiff, ok := channelOffline.(*tg.UpdatesChannelDifference)
-	if !ok {
-		t.Fatalf("offline channel difference = %T %+v, want non-empty difference with absolute update", channelOffline, channelOffline)
-	}
-	var channelAvailable *tg.UpdateChannelAvailableMessages
-	for _, update := range channelDiff.OtherUpdates {
-		if value, ok := update.(*tg.UpdateChannelAvailableMessages); ok {
-			channelAvailable = value
-			break
+	for attempt := 1; attempt <= 2; attempt++ {
+		channelOffline, err := r.onUpdatesGetChannelDifference(WithUserID(ctx, owner.ID), &tg.UpdatesGetChannelDifferenceRequest{
+			Channel: &tg.InputChannel{ChannelID: channel.ID, AccessHash: channel.AccessHash},
+			Filter:  &tg.ChannelMessagesFilterEmpty{},
+			Pts:     newChannelUpdate.Pts,
+			Limit:   100,
+		})
+		if err != nil {
+			t.Fatalf("channel difference attempt %d after offline local clear: %v", attempt, err)
 		}
-	}
-	if channelAvailable == nil ||
-		channelAvailable.ChannelID != channel.ID ||
-		channelAvailable.AvailableMinID != msg.ID ||
-		channelDiff.Pts != newChannelUpdate.Pts {
-		t.Fatalf("offline channel updates = %+v pts=%d, want available boundary %d with unchanged channel pts=%d",
-			channelDiff.OtherUpdates, channelDiff.Pts, msg.ID, newChannelUpdate.Pts)
+		channelDiff, ok := channelOffline.(*tg.UpdatesChannelDifferenceEmpty)
+		if !ok || channelDiff.Pts != newChannelUpdate.Pts {
+			t.Fatalf("channel difference attempt %d = %T %+v, want empty with unchanged channel pts=%d",
+				attempt, channelOffline, channelOffline, newChannelUpdate.Pts)
+		}
 	}
 
 	req := &tg.MessagesGetDialogsRequest{OffsetPeer: &tg.InputPeerEmpty{}, Limit: 20}
