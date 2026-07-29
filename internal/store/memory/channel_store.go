@@ -73,14 +73,19 @@ type ChannelStore struct {
 	messages  map[int64][]domain.ChannelMessage
 	reactions map[int64]map[int]map[int64][]domain.ChannelMessagePeerReaction
 	// paidReactions 是 per-(channel,message,user) 付费 reaction 累计星数 + 匿名标志。
-	paidReactions          map[int64]map[int]map[int64]memoryPaidReaction
-	top                    map[int64]map[string]domain.TopMessageReaction
-	recent                 map[int64]map[string]domain.RecentMessageReaction
-	mentions               map[int64]map[int64]map[int]memoryMention
-	msgViews               map[int64]map[int]int
-	msgViewers             map[int64]map[int]map[int64]struct{}
-	events                 map[int64][]domain.ChannelUpdateEvent
-	retention              map[int64]domain.ChannelUpdateRetentionCheckpoint
+	paidReactions map[int64]map[int]map[int64]memoryPaidReaction
+	top           map[int64]map[string]domain.TopMessageReaction
+	recent        map[int64]map[string]domain.RecentMessageReaction
+	mentions      map[int64]map[int64]map[int]memoryMention
+	msgViews      map[int64]map[int]int
+	msgViewers    map[int64]map[int]map[int64]struct{}
+	events        map[int64][]domain.ChannelUpdateEvent
+	retention     map[int64]domain.ChannelUpdateRetentionCheckpoint
+	// historyClearDates is the no-PTS recovery timestamp for a future
+	// owner-local clear, keyed by channel then user. The member remains the
+	// absolute boundary authority; this map only makes account difference
+	// discovery bounded without scanning messages.
+	historyClearDates      map[int64]map[int64]int
 	adminLogs              map[int64][]domain.ChannelAdminLogEvent
 	invites                map[string]domain.ChannelInvite
 	importers              map[int64]map[int64]domain.ChannelInviteImporter
@@ -137,6 +142,7 @@ func NewChannelStore() *ChannelStore {
 		msgViewers:             make(map[int64]map[int]map[int64]struct{}),
 		events:                 make(map[int64][]domain.ChannelUpdateEvent),
 		retention:              make(map[int64]domain.ChannelUpdateRetentionCheckpoint),
+		historyClearDates:      make(map[int64]map[int64]int),
 		adminLogs:              make(map[int64][]domain.ChannelAdminLogEvent),
 		invites:                make(map[string]domain.ChannelInvite),
 		importers:              make(map[int64]map[int64]domain.ChannelInviteImporter),

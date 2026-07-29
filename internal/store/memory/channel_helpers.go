@@ -337,9 +337,19 @@ func (s *ChannelStore) ListDirtyActiveChannelsForUser(_ context.Context, userID 
 		if !ok || member.Status != domain.ChannelMemberActive {
 			continue
 		}
+		item := domain.DirtyChannel{ChannelID: channelID, Pts: channel.Pts}
 		checkpoint := s.channelUpdateCheckpointLocked(channelID, channel)
 		if checkpoint.LatestEventDate > sinceDate {
-			out = append(out, domain.DirtyChannel{ChannelID: channelID, Pts: channel.Pts})
+			item.ChannelUpdatesDirty = true
+		}
+		if clearDate := s.historyClearDates[channelID][userID]; clearDate >= sinceDate &&
+			member.HistoryClearAnchorID > 0 &&
+			member.HistoryClearAnchorID == member.AvailableMinID {
+			item.AvailableMinID = member.AvailableMinID
+			item.HistoryClearDate = clearDate
+		}
+		if item.ChannelUpdatesDirty || item.AvailableMinID > 0 {
+			out = append(out, item)
 		}
 	}
 	for channelID, channel := range s.channels {
@@ -356,7 +366,11 @@ func (s *ChannelStore) ListDirtyActiveChannelsForUser(_ context.Context, userID 
 				}
 			}
 			if !found {
-				out = append(out, domain.DirtyChannel{ChannelID: channelID, Pts: channel.Pts})
+				out = append(out, domain.DirtyChannel{
+					ChannelID:           channelID,
+					Pts:                 channel.Pts,
+					ChannelUpdatesDirty: true,
+				})
 			}
 		}
 	}
@@ -453,12 +467,16 @@ func (s *ChannelStore) dialogForMemberLocked(userID int64, channel domain.Channe
 	dialog.UserID = userID
 	dialog.ChannelID = channel.ID
 	dialog.TopMessageID = s.visibleTopMessageIDForMemberLocked(channel, member)
+	dialog.HistoryClearAnchorID = member.HistoryClearAnchorID
+	dialog.HistoryClearAnchorDate = member.HistoryClearAnchorDate
 	// TopMessageDate 必须从可见 top 消息派生(不能继承空缓存的 0),否则会话排序/分页与预览
 	// dialog 的日期全错。与 postgres GetChannelDialogs 用 getChannelMessage 设 date 对齐。
 	dialog.TopMessageDate = 0
 	if dialog.TopMessageID > 0 {
-		if top, ok := s.findMessageLocked(channel.ID, dialog.TopMessageID); ok {
+		if top, ok := s.channelMessageForMemberLocked(userID, channel.ID, dialog.TopMessageID); ok {
 			dialog.TopMessageDate = top.Date
+		} else if dialog.TopMessageID == member.HistoryClearAnchorID {
+			dialog.TopMessageDate = member.HistoryClearAnchorDate
 		}
 	}
 	if member.ReadInboxMaxID > dialog.ReadInboxMaxID {

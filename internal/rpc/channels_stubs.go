@@ -290,27 +290,6 @@ func peerIDsExcept(ids []int64, skipIDs ...int64) []int64 {
 
 type channelFanoutScope int
 
-func (r *Router) recordChannelAvailableMessages(ctx context.Context, userID, channelID int64, availableMinID int) domain.UpdateEvent {
-	event := domain.UpdateEvent{
-		UserID:   userID,
-		Type:     domain.UpdateEventChannelAvailable,
-		Date:     int(r.clock.Now().Unix()),
-		Peer:     domain.Peer{Type: domain.PeerTypeChannel, ID: channelID},
-		MaxID:    availableMinID,
-		PtsCount: 1,
-	}
-	if r.deps.Updates == nil || userID == 0 || channelID == 0 || availableMinID <= 0 {
-		return event
-	}
-	authKeyID, _ := AuthKeyIDFrom(ctx)
-	sessionID, _ := SessionIDFrom(ctx)
-	recorded, _, err := r.deps.Updates.RecordChannelAvailableMessages(ctx, authKeyID, userID, channelID, availableMinID, rawAuthKeyIDForOrigin(ctx), sessionID)
-	if err != nil {
-		return event
-	}
-	return recorded
-}
-
 func (r *Router) recordChannelReadInbox(ctx context.Context, userID int64, read domain.ReadChannelHistoryResult) (domain.UpdateEvent, error) {
 	if !read.Changed || read.ChannelID == 0 {
 		return domain.UpdateEvent{}, nil

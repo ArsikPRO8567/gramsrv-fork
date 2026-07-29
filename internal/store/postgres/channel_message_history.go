@@ -79,6 +79,10 @@ AND EXISTS (
 		baseArgs = append(baseArgs, filter.MinID)
 		base += fmt.Sprintf(" AND id > $%d", len(baseArgs))
 	}
+	historyClearAnchor, hasHistoryClearAnchor, err := s.channelHistoryClearAnchor(ctx, channel, member, filter)
+	if err != nil {
+		return domain.ChannelHistory{}, err
+	}
 	out := domain.ChannelHistory{Channel: channel, Self: member, Channels: extraChannels}
 	needExactTotal := filter.NeedTotalCount || filter.CountOnly
 	exactTotal := 0
@@ -91,6 +95,9 @@ AND EXISTS (
 			baseArgs...,
 		).Scan(&exactTotal); err != nil {
 			return domain.ChannelHistory{}, fmt.Errorf("count channel history: %w", err)
+		}
+		if hasHistoryClearAnchor {
+			exactTotal++
 		}
 		out.Count = exactTotal
 	}
@@ -134,6 +141,18 @@ AND EXISTS (
 		}
 		return "false"
 	}
+	anchorMatchesForward := func() bool {
+		if !hasHistoryClearAnchor {
+			return false
+		}
+		if filter.OffsetDate > 0 {
+			return historyClearAnchor.Date >= filter.OffsetDate
+		}
+		if filter.OffsetID > 0 {
+			return historyClearAnchor.ID > filter.OffsetID
+		}
+		return false
+	}
 	aroundOlderCond := func(args *[]any) string {
 		if filter.OffsetDate > 0 {
 			*args = append(*args, filter.OffsetDate)
@@ -144,6 +163,30 @@ AND EXISTS (
 			return fmt.Sprintf("id <= $%d", len(*args))
 		}
 		return "true"
+	}
+	anchorMatchesAroundOlder := func() bool {
+		if !hasHistoryClearAnchor {
+			return false
+		}
+		if filter.OffsetDate > 0 {
+			return historyClearAnchor.Date < filter.OffsetDate
+		}
+		if filter.OffsetID > 0 {
+			return historyClearAnchor.ID <= filter.OffsetID
+		}
+		return true
+	}
+	anchorMatchesBackward := func() bool {
+		if !hasHistoryClearAnchor {
+			return false
+		}
+		if filter.OffsetDate > 0 {
+			return historyClearAnchor.Date < filter.OffsetDate
+		}
+		if filter.OffsetID > 0 {
+			return historyClearAnchor.ID < filter.OffsetID
+		}
+		return true
 	}
 	switch {
 	case addOffset < 0 && addOffset+limit > 0:
@@ -157,12 +200,21 @@ AND EXISTS (
 		if err != nil {
 			return domain.ChannelHistory{}, err
 		}
+		if anchorMatchesForward() {
+			newer = append([]domain.ChannelMessage{historyClearAnchor}, newer...)
+			if len(newer) > fwdLimit {
+				newer = newer[:fwdLimit]
+			}
+		}
 		bwdArgs := append([]any{}, baseArgs...)
 		bwdWhere := aroundOlderCond(&bwdArgs)
 		bwdArgs = append(bwdArgs, bwdLimit+1)
 		older, err := scanList(fmt.Sprintf("SELECT "+channelMessageColumns+" FROM channel_messages WHERE %s AND %s ORDER BY id DESC LIMIT $%d", base, bwdWhere, len(bwdArgs)), bwdArgs)
 		if err != nil {
 			return domain.ChannelHistory{}, err
+		}
+		if anchorMatchesAroundOlder() {
+			older = append(older, historyClearAnchor)
 		}
 		if len(older) > bwdLimit {
 			older = older[:bwdLimit]
@@ -181,6 +233,9 @@ AND EXISTS (
 		if err != nil {
 			return domain.ChannelHistory{}, err
 		}
+		if anchorMatchesForward() {
+			newer = append([]domain.ChannelMessage{historyClearAnchor}, newer...)
+		}
 		if len(newer) > limit {
 			newer = newer[:limit]
 		}
@@ -198,17 +253,25 @@ AND EXISTS (
 			args = append(args, filter.OffsetID)
 			where += fmt.Sprintf(" AND id < $%d", len(args))
 		}
-		args = append(args, limit+1)
+		// Fetch the bounded add_offset window and slice it in memory. This keeps
+		// the shared-history branch on its ordered (channel_id,id) seek index;
+		// the owner-local anchor is one separate PK lookup and never adds an OR
+		// that would force BitmapOr + Sort for large channels.
+		args = append(args, addOffset+limit+1)
 		limIdx := len(args)
-		sql := "SELECT " + channelMessageColumns + " FROM channel_messages WHERE " + where + " ORDER BY id DESC"
-		if addOffset > 0 {
-			args = append(args, addOffset)
-			sql += fmt.Sprintf(" OFFSET $%d", len(args))
-		}
-		sql += fmt.Sprintf(" LIMIT $%d", limIdx)
+		sql := "SELECT " + channelMessageColumns + " FROM channel_messages WHERE " + where +
+			fmt.Sprintf(" ORDER BY id DESC LIMIT $%d", limIdx)
 		older, err := scanList(sql, args)
 		if err != nil {
 			return domain.ChannelHistory{}, err
+		}
+		if anchorMatchesBackward() {
+			older = append(older, historyClearAnchor)
+		}
+		if addOffset >= len(older) {
+			older = nil
+		} else if addOffset > 0 {
+			older = older[addOffset:]
 		}
 		if len(older) > limit {
 			older = older[:limit]
@@ -228,7 +291,61 @@ AND EXISTS (
 	if err := s.populateChannelMessagesReactions(ctx, s.db, viewerUserID, []domain.Channel{channel}, out.Messages); err != nil {
 		return domain.ChannelHistory{}, err
 	}
+	if hasHistoryClearAnchor {
+		for i := range out.Messages {
+			if out.Messages[i].ID == historyClearAnchor.ID {
+				out.Messages[i] = domain.ProjectChannelHistoryClearMessage(
+					out.Messages[i],
+					channel.ID,
+					member.HistoryClearAnchorID,
+					member.HistoryClearAnchorDate,
+				)
+			}
+		}
+	}
 	return out, nil
+}
+
+func (s *ChannelStore) channelHistoryClearAnchor(
+	ctx context.Context,
+	channel domain.Channel,
+	member domain.ChannelMember,
+	filter domain.ChannelHistoryFilter,
+) (domain.ChannelMessage, bool, error) {
+	if !filter.IncludeHistoryClearAnchor ||
+		member.HistoryClearAnchorID <= 0 ||
+		member.HistoryClearAnchorID != member.AvailableMinID ||
+		filter.PinnedOnly ||
+		filter.MusicOnly ||
+		filter.Query != "" {
+		return domain.ChannelMessage{}, false, nil
+	}
+	source, err := s.getChannelMessage(ctx, s.db, channel.ID, member.HistoryClearAnchorID)
+	if err != nil && !errors.Is(err, domain.ErrMessageIDInvalid) {
+		return domain.ChannelMessage{}, false, fmt.Errorf("load channel history-clear anchor: %w", err)
+	}
+	anchor := domain.ProjectChannelHistoryClearMessage(
+		source,
+		channel.ID,
+		member.HistoryClearAnchorID,
+		member.HistoryClearAnchorDate,
+	)
+	if filter.SenderUserID != 0 && anchor.SenderUserID != filter.SenderUserID {
+		return domain.ChannelMessage{}, false, nil
+	}
+	if filter.MinDate > 0 && anchor.Date <= filter.MinDate {
+		return domain.ChannelMessage{}, false, nil
+	}
+	if filter.MaxDate > 0 && anchor.Date >= filter.MaxDate {
+		return domain.ChannelMessage{}, false, nil
+	}
+	if filter.MaxID > 0 && anchor.ID > filter.MaxID {
+		return domain.ChannelMessage{}, false, nil
+	}
+	if filter.MinID > 0 && anchor.ID <= filter.MinID {
+		return domain.ChannelMessage{}, false, nil
+	}
+	return anchor, true, nil
 }
 
 func (s *ChannelStore) SearchJoinedMessages(ctx context.Context, viewerUserID int64, req domain.ChannelGlobalSearchRequest) (domain.ChannelHistory, error) {
@@ -390,8 +507,15 @@ func (s *ChannelStore) getChannelMessagesForMember(ctx context.Context, viewerUs
 	// 执行不变。注意:这种"OR 哨兵"只对【非排序锚点】的残余过滤安全;ListChannelHistory
 	// 的方向/anchor 条件若同样哨兵化会让规划器无法用索引顺序做 LIMIT、退化为全表扫+排序
 	// (实测 0.06ms→23ms),故那里【刻意保留】动态 SQL。
-	args := []any{channel.ID, id32, member.AvailableMinID}
-	where := "channel_id = $1 AND id = ANY($2::int[]) AND NOT deleted AND ($3 <= 0 OR id > $3)"
+	anchorID := 0
+	if member.HistoryClearAnchorID > 0 && member.HistoryClearAnchorID == member.AvailableMinID {
+		anchorID = member.HistoryClearAnchorID
+	}
+	args := []any{channel.ID, id32, member.AvailableMinID, anchorID}
+	where := `channel_id = $1
+AND id = ANY($2::int[])
+AND (NOT deleted OR ($4 > 0 AND id = $4))
+AND (($3 <= 0 OR id > $3) OR ($4 > 0 AND id = $4))`
 	rows, err := s.db.Query(ctx, `
 SELECT `+channelMessageColumns+`
 FROM channel_messages
@@ -418,6 +542,36 @@ ORDER BY id DESC`, args...)
 	}
 	if err := s.populateChannelMessagesReactions(ctx, s.db, viewerUserID, []domain.Channel{channel}, out.Messages); err != nil {
 		return domain.ChannelHistory{}, err
+	}
+	if anchorID > 0 {
+		anchorFound := false
+		for i := range out.Messages {
+			if out.Messages[i].ID != anchorID {
+				continue
+			}
+			out.Messages[i] = domain.ProjectChannelHistoryClearMessage(
+				out.Messages[i],
+				channel.ID,
+				member.HistoryClearAnchorID,
+				member.HistoryClearAnchorDate,
+			)
+			anchorFound = true
+		}
+		if !anchorFound {
+			for _, id := range ids {
+				if id != anchorID {
+					continue
+				}
+				out.Messages = append(out.Messages, domain.ProjectChannelHistoryClearMessage(
+					domain.ChannelMessage{},
+					channel.ID,
+					member.HistoryClearAnchorID,
+					member.HistoryClearAnchorDate,
+				))
+				out.Count = len(out.Messages)
+				break
+			}
+		}
 	}
 	return out, nil
 }

@@ -74,16 +74,13 @@ func (r *Router) onMessagesDeleteHistory(ctx context.Context, req *tg.MessagesDe
 			})
 			return &tg.MessagesAffectedHistory{Pts: res.Event.Pts, PtsCount: res.Event.PtsCount, Offset: res.Offset}, nil
 		}
-		if res.AvailableMinID > 0 {
-			event := r.recordChannelAvailableMessages(ctx, userID, res.Channel.ID, res.AvailableMinID)
-			updates := r.channelAvailableMessagesUpdates(userID, res.Channel, event.MaxID)
-			updates.Updates = appendAuxPtsBookkeeping(updates.Updates, event)
+		if res.AvailableMinChanged && res.AvailableMinID > 0 {
+			updates := r.channelAvailableMessagesUpdates(userID, res.Channel, res.AvailableMinID)
 			r.pushUserUpdates(ctx, userID, updates)
-			if event.Pts != 0 {
-				return &tg.MessagesAffectedHistory{Pts: event.Pts, PtsCount: event.PtsCount, Offset: res.Offset}, nil
-			}
 		}
-		return &tg.MessagesAffectedHistory{Pts: res.Channel.Pts, PtsCount: 0, Offset: res.Offset}, nil
+		// messages.affectedHistory.pts is the caller's account-state snapshot.
+		// The local channel clear itself consumes no account/channel pts.
+		return r.affectedHistory(ctx, authKeyID, userID, res.Offset)
 	}
 	if peer.Type != domain.PeerTypeUser {
 		return nil, peerIDInvalidErr()

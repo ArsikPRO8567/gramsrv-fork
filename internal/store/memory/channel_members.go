@@ -1107,6 +1107,8 @@ func syntheticMonoforumAdminMember(mono domain.Channel, parentMember domain.Chan
 	}
 	member.AvailableMinID = 0
 	member.AvailableMinPts = 0
+	member.HistoryClearAnchorID = 0
+	member.HistoryClearAnchorDate = 0
 	member.ReadInboxMaxID = mono.TopMessageID
 	member.ReadOutboxMaxID = mono.TopMessageID
 	member.UnreadMark = false

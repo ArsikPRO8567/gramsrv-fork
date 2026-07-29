@@ -128,7 +128,8 @@ func (s *ChannelStore) GetParticipants(ctx context.Context, viewerUserID, channe
 	}
 	rows, err := s.db.Query(ctx, `
 SELECT channel_id, user_id, inviter_user_id, role, status, joined_at, left_at, admin_rights::text, banned_rights::text,
-       rank, available_min_id, available_min_pts, read_inbox_max_id, read_outbox_max_id, unread_mark, slowmode_last_send_date
+       rank, available_min_id, available_min_pts, history_clear_anchor_id, history_clear_anchor_date,
+       read_inbox_max_id, read_outbox_max_id, unread_mark, slowmode_last_send_date
 `+from+`
 WHERE `+strings.Join(where, " AND ")+`
 ORDER BY CASE role WHEN 'creator' THEN 0 WHEN 'admin' THEN 1 ELSE 2 END, user_id
@@ -221,7 +222,8 @@ func (s *ChannelStore) ListActiveChannelMembers(ctx context.Context, viewerUserI
 	}
 	rows, err := s.db.Query(ctx, `
 SELECT channel_id, user_id, inviter_user_id, role, status, joined_at, left_at, admin_rights::text, banned_rights::text,
-       rank, available_min_id, available_min_pts, read_inbox_max_id, read_outbox_max_id, unread_mark, slowmode_last_send_date
+       rank, available_min_id, available_min_pts, history_clear_anchor_id, history_clear_anchor_date,
+       read_inbox_max_id, read_outbox_max_id, unread_mark, slowmode_last_send_date
 FROM channel_members
 WHERE channel_id = $1 AND status = 'active'
 ORDER BY user_id
@@ -264,6 +266,7 @@ func (s *ChannelStore) ListActiveChannelBotMembers(ctx context.Context, viewerUs
 	rows, err := s.db.Query(ctx, `
 SELECT m.channel_id, m.user_id, m.inviter_user_id, m.role, m.status, m.joined_at, m.left_at,
        m.admin_rights::text, m.banned_rights::text, m.rank, m.available_min_id, m.available_min_pts,
+       m.history_clear_anchor_id, m.history_clear_anchor_date,
        m.read_inbox_max_id, m.read_outbox_max_id, m.unread_mark, m.slowmode_last_send_date,
        COUNT(*) OVER()::int
 FROM bots b

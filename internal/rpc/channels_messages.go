@@ -394,10 +394,14 @@ func (r *Router) onChannelsDeleteHistory(ctx context.Context, req *tg.ChannelsDe
 		return nil, channelDeleteErr(err)
 	}
 	if res.Event.Pts == 0 {
-		event := r.recordChannelAvailableMessages(ctx, userID, res.Channel.ID, res.AvailableMinID)
-		updates := r.channelAvailableMessagesUpdates(userID, res.Channel, event.MaxID)
-		updates.Updates = appendAuxPtsBookkeeping(updates.Updates, event)
-		r.pushUserUpdates(ctx, userID, updates)
+		updates := r.channelAvailableMessagesUpdates(userID, res.Channel, res.AvailableMinID)
+		if res.AvailableMinChanged {
+			// updateChannelAvailableMessages is an absolute owner-local boundary
+			// with no account/channel pts. Other online sessions consume it
+			// immediately; future cold/offline sessions discover the same
+			// boundary through account/channel difference recovery.
+			r.pushUserUpdates(ctx, userID, updates)
+		}
 		return updates, nil
 	}
 	pushBatch := func(batch domain.DeleteChannelHistoryResult) *tg.Updates {

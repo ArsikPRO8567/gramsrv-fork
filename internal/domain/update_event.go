@@ -44,7 +44,6 @@ const (
 	UpdateEventDialogFilterOrder        UpdateEventType = "dialog_filter_order"
 	UpdateEventDialogFilters            UpdateEventType = "dialog_filters"
 	UpdateEventFolderPeers              UpdateEventType = "folder_peers"
-	UpdateEventChannelAvailable         UpdateEventType = "channel_available_messages"
 	UpdateEventChannelViewForum         UpdateEventType = "channel_view_forum_as_messages"
 	UpdateEventStory                    UpdateEventType = "story"
 	UpdateEventReadStories              UpdateEventType = "read_stories"
@@ -141,7 +140,6 @@ func (e UpdateEvent) LacksWirePts() bool {
 		UpdateEventDialogFilter,
 		UpdateEventDialogFilterOrder,
 		UpdateEventDialogFilters,
-		UpdateEventChannelAvailable,
 		UpdateEventChannelViewForum,
 		UpdateEventStory,
 		UpdateEventReadStories,
@@ -178,7 +176,10 @@ type UpdateDifference struct {
 
 // ChannelDifferenceNudge is a computed account-level hint that a channel diff is dirty.
 type ChannelDifferenceNudge struct {
-	ChannelID int64
-	Pts       int
-	Channel   *ChannelView
+	ChannelID           int64
+	Pts                 int
+	ChannelUpdatesDirty bool
+	AvailableMinID      int
+	HistoryClearDate    int
+	Channel             *ChannelView
 }

@@ -731,16 +731,6 @@ func (s *Service) RecordFolderPeers(ctx context.Context, stateAuthKeyID [8]byte,
 	}, true, excludeSessionID)
 }
 
-// RecordChannelAvailableMessages records a local channel history clear for multi-device sync.
-func (s *Service) RecordChannelAvailableMessages(ctx context.Context, stateAuthKeyID [8]byte, userID, channelID int64, availableMinID int, excludeAuthKeyID [8]byte, excludeSessionID int64) (domain.UpdateEvent, domain.UpdateState, error) {
-	return s.recordEvent(ctx, stateAuthKeyID, excludeAuthKeyID, userID, domain.UpdateEvent{
-		Type:     domain.UpdateEventChannelAvailable,
-		Peer:     domain.Peer{Type: domain.PeerTypeChannel, ID: channelID},
-		MaxID:    availableMinID,
-		PtsCount: 1,
-	}, true, excludeSessionID)
-}
-
 func (s *Service) recordEvent(ctx context.Context, stateAuthKeyID, excludeAuthKeyID [8]byte, userID int64, event domain.UpdateEvent, dispatch bool, excludeSessionID int64) (domain.UpdateEvent, domain.UpdateState, error) {
 	return s.recordEventCore(ctx, stateAuthKeyID, excludeAuthKeyID, userID, event, dispatch, excludeSessionID, true)
 }

@@ -31,7 +31,10 @@ func (s *ChannelStore) SaveChannelDefaultSendAs(ctx context.Context, req domain.
 	}
 	topMessageID := channel.TopMessageID
 	if topMessageID <= member.AvailableMinID {
-		topMessageID = 0
+		topMessageID = member.HistoryClearAnchorID
+		if topMessageID != member.AvailableMinID {
+			topMessageID = 0
+		}
 	}
 	if _, err := s.db.Exec(ctx, `
 INSERT INTO channel_dialogs (
@@ -393,15 +396,59 @@ LIMIT $4`, userID, sinceDate, afterChannelID, limit)
 		return nil, fmt.Errorf("list dirty active channels for user: %w", err)
 	}
 	defer rows.Close()
-	out := make([]domain.DirtyChannel, 0, limit)
+	byChannelID := make(map[int64]domain.DirtyChannel, limit*2)
 	for rows.Next() {
 		var item domain.DirtyChannel
 		if err := rows.Scan(&item.ChannelID, &item.Pts); err != nil {
 			return nil, err
 		}
+		item.ChannelUpdatesDirty = true
+		byChannelID[item.ChannelID] = item
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	clearRows, err := s.db.Query(ctx, `
+SELECT i.channel_id, c.pts, i.available_min_id, i.history_clear_updated_at
+FROM user_channel_member_index i
+JOIN channels c ON c.id = i.channel_id AND NOT c.deleted
+WHERE i.user_id = $1
+  AND i.status = 'active'
+  AND NOT i.deleted
+  AND i.channel_id > $3
+  AND i.history_clear_anchor_id > 0
+  AND i.history_clear_anchor_id = i.available_min_id
+  AND i.history_clear_updated_at >= $2
+ORDER BY i.channel_id ASC
+LIMIT $4`, userID, sinceDate, afterChannelID, limit)
+	if err != nil {
+		return nil, fmt.Errorf("list owner-local channel history clears for user: %w", err)
+	}
+	defer clearRows.Close()
+	for clearRows.Next() {
+		var item domain.DirtyChannel
+		if err := clearRows.Scan(&item.ChannelID, &item.Pts, &item.AvailableMinID, &item.HistoryClearDate); err != nil {
+			return nil, err
+		}
+		if existing, ok := byChannelID[item.ChannelID]; ok {
+			item.ChannelUpdatesDirty = existing.ChannelUpdatesDirty
+		}
+		byChannelID[item.ChannelID] = item
+	}
+	if err := clearRows.Err(); err != nil {
+		return nil, err
+	}
+
+	out := make([]domain.DirtyChannel, 0, len(byChannelID))
+	for _, item := range byChannelID {
 		out = append(out, item)
 	}
-	return out, rows.Err()
+	sort.Slice(out, func(i, j int) bool { return out[i].ChannelID < out[j].ChannelID })
+	if len(out) > limit {
+		out = out[:limit]
+	}
+	return out, nil
 }
 
 type rowScanner interface {

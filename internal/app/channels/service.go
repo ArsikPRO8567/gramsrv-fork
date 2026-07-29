@@ -2301,7 +2301,16 @@ func (s *Service) GetDifference(ctx context.Context, userID int64, req domain.Ch
 	if err != nil {
 		return domain.ChannelDifference{}, err
 	}
-	return s.filterBotChannelDifference(ctx, userID, diff), nil
+	diff = s.filterBotChannelDifference(ctx, userID, diff)
+	if diff.Self.HistoryClearAnchorID > 0 &&
+		diff.Self.HistoryClearAnchorID == diff.Self.AvailableMinID &&
+		!diff.TooLong {
+		// updateChannelAvailableMessages is an absolute no-PTS update. Keep it
+		// outside ChannelUpdateEvent so channel difference continuity remains
+		// defined solely by real channel events.
+		diff.AvailableMinID = diff.Self.AvailableMinID
+	}
+	return diff, nil
 }
 
 // ClearDanglingPinnedMessage 清除指向已删除消息的悬挂置顶值（unpinAll 自愈）。

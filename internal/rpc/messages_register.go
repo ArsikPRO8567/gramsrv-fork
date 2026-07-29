@@ -604,14 +604,15 @@ func (r *Router) registerMessages(d *tlprofile.Dispatcher) {
 				return &tg.MessagesMessages{}, nil
 			}
 			history, err := r.deps.Channels.GetHistory(ctx, userID, domain.ChannelHistoryFilter{
-				ChannelID:  filter.Peer.ID,
-				OffsetID:   filter.OffsetID,
-				OffsetDate: filter.OffsetDate,
-				AddOffset:  filter.AddOffset,
-				Limit:      filter.Limit,
-				MaxID:      filter.MaxID,
-				MinID:      filter.MinID,
-				Hash:       filter.Hash,
+				ChannelID:                 filter.Peer.ID,
+				OffsetID:                  filter.OffsetID,
+				OffsetDate:                filter.OffsetDate,
+				AddOffset:                 filter.AddOffset,
+				Limit:                     filter.Limit,
+				MaxID:                     filter.MaxID,
+				MinID:                     filter.MinID,
+				Hash:                      filter.Hash,
+				IncludeHistoryClearAnchor: true,
 			})
 			if err != nil {
 				return nil, channelInvalidErr(err)
