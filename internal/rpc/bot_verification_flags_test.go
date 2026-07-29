@@ -246,6 +246,71 @@ func TestUserAndUserFullCarryBotVerificationOnLayer228Bits(t *testing.T) {
 	}
 }
 
+// TestPeerSettingsUserPreservesBotVerificationOnLayer228Bit covers the chat-open
+// race behind a disappearing badge. Official clients merge messages.peerSettings
+// users into the same peer cache as users.getFullUser; therefore the auxiliary
+// User must carry the same flags2.14 value regardless of which RPC arrives last.
+func TestPeerSettingsUserPreservesBotVerificationOnLayer228Bit(t *testing.T) {
+	f := newBotVerificationFixture(t, newFakeBotVerifications())
+	f.enableVerifier(f.bot.ID, 8800011, true)
+	ownerCtx := WithUserID(context.Background(), f.owner.ID)
+	peer := &tg.InputPeerUser{UserID: f.target.ID, AccessHash: f.target.AccessHash}
+
+	peerSettingsUser := func() *tg.User {
+		t.Helper()
+		out, err := f.router.onMessagesGetPeerSettings(ownerCtx, peer)
+		if err != nil {
+			t.Fatalf("get peer settings: %v", err)
+		}
+		if len(out.Users) != 1 {
+			t.Fatalf("get peer settings returned %d users, want 1", len(out.Users))
+		}
+		wire := &tg.User{}
+		tlRoundTrip(t, out.Users[0].(*tg.User), wire)
+		return wire
+	}
+
+	plain := peerSettingsUser()
+	if _, ok := plain.GetBotVerificationIcon(); ok {
+		t.Fatalf("unmarked peer settings user carries an icon: %+v", plain)
+	}
+
+	if ok, err := f.router.onBotsSetCustomVerification(ownerCtx,
+		setCustomVerificationRequest(inputPeerUser(f.target), inputUser(f.bot), true, "Stable in chat cache")); err != nil || !ok {
+		t.Fatalf("grant = %v,%v, want true,nil", ok, err)
+	}
+
+	// Exercise both possible response orders. Neither fullUser -> peerSettings nor
+	// peerSettings -> fullUser may turn the marked peer back into an unmarked one.
+	markedFull, _ := getFullUserProjection(t, f.router, f.owner.ID, f.target)
+	fullMark, ok := markedFull.GetBotVerification()
+	if !ok || fullMark.Icon != 8800011 {
+		t.Fatalf("userFull bot_verification = %+v, ok=%v, want icon 8800011", fullMark, ok)
+	}
+	marked := peerSettingsUser()
+	icon, ok := marked.GetBotVerificationIcon()
+	if !ok || icon != 8800011 {
+		t.Fatalf("peer settings user bot_verification_icon = %d, ok=%v, want 8800011", icon, ok)
+	}
+	assertFlagBitDelta(t, "peerSettings.user", plain.Flags2, marked.Flags2, 14)
+
+	marked = peerSettingsUser()
+	markedFull, _ = getFullUserProjection(t, f.router, f.owner.ID, f.target)
+	icon, ok = marked.GetBotVerificationIcon()
+	fullMark, fullOK := markedFull.GetBotVerification()
+	if !ok || icon != 8800011 || !fullOK || fullMark.Icon != icon {
+		t.Fatalf("reverse order drift: peer icon=%d ok=%v full=%+v ok=%v", icon, ok, fullMark, fullOK)
+	}
+
+	if ok, err := f.router.onBotsSetCustomVerification(ownerCtx,
+		setCustomVerificationRequest(inputPeerUser(f.target), inputUser(f.bot), false, "")); err != nil || !ok {
+		t.Fatalf("revoke = %v,%v, want true,nil", ok, err)
+	}
+	if revoked := peerSettingsUser(); revoked.Flags2.Has(14) {
+		t.Fatalf("revoked peer settings user still carries flags2.14: %032b", uint32(revoked.Flags2))
+	}
+}
+
 // TestBotInfoCarriesVerifierSettingsOnFlags9 pins botInfo#4d8a0299
 // verifier_settings:flags.9 inside the verifier bot's own userFull, and the operator
 // kill switch: a disabled verifier stops advertising itself.
