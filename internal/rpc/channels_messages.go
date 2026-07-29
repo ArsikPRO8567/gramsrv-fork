@@ -293,11 +293,13 @@ func (r *Router) onChannelsGetMessages(ctx context.Context, req *tg.ChannelsGetM
 			messages = append(messages, &tg.MessageEmpty{ID: id})
 		}
 	}
-	return &tg.MessagesMessages{
+	result := &tg.MessagesMessages{
 		Messages: messages,
 		Chats:    tgChannels(userID, []domain.Channel{history.Channel}),
 		Users:    r.tgUsersForViewer(userID, history.Users), // viewer 补拉自己的消息（含置顶）须带 self
-	}, nil
+	}
+	r.applyPeerReadModelsToMessages(ctx, userID, result)
+	return result, nil
 }
 
 func (r *Router) onChannelsDeleteMessages(ctx context.Context, req *tg.ChannelsDeleteMessagesRequest) (*tg.MessagesAffectedMessages, error) {

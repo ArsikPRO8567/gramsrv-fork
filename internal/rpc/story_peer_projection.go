@@ -113,13 +113,13 @@ func (r *Router) tgResolvedChannelPeerWithStories(ctx context.Context, viewerUse
 
 func (r *Router) tgGlobalChannelMessages(ctx context.Context, viewerUserID int64, history domain.ChannelHistory) tg.MessagesMessagesClass {
 	out := tgGlobalChannelMessages(viewerUserID, history)
-	r.applyStoryMaxIDsToMessages(ctx, viewerUserID, out)
+	r.applyPeerReadModelsToMessages(ctx, viewerUserID, out)
 	return out
 }
 
 func (r *Router) tgMessagesMessages(ctx context.Context, viewerUserID int64, list domain.MessageList) tg.MessagesMessagesClass {
 	out := tgMessagesMessages(viewerUserID, list)
-	r.applyStoryMaxIDsToMessages(ctx, viewerUserID, out)
+	r.applyPeerReadModelsToMessages(ctx, viewerUserID, out)
 	return out
 }
 
@@ -135,7 +135,7 @@ func (r *Router) tgChannelHistoryMessages(ctx context.Context, viewerUserID int6
 			value.Chats = replaceTGChat(value.Chats, linked)
 		}
 	}
-	r.applyStoryMaxIDsToMessages(ctx, viewerUserID, out)
+	r.applyPeerReadModelsToMessages(ctx, viewerUserID, out)
 	return out
 }
 
@@ -174,11 +174,15 @@ func (r *Router) applyStoryMaxIDsToMessageReactionsList(ctx context.Context, vie
 
 func (r *Router) tgGlobalSearchMessages(ctx context.Context, viewerUserID int64, limit int, private domain.MessageList, channel domain.ChannelHistory) tg.MessagesMessagesClass {
 	out := tgGlobalSearchMessages(viewerUserID, limit, private, channel)
-	r.applyStoryMaxIDsToMessages(ctx, viewerUserID, out)
+	r.applyPeerReadModelsToMessages(ctx, viewerUserID, out)
 	return out
 }
 
-func (r *Router) applyStoryMaxIDsToMessages(ctx context.Context, viewerUserID int64, out tg.MessagesMessagesClass) {
+// applyPeerReadModelsToMessages stamps every user/channel carried by a messages
+// envelope. Supplemental lookups such as messages.getMessages and
+// channels.getMessages update the same client-side peer cache as getDialogs, so
+// they must use the same response-boundary overlays as history and search.
+func (r *Router) applyPeerReadModelsToMessages(ctx context.Context, viewerUserID int64, out tg.MessagesMessagesClass) {
 	switch v := out.(type) {
 	case *tg.MessagesMessages:
 		r.applyPeerReadModels(ctx, viewerUserID, v.Users, v.Chats)

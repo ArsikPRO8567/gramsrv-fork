@@ -490,11 +490,13 @@ func (r *Router) onMessagesGetMessages(ctx context.Context, ids []tg.InputMessag
 		out = append(out, tgMessage(msg))
 	}
 	chats := r.chatsForMessageUpdates(ctx, userID, found)
-	return &tg.MessagesMessages{
+	result := &tg.MessagesMessages{
 		Messages: out,
 		Users:    r.usersForMessageUpdates(ctx, userID, found),
 		Chats:    chats,
-	}, nil
+	}
+	r.applyPeerReadModelsToMessages(ctx, userID, result)
+	return result, nil
 }
 
 // onMessagesGetRichMessage 返回单条消息的完整富文本（Layer 227 richMessage）。消息列表
@@ -535,11 +537,13 @@ func (r *Router) onMessagesGetRichMessage(ctx context.Context, req *tg.MessagesG
 	if len(out) == 0 {
 		out = append(out, &tg.MessageEmpty{ID: req.ID})
 	}
-	return &tg.MessagesMessages{
+	result := &tg.MessagesMessages{
 		Messages: out,
 		Users:    r.usersForMessageUpdates(ctx, userID, found),
 		Chats:    r.chatsForMessageUpdates(ctx, userID, found),
-	}, nil
+	}
+	r.applyPeerReadModelsToMessages(ctx, userID, result)
+	return result, nil
 }
 
 func (r *Router) onMessagesSearchGlobal(ctx context.Context, req *tg.MessagesSearchGlobalRequest) (tg.MessagesMessagesClass, error) {
