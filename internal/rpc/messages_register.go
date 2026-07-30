@@ -726,7 +726,7 @@ func (r *Router) registerMessages(d *tlprofile.Dispatcher) {
 					Chats:    []tg.ChatClass{tgChannelChatForView(userID, view)},
 					Users:    []tg.UserClass{},
 				}
-				r.applyStoryMaxIDsToMessages(ctx, userID, out)
+				r.applyPeerReadModelsToMessages(ctx, userID, out)
 				return out, nil
 			}
 			if searchFilterNeedsMediaStore(req.Filter) {
@@ -746,7 +746,7 @@ func (r *Router) registerMessages(d *tlprofile.Dispatcher) {
 						Chats:    []tg.ChatClass{tgChannelChatForView(userID, view)},
 						Users:    []tg.UserClass{},
 					}
-					r.applyStoryMaxIDsToMessages(ctx, userID, out)
+					r.applyPeerReadModelsToMessages(ctx, userID, out)
 					return out, nil
 				}
 				if err := r.validateInputPeerChannelAccess(ctx, userID, req.Peer, filter.Peer.ID); err != nil {
