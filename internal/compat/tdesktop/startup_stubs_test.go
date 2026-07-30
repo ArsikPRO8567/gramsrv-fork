@@ -216,6 +216,35 @@ func TestDefaultThemesAreDefaultFlaggedForPicker(t *testing.T) {
 	}
 }
 
+func TestLookupDefaultThemeValidatesIdentity(t *testing.T) {
+	themes := DefaultThemeList()
+	if len(themes) == 0 {
+		t.Fatal("DefaultThemeList is empty")
+	}
+	for _, theme := range themes {
+		byID, ok := LookupDefaultTheme(&tg.InputTheme{
+			ID:         theme.ID,
+			AccessHash: theme.AccessHash,
+		})
+		if !ok || byID.ID != theme.ID {
+			t.Fatalf("lookup id %d = id %d ok=%v, want exact theme", theme.ID, byID.ID, ok)
+		}
+		bySlug, ok := LookupDefaultTheme(&tg.InputThemeSlug{Slug: theme.Slug})
+		if !ok || bySlug.ID != theme.ID {
+			t.Fatalf("lookup slug %q = id %d ok=%v, want %d", theme.Slug, bySlug.ID, ok, theme.ID)
+		}
+		if _, ok := LookupDefaultTheme(&tg.InputTheme{
+			ID:         theme.ID,
+			AccessHash: theme.AccessHash + 1,
+		}); ok {
+			t.Fatalf("lookup id %d accepted forged access hash", theme.ID)
+		}
+	}
+	if _, ok := LookupDefaultTheme(&tg.InputThemeSlug{}); ok {
+		t.Fatal("lookup accepted empty slug")
+	}
+}
+
 func TestUniqueGiftChatThemesIsEmptyHashableStub(t *testing.T) {
 	got, ok := UniqueGiftChatThemes(0).(*tg.AccountChatThemes)
 	if !ok {
@@ -296,6 +325,50 @@ func TestLookupWallPaperByIDAndSlug(t *testing.T) {
 	})
 	if !ok || len(multi) != 2 {
 		t.Fatalf("LookupWallPapers = len %d ok %v, want 2 true", len(multi), ok)
+	}
+}
+
+func TestDefaultThemeWallpaperReferencesResolve(t *testing.T) {
+	themes := DefaultThemeList()
+	var checked int
+	for _, theme := range themes {
+		settings, ok := theme.GetSettings()
+		if !ok {
+			continue
+		}
+		for i, setting := range settings {
+			wallpaperClass, ok := setting.GetWallpaper()
+			if !ok {
+				continue
+			}
+			wallpaper, ok := wallpaperClass.(*tg.WallPaper)
+			if !ok {
+				continue
+			}
+			checked++
+			byID, ok := LookupWallPaper(&tg.InputWallPaper{
+				ID:         wallpaper.ID,
+				AccessHash: wallpaper.AccessHash,
+			})
+			if !ok {
+				t.Fatalf("theme %d settings[%d] wallpaper id %d was not resolvable", theme.ID, i, wallpaper.ID)
+			}
+			gotByID, ok := byID.(*tg.WallPaper)
+			if !ok || gotByID.ID != wallpaper.ID || gotByID.AccessHash != wallpaper.AccessHash {
+				t.Fatalf("theme %d settings[%d] wallpaper id lookup = %#v", theme.ID, i, byID)
+			}
+			bySlug, ok := LookupWallPaper(&tg.InputWallPaperSlug{Slug: wallpaper.Slug})
+			if !ok {
+				t.Fatalf("theme %d settings[%d] wallpaper slug %q was not resolvable", theme.ID, i, wallpaper.Slug)
+			}
+			gotBySlug, ok := bySlug.(*tg.WallPaper)
+			if !ok || gotBySlug.Slug != wallpaper.Slug {
+				t.Fatalf("theme %d settings[%d] wallpaper slug lookup = %#v", theme.ID, i, bySlug)
+			}
+		}
+	}
+	if checked == 0 {
+		t.Fatal("default themes exposed no file wallpapers")
 	}
 }
 

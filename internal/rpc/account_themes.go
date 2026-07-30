@@ -220,6 +220,12 @@ func (r *Router) onAccountSaveTheme(ctx context.Context, req *tg.AccountSaveThem
 	if userID == 0 {
 		return false, authKeyUnregisteredErr()
 	}
+	if _, ok := tdesktop.LookupDefaultTheme(req.Theme); ok {
+		// Default catalog themes are always present in account.getThemes. Saving
+		// or unsaving one is therefore an idempotent signal and must not create a
+		// synthetic custom-theme row or user install.
+		return true, nil
+	}
 	if r.deps.Themes == nil {
 		return false, notImplementedErr()
 	}
@@ -252,13 +258,19 @@ func (r *Router) onAccountInstallTheme(ctx context.Context, req *tg.AccountInsta
 	if userID == 0 {
 		return false, authKeyUnregisteredErr()
 	}
-	if r.deps.Themes == nil {
-		return false, notImplementedErr()
-	}
 	dark := req.GetDark()
 	theme, ok := req.GetTheme()
 	if !ok {
 		return true, nil // 无 theme 引用:基础主题 no-op 安装
+	}
+	if _, ok := tdesktop.LookupDefaultTheme(theme); ok {
+		// The immutable defaults were issued by account.getThemes but do not
+		// live in the custom theme store. Applying one is a successful signal;
+		// the Android client owns the active day/night choice locally.
+		return true, nil
+	}
+	if r.deps.Themes == nil {
+		return false, notImplementedErr()
 	}
 	ref, ok := themeRefFromInput(theme)
 	if !ok {
@@ -279,6 +291,9 @@ func (r *Router) onAccountGetTheme(ctx context.Context, req *tg.AccountGetThemeR
 	userID, _, err := r.currentUserID(ctx)
 	if err != nil {
 		return nil, internalErr()
+	}
+	if t, ok := tdesktop.LookupDefaultTheme(req.Theme); ok {
+		return projectThemeForClient(ctx, &t), nil
 	}
 	if r.deps.Themes == nil {
 		return nil, notImplementedErr()

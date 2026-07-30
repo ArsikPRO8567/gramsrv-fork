@@ -126,6 +126,95 @@ func TestAccountCreateThemeFullFlow(t *testing.T) {
 	}
 }
 
+func TestAccountDefaultThemeReferencesResolveWithoutCustomPersistence(t *testing.T) {
+	const userID = 1000012
+	ctx := WithClientInfo(
+		WithUserID(context.Background(), userID),
+		ClientInfo{Type: ClientTypeAndroid, AppVersion: "12.9.0 (69669)"},
+	)
+	r := newThemeRouter(t, &fakeFiles{})
+	defaults := tdesktop.DefaultThemeList()
+	if len(defaults) == 0 {
+		t.Fatal("default theme catalog is empty")
+	}
+
+	for i, theme := range defaults {
+		t.Run(theme.Slug, func(t *testing.T) {
+			input := &tg.InputTheme{ID: theme.ID, AccessHash: theme.AccessHash}
+			install := &tg.AccountInstallThemeRequest{}
+			install.SetDark(i%2 == 0)
+			install.SetTheme(input)
+			install.SetFormat("android")
+			if ok, err := r.onAccountInstallTheme(ctx, install); err != nil || !ok {
+				t.Fatalf("install default theme %d = %v/%v, want true/nil", theme.ID, ok, err)
+			}
+
+			for _, unsave := range []bool{false, true} {
+				if ok, err := r.onAccountSaveTheme(ctx, &tg.AccountSaveThemeRequest{
+					Theme:  input,
+					Unsave: unsave,
+				}); err != nil || !ok {
+					t.Fatalf("save default theme %d unsave=%v = %v/%v, want true/nil", theme.ID, unsave, ok, err)
+				}
+			}
+
+			got, err := r.onAccountGetTheme(ctx, &tg.AccountGetThemeRequest{
+				Format: "android",
+				Theme:  &tg.InputThemeSlug{Slug: theme.Slug},
+			})
+			if err != nil || got.ID != theme.ID || got.AccessHash != theme.AccessHash {
+				t.Fatalf("get default theme %d = %#v/%v", theme.ID, got, err)
+			}
+
+			if ok, err := r.onAccountSaveTheme(ctx, &tg.AccountSaveThemeRequest{
+				Theme: &tg.InputThemeSlug{Slug: theme.Slug},
+			}); err != nil || !ok {
+				t.Fatalf("save default theme slug %q = %v/%v, want true/nil", theme.Slug, ok, err)
+			}
+		})
+	}
+
+	// Reproduce issue #29 through the canonical Layer 228 wire constructor,
+	// not only by invoking the typed handler directly.
+	canonical := &tg.AccountInstallThemeRequest{}
+	canonical.SetDark(true)
+	canonical.SetTheme(&tg.InputTheme{ID: defaults[0].ID, AccessHash: defaults[0].AccessHash})
+	canonical.SetFormat("android")
+	var body bin.Buffer
+	if err := canonical.Encode(&body); err != nil {
+		t.Fatalf("encode canonical installTheme: %v", err)
+	}
+	var authKeyID [8]byte
+	authKeyID[0] = 2
+	encoded, err := r.Dispatch(ctx, authKeyID, 1001, &body)
+	if err != nil {
+		t.Fatalf("canonical installTheme dispatch: %v", err)
+	}
+	var result bin.Buffer
+	if err := encoded.Encode(&result); err != nil {
+		t.Fatalf("encode canonical installTheme result: %v", err)
+	}
+	if id, err := result.ID(); err != nil || id != tg.BoolTrueTypeID {
+		t.Fatalf("canonical installTheme result id = %#x err=%v, want boolTrue", id, err)
+	}
+
+	installed, err := r.deps.Themes.ListInstalled(ctx, userID)
+	if err != nil {
+		t.Fatalf("list custom installs after default signals: %v", err)
+	}
+	if len(installed) != 0 {
+		t.Fatalf("default signals created %d custom installs, want 0", len(installed))
+	}
+
+	forged := defaults[0]
+	badInstall := &tg.AccountInstallThemeRequest{}
+	badInstall.SetTheme(&tg.InputTheme{ID: forged.ID, AccessHash: forged.AccessHash + 1})
+	badInstall.SetFormat("android")
+	if _, err := r.onAccountInstallTheme(ctx, badInstall); !tgerr.Is(err, "THEME_INVALID") {
+		t.Fatalf("install forged default reference err = %v, want THEME_INVALID", err)
+	}
+}
+
 // TestAccountGetThemesIncludesUserThemes 验证 getThemes 跨设备同步:返回内置默认主题
 // (is_default=true,emoji 预览条用)+ 当前用户创建的自定义主题(is_default=false,creator=true);
 // hash 稳定→NotModified,集合变化→重取。

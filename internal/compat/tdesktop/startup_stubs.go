@@ -182,6 +182,31 @@ func DefaultThemeList() []tg.Theme {
 	return themes
 }
 
+// LookupDefaultTheme resolves an InputTheme against the exact identity emitted
+// by DefaultThemeList. ID references must carry the matching access hash; slug
+// references are public and match by their exact non-empty slug.
+//
+// These themes are an immutable server catalog rather than rows in the custom
+// cloud-theme store. RPCs which accept a Theme returned by account.getThemes
+// use this lookup before consulting that store.
+func LookupDefaultTheme(input tg.InputThemeClass) (tg.Theme, bool) {
+	for _, theme := range DefaultThemeList() {
+		switch in := input.(type) {
+		case *tg.InputTheme:
+			if in.ID == theme.ID && in.AccessHash == theme.AccessHash {
+				return theme, true
+			}
+		case *tg.InputThemeSlug:
+			if in.Slug != "" && in.Slug == theme.Slug {
+				return theme, true
+			}
+		default:
+			return tg.Theme{}, false
+		}
+	}
+	return tg.Theme{}, false
+}
+
 func UniqueGiftChatThemes(hash int64) tg.AccountChatThemesClass {
 	if hash == uniqueGiftChatThemesHash {
 		return &tg.AccountChatThemesNotModified{}

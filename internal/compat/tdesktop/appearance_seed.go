@@ -38,6 +38,18 @@ func LookupWallPaper(input tg.InputWallPaperClass) (tg.WallPaperClass, bool) {
 			return DefaultWallPaper(wallpaper), true
 		}
 	}
+	// account.getThemes/account.getChatThemes also advertise wallpapers nested
+	// in ThemeSettings. The default getWallPapers export is a filtered list and
+	// does not contain every nested entry, so these identities must remain part
+	// of the same lookup boundary or Android can render a theme that it cannot
+	// subsequently install.
+	for _, theme := range catalog.ChatThemes {
+		for _, settings := range theme.Settings {
+			if inputWallPaperMatches(input, settings.Wallpaper) {
+				return DefaultWallPaper(settings.Wallpaper), true
+			}
+		}
+	}
 	return nil, false
 }
 
