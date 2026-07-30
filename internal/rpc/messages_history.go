@@ -298,11 +298,13 @@ func (r *Router) onMessagesGetReplies(ctx context.Context, req *tg.MessagesGetRe
 		}
 		return r.tgChannelHistoryMessages(ctx, userID, r.enrichChannelHistory(ctx, userID, replies)), nil
 	}
-	return &tg.MessagesMessages{
+	result := &tg.MessagesMessages{
 		Messages: []tg.MessageClass{},
 		Chats:    r.chatsForInputPeer(ctx, userID, req.Peer),
 		Users:    []tg.UserClass{},
-	}, nil
+	}
+	r.applyPeerReadModelsToMessages(ctx, userID, result)
+	return result, nil
 }
 
 func (r *Router) onMessagesGetDiscussionMessage(ctx context.Context, req *tg.MessagesGetDiscussionMessageRequest) (*tg.MessagesDiscussionMessage, error) {
@@ -596,7 +598,9 @@ func (r *Router) onMessagesSearchGlobal(ctx context.Context, req *tg.MessagesSea
 		return nil, err
 	}
 	if emptyCommunitySearch {
-		return appendCommunitySearchChat(&tg.MessagesMessages{}, communityView), nil
+		result := appendCommunitySearchChat(&tg.MessagesMessages{}, communityView)
+		r.applyPeerReadModelsToMessages(ctx, userID, result)
+		return result, nil
 	}
 	var private domain.MessageList
 	if !req.BroadcastsOnly && !req.GroupsOnly && r.deps.Messages != nil {
@@ -623,7 +627,9 @@ func (r *Router) onMessagesSearchGlobal(ctx context.Context, req *tg.MessagesSea
 		}
 	}
 	if req.UsersOnly || r.deps.Channels == nil {
-		return appendCommunitySearchChat(tgMessagesMessages(userID, r.enrichMessageList(ctx, userID, limitMessageList(private, limit))), communityView), nil
+		result := appendCommunitySearchChat(tgMessagesMessages(userID, r.enrichMessageList(ctx, userID, limitMessageList(private, limit))), communityView)
+		r.applyPeerReadModelsToMessages(ctx, userID, result)
+		return result, nil
 	}
 	channelHistory, err := r.deps.Channels.SearchJoinedMessages(ctx, userID, domain.ChannelGlobalSearchRequest{
 		Query:              query,

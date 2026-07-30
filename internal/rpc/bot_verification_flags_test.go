@@ -65,6 +65,53 @@ func assertFlagBitDelta(t *testing.T, label string, before, after bin.Fields, wa
 	}
 }
 
+func assertMessagesEnvelopeBotVerificationIcon(t *testing.T, out tg.MessagesMessagesClass, peer domain.Peer, want int64) {
+	t.Helper()
+	var users []tg.UserClass
+	var chats []tg.ChatClass
+	switch value := out.(type) {
+	case *tg.MessagesMessages:
+		users, chats = value.Users, value.Chats
+	case *tg.MessagesMessagesSlice:
+		users, chats = value.Users, value.Chats
+	case *tg.MessagesChannelMessages:
+		users, chats = value.Users, value.Chats
+	default:
+		t.Fatalf("messages envelope = %T, want peer-bearing messages.Messages", out)
+	}
+	switch peer.Type {
+	case domain.PeerTypeUser:
+		for _, item := range users {
+			user, ok := item.(*tg.User)
+			if !ok || user.ID != peer.ID {
+				continue
+			}
+			wire := &tg.User{}
+			tlRoundTrip(t, user, wire)
+			if icon, ok := wire.GetBotVerificationIcon(); !ok || icon != want {
+				t.Fatalf("user %d bot_verification_icon = %d, ok=%v, want %d", peer.ID, icon, ok, want)
+			}
+			return
+		}
+	case domain.PeerTypeChannel:
+		for _, item := range chats {
+			channel, ok := item.(*tg.Channel)
+			if !ok || channel.ID != peer.ID {
+				continue
+			}
+			wire := &tg.Channel{}
+			tlRoundTrip(t, channel, wire)
+			if icon, ok := wire.GetBotVerificationIcon(); !ok || icon != want {
+				t.Fatalf("channel %d bot_verification_icon = %d, ok=%v, want %d", peer.ID, icon, ok, want)
+			}
+			return
+		}
+	default:
+		t.Fatalf("unsupported verification peer %+v", peer)
+	}
+	t.Fatalf("messages envelope %T does not carry peer %+v", out, peer)
+}
+
 // TestBotVerificationConstructorIDs pins the two constructor ids the feature
 // serialises. A drift here silently reshapes every payload below.
 func TestBotVerificationConstructorIDs(t *testing.T) {

@@ -119,12 +119,14 @@ func (r *Router) monoforumSavedHistory(ctx context.Context, userID int64, mono d
 			messages = append(messages, item)
 		}
 	}
-	return &tg.MessagesMessagesSlice{
+	result := &tg.MessagesMessagesSlice{
 		Count:    hist.Count,
 		Messages: messages,
 		Chats:    r.monoforumChats(ctx, userID, mono),
 		Users:    r.monoforumSubscriberUsers(ctx, userID, nil, hist.Messages),
-	}, nil
+	}
+	r.applyPeerReadModelsToMessages(ctx, userID, result)
+	return result, nil
 }
 
 // monoforumChats 投影客户端 materialize monoforum 私信所需的频道:monoforum 自身直接投影，

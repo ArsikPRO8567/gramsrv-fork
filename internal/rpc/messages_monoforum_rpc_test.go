@@ -34,9 +34,11 @@ func TestMonoforumSavedDialogsAndHistory(t *testing.T) {
 
 	channelStore := memory.NewChannelStore()
 	channelSvc := appchannels.NewService(channelStore)
+	verify := newFakeBotVerifications()
 	r := New(Config{}, Deps{
-		Users:    appusers.NewService(userStore),
-		Channels: channelSvc,
+		Users:            appusers.NewService(userStore),
+		Channels:         channelSvc,
+		BotVerifications: verify,
 	}, zaptest.NewLogger(t), clock.System)
 
 	created, err := channelSvc.CreateChannel(ctx, owner.ID, domain.CreateChannelRequest{Title: "DM Broadcast", Broadcast: true, Date: 1000})
@@ -65,6 +67,14 @@ func TestMonoforumSavedDialogsAndHistory(t *testing.T) {
 	}
 	monoInput := &tg.InputPeerChannel{ChannelID: monoID, AccessHash: mono.AccessHash}
 	parentInput := &tg.InputPeerChannel{ChannelID: created.Channel.ID, AccessHash: created.Channel.AccessHash}
+	const monoforumIcon = int64(8800025)
+	monoforumPeer := domain.Peer{Type: domain.PeerTypeChannel, ID: monoID}
+	verify.marks[monoforumPeer] = domain.CustomVerification{
+		VerifierBotID:  777000123,
+		Peer:           monoforumPeer,
+		IconDocumentID: monoforumIcon,
+		Description:    "Verified monoforum peer",
+	}
 
 	// TDesktop 点 Direct Messages 入口会先按 monoforum peer 拉普通 channel history。
 	// 主历史只应返回 monoforum 自身的 service messages,不能混入 saved_peer 子会话消息。
@@ -83,6 +93,7 @@ func TestMonoforumSavedDialogsAndHistory(t *testing.T) {
 	if len(mainHistory.Messages) != 1 {
 		t.Fatalf("main monoforum history = %d msgs, want only the creation service", len(mainHistory.Messages))
 	}
+	assertMessagesEnvelopeBotVerificationIcon(t, mainHistory, monoforumPeer, monoforumIcon)
 	service, ok := mainHistory.Messages[0].(*tg.MessageService)
 	if !ok {
 		t.Fatalf("main monoforum message = %T, want MessageService", mainHistory.Messages[0])
@@ -167,6 +178,7 @@ func TestMonoforumSavedDialogsAndHistory(t *testing.T) {
 	if err != nil {
 		t.Fatalf("getSavedHistory(monoforum): %v", err)
 	}
+	assertMessagesEnvelopeBotVerificationIcon(t, hres, monoforumPeer, monoforumIcon)
 	var gotMsgs []tg.MessageClass
 	switch m := hres.(type) {
 	case *tg.MessagesMessages:

@@ -141,6 +141,7 @@ func (r *Router) onMessagesGetQuickReplyMessages(ctx context.Context, req *tg.Me
 	}
 	out := tgMessagesQuickReplyMessages(list)
 	out.Users = r.quickReplyUsers(ctx, userID)
+	r.applyPeerReadModelsToMessages(ctx, userID, out)
 	return out, nil
 }
 

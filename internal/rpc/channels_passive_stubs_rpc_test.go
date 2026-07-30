@@ -961,6 +961,16 @@ func TestTDesktopPassiveChannelStubs(t *testing.T) {
 	}); err == nil || !strings.Contains(err.Error(), "MESSAGE_ID_INVALID") {
 		t.Fatalf("messages.deletePollAnswer err = %v, want MESSAGE_ID_INVALID without poll store", err)
 	}
+	verify := newFakeBotVerifications()
+	r.deps.BotVerifications = verify
+	const unreadPollIcon = int64(8800024)
+	unreadPollPeer := domain.Peer{Type: domain.PeerTypeChannel, ID: channel.ID}
+	verify.marks[unreadPollPeer] = domain.CustomVerification{
+		VerifierBotID:  777000123,
+		Peer:           unreadPollPeer,
+		IconDocumentID: unreadPollIcon,
+		Description:    "Verified poll peer",
+	}
 	unreadPollVotes, err := r.onMessagesGetUnreadPollVotes(ownerCtx, &tg.MessagesGetUnreadPollVotesRequest{
 		Peer:  inputPeerChannel(channel),
 		Limit: 10,
@@ -968,6 +978,7 @@ func TestTDesktopPassiveChannelStubs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("messages.getUnreadPollVotes: %v", err)
 	}
+	assertMessagesEnvelopeBotVerificationIcon(t, unreadPollVotes, unreadPollPeer, unreadPollIcon)
 	if len(unreadPollVotes.(*tg.MessagesMessages).Messages) != 0 {
 		t.Fatalf("messages.getUnreadPollVotes = %+v, want empty messages", unreadPollVotes)
 	}

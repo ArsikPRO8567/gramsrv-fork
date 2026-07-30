@@ -42,11 +42,13 @@ func (r *Router) onMessagesGetSavedHistory(ctx context.Context, req *tg.Messages
 			if req.Hash != 0 {
 				return &tg.MessagesMessagesNotModified{Count: 0}, nil
 			}
-			return &tg.MessagesMessages{
+			result := &tg.MessagesMessages{
 				Messages: []tg.MessageClass{},
 				Chats:    r.savedHistoryChats(ctx, userID, hasParent, parentPeer, req.Peer),
 				Users:    []tg.UserClass{},
-			}, nil
+			}
+			r.applyPeerReadModelsToMessages(ctx, userID, result)
+			return result, nil
 		}
 		// parent_peer = monoforum:返回该订阅者(req.Peer)在频道私信内的历史。
 		return r.monoforumSavedHistory(ctx, userID, mono, savedPeer, req.Limit, req.OffsetID)
@@ -83,6 +85,7 @@ func (r *Router) onMessagesGetSavedHistory(ctx context.Context, req *tg.Messages
 			m.Chats = mergeTGChats(m.Chats, chats)
 		}
 	}
+	r.applyPeerReadModelsToMessages(ctx, userID, out)
 	return out, nil
 }
 

@@ -100,7 +100,9 @@ func (r *Router) onChannelsSearchPosts(ctx context.Context, req *tg.ChannelsSear
 		return nil, channelInvalidErr(err)
 	}
 	history = r.enrichChannelHistory(ctx, userID, history)
-	return tgChannelSearchPostsMessages(userID, history), nil
+	result := tgChannelSearchPostsMessages(userID, history)
+	r.applyPeerReadModelsToMessages(ctx, userID, result)
+	return result, nil
 }
 
 func validateChannelSearchPostsRequest(req *tg.ChannelsSearchPostsRequest) error {

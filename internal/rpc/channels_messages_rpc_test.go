@@ -835,9 +835,11 @@ func TestChannelsSearchPostsReturnsPublicPostsWithSeekPaging(t *testing.T) {
 	viewer, _ := userStore.Create(ctx, domain.User{AccessHash: 91002, Phone: "15550091002", FirstName: "Viewer"})
 	channelStore := memory.NewChannelStore()
 	channelService := appchannels.NewService(channelStore)
+	verify := newFakeBotVerifications()
 	r := New(Config{}, Deps{
-		Users:    appusers.NewService(userStore),
-		Channels: channelService,
+		Users:            appusers.NewService(userStore),
+		Channels:         channelService,
+		BotVerifications: verify,
 	}, zaptest.NewLogger(t), clock.System)
 	public, err := channelService.CreateChannel(ctx, owner.ID, domain.CreateChannelRequest{
 		Title:     "Public Search",
@@ -846,6 +848,14 @@ func TestChannelsSearchPostsReturnsPublicPostsWithSeekPaging(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("create public channel: %v", err)
+	}
+	const searchPostsIcon = int64(8800021)
+	searchPostsPeer := domain.Peer{Type: domain.PeerTypeChannel, ID: public.Channel.ID}
+	verify.marks[searchPostsPeer] = domain.CustomVerification{
+		VerifierBotID:  777000123,
+		Peer:           searchPostsPeer,
+		IconDocumentID: searchPostsIcon,
+		Description:    "Verified search result",
 	}
 	if _, err := channelService.UpdateUsername(ctx, owner.ID, domain.UpdateChannelUsernameRequest{
 		UserID:    owner.ID,
@@ -920,6 +930,7 @@ func TestChannelsSearchPostsReturnsPublicPostsWithSeekPaging(t *testing.T) {
 	if peer, ok := first.PeerID.(*tg.PeerChannel); !ok || peer.ChannelID != public.Channel.ID {
 		t.Fatalf("first result peer = %#v, want public channel %d", first.PeerID, public.Channel.ID)
 	}
+	assertMessagesEnvelopeBotVerificationIcon(t, got, searchPostsPeer, searchPostsIcon)
 
 	page2 := &tg.ChannelsSearchPostsRequest{
 		OffsetRate: slice.NextRate,
