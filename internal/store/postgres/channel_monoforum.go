@@ -189,6 +189,7 @@ SELECT EXISTS (
 		Entities:         append([]domain.MessageEntity(nil), req.Entities...),
 		Media:            req.Media,
 		ReplyTo:          req.ReplyTo,
+		Forward:          req.Forward,
 		Pts:              pts,
 	}
 	event := domain.ChannelUpdateEvent{

@@ -119,6 +119,7 @@ func (s *ChannelStore) SendMonoforumMessage(_ context.Context, req domain.SendMo
 		Entities:         append([]domain.MessageEntity(nil), req.Entities...),
 		Media:            req.Media,
 		ReplyTo:          req.ReplyTo,
+		Forward:          req.Forward,
 		Pts:              pts,
 	}
 	// Store owns the persisted snapshot; callers must not be able to mutate it through

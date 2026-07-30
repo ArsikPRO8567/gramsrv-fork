@@ -1627,6 +1627,7 @@ type SendMonoforumMessageRequest struct {
 	Entities               []MessageEntity
 	Media                  *MessageMedia
 	ReplyTo                *MessageReply
+	Forward                *MessageForward
 	Silent                 bool
 	NoForwards             bool
 	SuggestedPost          *SuggestedPost

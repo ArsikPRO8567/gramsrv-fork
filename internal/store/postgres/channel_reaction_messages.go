@@ -37,7 +37,7 @@ func (s *ChannelStore) SetChannelMessageReactions(ctx context.Context, req domai
 			_ = tx.Rollback(ctx)
 		}
 	}()
-	channel, member, err := s.getChannelForMember(ctx, tx, req.UserID, req.ChannelID)
+	channel, member, _, err := s.getChannelForViewer(ctx, tx, req.UserID, req.ChannelID)
 	if err != nil {
 		return domain.ChannelMessageReactionsResult{}, err
 	}
@@ -57,7 +57,8 @@ func (s *ChannelStore) SetChannelMessageReactions(ctx context.Context, req domai
 	if err != nil {
 		return domain.ChannelMessageReactionsResult{}, err
 	}
-	if msg.Deleted || msg.Action != nil || msg.ID <= member.AvailableMinID {
+	if msg.Deleted || msg.Action != nil || msg.ID <= member.AvailableMinID ||
+		!channelMessageVisibleToViewer(channel, member, req.UserID, msg) {
 		return domain.ChannelMessageReactionsResult{}, domain.ErrMessageIDInvalid
 	}
 	// 仅新增/替换受策略约束；空向量是撤销，策略收紧后也必须允许撤销存量 reaction。
@@ -474,7 +475,7 @@ func (s *ChannelStore) GetChannelMessageReactions(ctx context.Context, req domai
 	if len(req.IDs) > domain.MaxGetMessageIDs {
 		return domain.ChannelMessageReactionsResult{}, domain.ErrChannelInvalid
 	}
-	channel, member, err := s.getChannelForMember(ctx, s.db, req.UserID, req.ChannelID)
+	channel, member, _, err := s.getChannelForViewer(ctx, s.db, req.UserID, req.ChannelID)
 	if err != nil {
 		return domain.ChannelMessageReactionsResult{}, err
 	}
@@ -490,6 +491,10 @@ func (s *ChannelStore) GetChannelMessageReactions(ctx context.Context, req domai
 	if member.AvailableMinID > 0 {
 		args = append(args, member.AvailableMinID)
 		where += fmt.Sprintf(" AND id > $%d", len(args))
+	}
+	if channel.Monoforum && !member.CanManageDirectMessages() {
+		args = append(args, string(domain.PeerTypeUser), req.UserID)
+		where += fmt.Sprintf(" AND saved_peer_type = $%d AND saved_peer_id = $%d", len(args)-1, len(args))
 	}
 	rows, err := s.db.Query(ctx, `
 SELECT `+channelMessageColumns+`
@@ -532,7 +537,7 @@ func (s *ChannelStore) ListChannelMessageReactions(ctx context.Context, req doma
 	if req.Limit <= 0 || req.Limit > domain.MaxChannelMessageReactionListLimit {
 		req.Limit = domain.MaxChannelMessageReactionListLimit
 	}
-	channel, member, err := s.getChannelForMember(ctx, s.db, req.UserID, req.ChannelID)
+	channel, member, _, err := s.getChannelForViewer(ctx, s.db, req.UserID, req.ChannelID)
 	if err != nil {
 		return domain.ChannelMessageReactionsList{}, err
 	}
@@ -543,7 +548,8 @@ func (s *ChannelStore) ListChannelMessageReactions(ctx context.Context, req doma
 	if err != nil {
 		return domain.ChannelMessageReactionsList{}, err
 	}
-	if msg.Deleted || msg.ID <= member.AvailableMinID {
+	if msg.Deleted || msg.ID <= member.AvailableMinID ||
+		!channelMessageVisibleToViewer(channel, member, req.UserID, msg) {
 		return domain.ChannelMessageReactionsList{}, domain.ErrMessageIDInvalid
 	}
 	baseWhere := []string{"channel_id = $1", "message_id = $2"}
@@ -618,7 +624,7 @@ func (s *ChannelStore) FindChannelMessageReaction(ctx context.Context, req domai
 		req.MessageID > domain.MaxMessageBoxID || req.ReactorUserID == 0 {
 		return domain.ChannelMessageReactionLookup{}, false, domain.ErrChannelInvalid
 	}
-	channel, member, err := s.getChannelForMember(ctx, s.db, req.ViewerUserID, req.ChannelID)
+	channel, member, _, err := s.getChannelForViewer(ctx, s.db, req.ViewerUserID, req.ChannelID)
 	if err != nil {
 		return domain.ChannelMessageReactionLookup{}, false, err
 	}
@@ -626,7 +632,8 @@ func (s *ChannelStore) FindChannelMessageReaction(ctx context.Context, req domai
 	if err != nil {
 		return domain.ChannelMessageReactionLookup{}, false, err
 	}
-	if message.Deleted || message.ID <= member.AvailableMinID {
+	if message.Deleted || message.ID <= member.AvailableMinID ||
+		!channelMessageVisibleToViewer(channel, member, req.ViewerUserID, message) {
 		return domain.ChannelMessageReactionLookup{}, false, domain.ErrMessageIDInvalid
 	}
 	rows, err := s.db.Query(ctx, `

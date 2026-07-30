@@ -434,6 +434,9 @@ func (r *Router) channelMessagesReactionsUpdates(ctx context.Context, viewerUser
 			if topID := channelMessageThreadRootID(msg); topID > 0 && topID != id {
 				update.SetTopMsgID(topID)
 			}
+			if msg.SavedPeer.ID != 0 {
+				update.SetSavedPeerID(tgPeer(msg.SavedPeer))
+			}
 		}
 		updates = append(updates, update)
 	}

@@ -458,6 +458,19 @@ func (s *ChannelStore) channelForViewerLocked(userID, channelID int64) (domain.C
 	return channel, publicPreviewMember(channel, userID, existing, found), true, nil
 }
 
+// channelMessageVisibleToViewerLocked applies the message-level half of synthetic monoforum
+// access. The channel shell is visible without a channel_members row, but a subscriber may only
+// address messages in saved_peer=self; managers may address every subscriber sub-dialog.
+func channelMessageVisibleToViewerLocked(channel domain.Channel, member domain.ChannelMember, viewerUserID int64, msg domain.ChannelMessage) bool {
+	if !channel.Monoforum {
+		return true
+	}
+	if member.CanManageDirectMessages() {
+		return true
+	}
+	return msg.SavedPeer == (domain.Peer{Type: domain.PeerTypeUser, ID: viewerUserID})
+}
+
 func (s *ChannelStore) dialogForUserLocked(userID int64, channel domain.Channel) domain.ChannelDialog {
 	return s.dialogForMemberLocked(userID, channel, s.members[channel.ID][userID])
 }

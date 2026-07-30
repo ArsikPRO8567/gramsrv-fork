@@ -46,7 +46,7 @@ func (s *ChannelStore) SetChannelMessageReactions(_ context.Context, req domain.
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	channel, member, err := s.channelAndMemberLocked(req.UserID, req.ChannelID)
+	channel, member, _, err := s.channelForViewerLocked(req.UserID, req.ChannelID)
 	if err != nil {
 		return domain.ChannelMessageReactionsResult{}, err
 	}
@@ -64,7 +64,8 @@ func (s *ChannelStore) SetChannelMessageReactions(_ context.Context, req domain.
 		return domain.ChannelMessageReactionsResult{}, domain.ErrMessageIDInvalid
 	}
 	msg := s.messages[req.ChannelID][idx]
-	if msg.Deleted || msg.Action != nil || msg.ID <= member.AvailableMinID {
+	if msg.Deleted || msg.Action != nil || msg.ID <= member.AvailableMinID ||
+		!channelMessageVisibleToViewerLocked(channel, member, req.UserID, msg) {
 		return domain.ChannelMessageReactionsResult{}, domain.ErrMessageIDInvalid
 	}
 	// 仅新增/替换受策略约束；空向量是撤销，策略收紧后也必须允许撤销存量 reaction。
@@ -385,7 +386,7 @@ func (s *ChannelStore) GetChannelMessageReactions(_ context.Context, req domain.
 	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	channel, member, err := s.channelAndMemberLocked(req.UserID, req.ChannelID)
+	channel, member, _, err := s.channelForViewerLocked(req.UserID, req.ChannelID)
 	if err != nil {
 		return domain.ChannelMessageReactionsResult{}, err
 	}
@@ -401,7 +402,8 @@ func (s *ChannelStore) GetChannelMessageReactions(_ context.Context, req domain.
 		if _, ok := wanted[msg.ID]; !ok {
 			continue
 		}
-		if msg.Deleted || msg.ID <= member.AvailableMinID {
+		if msg.Deleted || msg.ID <= member.AvailableMinID ||
+			!channelMessageVisibleToViewerLocked(channel, member, req.UserID, msg) {
 			continue
 		}
 		item := cloneChannelMessage(msg)
@@ -432,7 +434,7 @@ func (s *ChannelStore) ListChannelMessageReactions(_ context.Context, req domain
 	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	channel, member, err := s.channelAndMemberLocked(req.UserID, req.ChannelID)
+	channel, member, _, err := s.channelForViewerLocked(req.UserID, req.ChannelID)
 	if err != nil {
 		return domain.ChannelMessageReactionsList{}, err
 	}
@@ -440,7 +442,8 @@ func (s *ChannelStore) ListChannelMessageReactions(_ context.Context, req domain
 		return domain.ChannelMessageReactionsList{}, domain.ErrChannelRightForbidden
 	}
 	msg, ok := s.findMessageLocked(req.ChannelID, req.MessageID)
-	if !ok || msg.Deleted || msg.ID <= member.AvailableMinID {
+	if !ok || msg.Deleted || msg.ID <= member.AvailableMinID ||
+		!channelMessageVisibleToViewerLocked(channel, member, req.UserID, msg) {
 		return domain.ChannelMessageReactionsList{}, domain.ErrMessageIDInvalid
 	}
 	rows := s.channelMessageReactionRowsLocked(req.ChannelID, req.MessageID, req.UserID, req.Reaction)
@@ -486,12 +489,13 @@ func (s *ChannelStore) FindChannelMessageReaction(_ context.Context, req domain.
 	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	channel, member, err := s.channelAndMemberLocked(req.ViewerUserID, req.ChannelID)
+	channel, member, _, err := s.channelForViewerLocked(req.ViewerUserID, req.ChannelID)
 	if err != nil {
 		return domain.ChannelMessageReactionLookup{}, false, err
 	}
 	message, ok := s.findMessageLocked(req.ChannelID, req.MessageID)
-	if !ok || message.Deleted || message.ID <= member.AvailableMinID {
+	if !ok || message.Deleted || message.ID <= member.AvailableMinID ||
+		!channelMessageVisibleToViewerLocked(channel, member, req.ViewerUserID, message) {
 		return domain.ChannelMessageReactionLookup{}, false, domain.ErrMessageIDInvalid
 	}
 	rows := cloneChannelPeerReactions(s.reactions[req.ChannelID][req.MessageID][req.ReactorUserID])

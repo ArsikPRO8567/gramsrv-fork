@@ -501,6 +501,19 @@ func (s *ChannelStore) getChannelForViewer(ctx context.Context, db sqlcgen.DBTX,
 	return ch, member, true, nil
 }
 
+// channelMessageVisibleToViewer applies the message-level half of synthetic monoforum access.
+// Subscribers do not have channel_members rows and may only address saved_peer=self; a synthetic
+// manager view may address every subscriber sub-dialog.
+func channelMessageVisibleToViewer(channel domain.Channel, member domain.ChannelMember, viewerUserID int64, msg domain.ChannelMessage) bool {
+	if !channel.Monoforum {
+		return true
+	}
+	if member.CanManageDirectMessages() {
+		return true
+	}
+	return msg.SavedPeer == (domain.Peer{Type: domain.PeerTypeUser, ID: viewerUserID})
+}
+
 func getChannelByID(ctx context.Context, db sqlcgen.DBTX, channelID int64) (domain.Channel, error) {
 	ch, err := scanChannel(db.QueryRow(ctx, `SELECT `+channelColumns+` FROM channels c WHERE c.id = $1 AND NOT c.deleted`, channelID))
 	if errors.Is(err, pgx.ErrNoRows) {

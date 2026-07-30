@@ -368,6 +368,9 @@ func (s *ChannelStore) GetChannelMessages(_ context.Context, viewerUserID, chann
 		if msg.Deleted || msg.ID <= member.AvailableMinID {
 			continue
 		}
+		if !channelMessageVisibleToViewerLocked(channel, member, viewerUserID, msg) {
+			continue
+		}
 		messages = append(messages, cloneChannelMessage(msg))
 		delete(wanted, msg.ID)
 	}

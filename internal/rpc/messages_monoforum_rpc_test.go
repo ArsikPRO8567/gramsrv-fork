@@ -467,3 +467,287 @@ func TestMonoforumSendMessageWritePath(t *testing.T) {
 		t.Fatalf("suggested_post schedule = %d/%v, want 1700100000/true", scheduleDate, ok)
 	}
 }
+
+// TestMonoforumForwardSuggestedPostAndReactionWritePath 回归 DrKLO 的三条真实路径：
+// Add Offer 用 forwardMessages+suggested_post 新建建议，Edit Price/Edit Time 再回复原建议；
+// get/send reaction 则必须允许无 member 行的订阅者访问自己的 saved_peer，且不能按猜测 id
+// 跨到另一订阅者的子会话。
+func TestMonoforumForwardSuggestedPostAndReactionWritePath(t *testing.T) {
+	ctx := context.Background()
+	userStore := memory.NewUserStore()
+	owner, err := userStore.Create(ctx, domain.User{AccessHash: 31, Phone: "15550004001", FirstName: "Owner"})
+	if err != nil {
+		t.Fatalf("create owner: %v", err)
+	}
+	sub, err := userStore.Create(ctx, domain.User{AccessHash: 32, Phone: "15550004002", FirstName: "Sub"})
+	if err != nil {
+		t.Fatalf("create sub: %v", err)
+	}
+	other, err := userStore.Create(ctx, domain.User{AccessHash: 33, Phone: "15550004003", FirstName: "Other"})
+	if err != nil {
+		t.Fatalf("create other: %v", err)
+	}
+
+	channelStore := memory.NewChannelStore()
+	channelSvc := appchannels.NewService(channelStore)
+	r := New(Config{}, Deps{
+		Users:    appusers.NewService(userStore),
+		Channels: channelSvc,
+	}, zaptest.NewLogger(t), clock.System)
+
+	created, err := channelSvc.CreateChannel(ctx, owner.ID, domain.CreateChannelRequest{Title: "DM Suggested", Broadcast: true, Date: 2000})
+	if err != nil {
+		t.Fatalf("create channel: %v", err)
+	}
+	enabled, err := channelStore.SetPaidMessagesPrice(ctx, owner.ID, created.Channel.ID, 0, true)
+	if err != nil {
+		t.Fatalf("enable DM: %v", err)
+	}
+	monoID := enabled.Channel.LinkedMonoforumID
+	mono, err := channelStore.GetChannelByID(ctx, monoID)
+	if err != nil {
+		t.Fatalf("get monoforum: %v", err)
+	}
+	monoInput := &tg.InputPeerChannel{ChannelID: monoID, AccessHash: mono.AccessHash}
+	subPeer := domain.Peer{Type: domain.PeerTypeUser, ID: sub.ID}
+	original, err := channelStore.SendMonoforumMessage(ctx, domain.SendMonoforumMessageRequest{
+		MonoforumID: monoID, SenderUserID: sub.ID, SavedPeer: subPeer,
+		RandomID: 7001, Message: "please publish this", Date: 2001,
+	})
+	if err != nil {
+		t.Fatalf("seed subscriber message: %v", err)
+	}
+	otherMessage, err := channelStore.SendMonoforumMessage(ctx, domain.SendMonoforumMessageRequest{
+		MonoforumID: monoID, SenderUserID: other.ID,
+		SavedPeer: domain.Peer{Type: domain.PeerTypeUser, ID: other.ID},
+		RandomID:  7002, Message: "another subscriber", Date: 2002,
+	})
+	if err != nil {
+		t.Fatalf("seed other subscriber message: %v", err)
+	}
+
+	// Android 打开 reaction 状态时会先发 getMessagesReactions。订阅者没有 channel_members
+	// 行，但自己的 saved_peer 消息必须正常返回，并携带 saved_peer_id 供客户端归组。
+	reactionState, err := r.onMessagesGetMessagesReactions(WithUserID(ctx, sub.ID), &tg.MessagesGetMessagesReactionsRequest{
+		Peer: monoInput,
+		ID:   []int{original.Message.ID},
+	})
+	if err != nil {
+		t.Fatalf("subscriber getMessagesReactions(monoforum): %v", err)
+	}
+	reactionUpdates, ok := reactionState.(*tg.Updates)
+	if !ok || len(reactionUpdates.Updates) != 1 {
+		t.Fatalf("getMessagesReactions = %#v, want one update", reactionState)
+	}
+	reactionUpdate, ok := reactionUpdates.Updates[0].(*tg.UpdateMessageReactions)
+	if !ok {
+		t.Fatalf("getMessagesReactions update = %T, want UpdateMessageReactions", reactionUpdates.Updates[0])
+	}
+	savedPeer, ok := reactionUpdate.GetSavedPeerID()
+	if !ok {
+		t.Fatalf("getMessagesReactions update missing saved_peer_id")
+	}
+	if peer, ok := savedPeer.(*tg.PeerUser); !ok || peer.UserID != sub.ID {
+		t.Fatalf("reaction saved_peer_id = %#v, want subscriber %d", savedPeer, sub.ID)
+	}
+	sendReaction := &tg.MessagesSendReactionRequest{Peer: monoInput, MsgID: original.Message.ID}
+	sendReaction.SetReaction([]tg.ReactionClass{&tg.ReactionEmoji{Emoticon: "\U0001f44d"}})
+	sentReaction, err := r.onMessagesSendReaction(WithUserID(ctx, sub.ID), sendReaction)
+	if err != nil {
+		t.Fatalf("subscriber sendReaction(monoforum): %v", err)
+	}
+	sentReactionUpdates, ok := sentReaction.(*tg.Updates)
+	if !ok || len(sentReactionUpdates.Updates) != 1 {
+		t.Fatalf("sendReaction = %#v, want one update", sentReaction)
+	}
+	sentReactionUpdate, ok := sentReactionUpdates.Updates[0].(*tg.UpdateMessageReactions)
+	if !ok {
+		t.Fatalf("sendReaction update = %T, want UpdateMessageReactions", sentReactionUpdates.Updates[0])
+	}
+	if saved, ok := sentReactionUpdate.GetSavedPeerID(); !ok {
+		t.Fatalf("sendReaction update missing saved_peer_id")
+	} else if peer, ok := saved.(*tg.PeerUser); !ok || peer.UserID != sub.ID {
+		t.Fatalf("sendReaction saved_peer_id = %#v, want subscriber %d", saved, sub.ID)
+	}
+	if _, err := r.onMessagesSendReaction(WithUserID(ctx, sub.ID), &tg.MessagesSendReactionRequest{
+		Peer: monoInput, MsgID: otherMessage.Message.ID,
+	}); err == nil || !strings.Contains(err.Error(), "MESSAGE_ID_INVALID") {
+		t.Fatalf("cross-saved-peer sendReaction err = %v, want MESSAGE_ID_INVALID", err)
+	}
+
+	// Add Offer：源消息和目标会话都是 monoforum，自身 topic 由
+	// inputReplyToMonoForum(self) 选择；这不是普通 forum reply root。
+	addOffer := &tg.MessagesForwardMessagesRequest{
+		FromPeer: monoInput,
+		ID:       []int{original.Message.ID},
+		RandomID: []int64{8001},
+		ToPeer:   monoInput,
+	}
+	addOffer.SetDropAuthor(true)
+	addOffer.SetReplyTo(&tg.InputReplyToMonoForum{MonoforumPeerID: &tg.InputPeerSelf{}})
+	offer := tg.SuggestedPost{}
+	offer.SetPrice(&tg.StarsAmount{Amount: 25})
+	offer.SetScheduleDate(2_000_000_000)
+	addOffer.SetSuggestedPost(offer)
+
+	addOfferResult, err := r.onMessagesForwardMessages(WithUserID(ctx, sub.ID), addOffer)
+	if err != nil {
+		t.Fatalf("subscriber Add Offer forwardMessages(monoforum): %v", err)
+	}
+	proposal, proposalUpdate := requireMonoforumNewChannelMessage(t, addOfferResult)
+	if proposal.Message != original.Message.Body {
+		t.Fatalf("proposal body = %q, want copied source %q", proposal.Message, original.Message.Body)
+	}
+	if proposalUpdate.PtsCount != 1 || proposalUpdate.Pts <= original.Message.Pts {
+		t.Fatalf("proposal pts/count = %d/%d, want one real channel event after %d", proposalUpdate.Pts, proposalUpdate.PtsCount, original.Message.Pts)
+	}
+	if _, ok := proposal.GetFwdFrom(); ok {
+		t.Fatalf("drop_author proposal unexpectedly has fwd_from: %#v", proposal)
+	}
+	if saved, ok := proposal.GetSavedPeerID(); !ok {
+		t.Fatalf("proposal missing saved_peer_id")
+	} else if peer, ok := saved.(*tg.PeerUser); !ok || peer.UserID != sub.ID {
+		t.Fatalf("proposal saved_peer_id = %#v, want subscriber %d", saved, sub.ID)
+	}
+	proposalSuggested, ok := proposal.GetSuggestedPost()
+	if !ok {
+		t.Fatalf("proposal missing suggested_post")
+	}
+	if price, ok := proposalSuggested.GetPrice(); !ok {
+		t.Fatalf("proposal suggested_post missing price")
+	} else if stars, ok := price.(*tg.StarsAmount); !ok || stars.Amount != 25 {
+		t.Fatalf("proposal price = %#v, want 25 Stars", price)
+	}
+
+	// Edit Price/Edit Time：Android 同时带 reply_to、monoforum_peer_id 和冗余
+	// top_msg_id；服务端保留真实 reply，接受相等的冗余值但不制造 forum topic root。
+	editOffer := &tg.MessagesForwardMessagesRequest{
+		FromPeer: monoInput,
+		ID:       []int{proposal.ID},
+		RandomID: []int64{8002},
+		ToPeer:   monoInput,
+	}
+	editOffer.SetDropAuthor(true)
+	editReply := &tg.InputReplyToMessage{ReplyToMsgID: proposal.ID}
+	editReply.SetMonoforumPeerID(&tg.InputPeerSelf{})
+	editOffer.SetReplyTo(editReply)
+	editOffer.SetTopMsgID(proposal.ID)
+	edited := tg.SuggestedPost{}
+	edited.SetPrice(&tg.StarsAmount{Amount: 40})
+	edited.SetScheduleDate(2_000_100_000)
+	editOffer.SetSuggestedPost(edited)
+
+	editResult, err := r.onMessagesForwardMessages(WithUserID(ctx, sub.ID), editOffer)
+	if err != nil {
+		t.Fatalf("subscriber Edit Offer forwardMessages(monoforum): %v", err)
+	}
+	editedProposal, editedUpdate := requireMonoforumNewChannelMessage(t, editResult)
+	if editedUpdate.PtsCount != 1 || editedUpdate.Pts != proposalUpdate.Pts+1 {
+		t.Fatalf("edited proposal pts/count = %d/%d, want %d/1", editedUpdate.Pts, editedUpdate.PtsCount, proposalUpdate.Pts+1)
+	}
+	replyHeader, ok := editedProposal.ReplyTo.(*tg.MessageReplyHeader)
+	if !ok || replyHeader.ReplyToMsgID != proposal.ID {
+		t.Fatalf("edited proposal reply = %#v, want message %d", editedProposal.ReplyTo, proposal.ID)
+	}
+	if topID, ok := replyHeader.GetReplyToTopID(); ok || topID != 0 {
+		t.Fatalf("edited proposal acquired forum top_msg_id = %d/%v, want absent", topID, ok)
+	}
+	editedSuggested, ok := editedProposal.GetSuggestedPost()
+	if !ok {
+		t.Fatalf("edited proposal missing suggested_post")
+	}
+	if price, ok := editedSuggested.GetPrice(); !ok {
+		t.Fatalf("edited proposal missing price")
+	} else if stars, ok := price.(*tg.StarsAmount); !ok || stars.Amount != 40 {
+		t.Fatalf("edited proposal price = %#v, want 40 Stars", price)
+	}
+	if schedule, ok := editedSuggested.GetScheduleDate(); !ok || schedule != 2_000_100_000 {
+		t.Fatalf("edited proposal schedule = %d/%v, want 2000100000/true", schedule, ok)
+	}
+
+	beforeReplay, err := channelStore.ListMonoforumHistory(ctx, domain.MonoforumHistoryFilter{
+		MonoforumID: monoID, SavedPeer: subPeer, Limit: 100,
+	})
+	if err != nil {
+		t.Fatalf("history before replay: %v", err)
+	}
+	replayResult, err := r.onMessagesForwardMessages(WithUserID(ctx, sub.ID), editOffer)
+	if err != nil {
+		t.Fatalf("exact Edit Offer replay: %v", err)
+	}
+	replayedProposal, replayedUpdate := requireMonoforumNewChannelMessage(t, replayResult)
+	afterReplay, err := channelStore.ListMonoforumHistory(ctx, domain.MonoforumHistoryFilter{
+		MonoforumID: monoID, SavedPeer: subPeer, Limit: 100,
+	})
+	if err != nil {
+		t.Fatalf("history after replay: %v", err)
+	}
+	if replayedProposal.ID != editedProposal.ID || replayedUpdate.Pts != editedUpdate.Pts || afterReplay.Count != beforeReplay.Count {
+		t.Fatalf("exact replay id/pts/count = %d/%d/%d, want %d/%d/%d",
+			replayedProposal.ID, replayedUpdate.Pts, afterReplay.Count,
+			editedProposal.ID, editedUpdate.Pts, beforeReplay.Count)
+	}
+	conflict := *editOffer
+	conflictingSuggested := tg.SuggestedPost{}
+	conflictingSuggested.SetPrice(&tg.StarsAmount{Amount: 41})
+	conflict.SetSuggestedPost(conflictingSuggested)
+	if _, err := r.onMessagesForwardMessages(WithUserID(ctx, sub.ID), &conflict); err == nil || !strings.Contains(err.Error(), "RANDOM_ID_DUPLICATE") {
+		t.Fatalf("conflicting Edit Offer replay err = %v, want RANDOM_ID_DUPLICATE", err)
+	}
+
+	// 精确 id 查询必须服从 saved_peer 过滤，不能把其它订阅者的消息作为转发源。
+	crossSource := &tg.MessagesForwardMessagesRequest{
+		FromPeer: monoInput,
+		ID:       []int{otherMessage.Message.ID},
+		RandomID: []int64{8003},
+		ToPeer:   monoInput,
+	}
+	crossSource.SetDropAuthor(true)
+	crossSource.SetReplyTo(&tg.InputReplyToMonoForum{MonoforumPeerID: &tg.InputPeerSelf{}})
+	crossSource.SetSuggestedPost(offer)
+	if _, err := r.onMessagesForwardMessages(WithUserID(ctx, sub.ID), crossSource); err == nil || !strings.Contains(err.Error(), "MESSAGE_ID_INVALID") {
+		t.Fatalf("cross-saved-peer forward source err = %v, want MESSAGE_ID_INVALID", err)
+	}
+
+	// 管理员可见全部子会话，但目标仍必须显式指定，写入同一 subscriber saved_peer。
+	adminOffer := &tg.MessagesForwardMessagesRequest{
+		FromPeer: monoInput,
+		ID:       []int{original.Message.ID},
+		RandomID: []int64{8004},
+		ToPeer:   monoInput,
+	}
+	adminOffer.SetDropAuthor(true)
+	adminOffer.SetReplyTo(&tg.InputReplyToMonoForum{MonoforumPeerID: &tg.InputPeerUser{UserID: sub.ID}})
+	adminOffer.SetSuggestedPost(offer)
+	adminResult, err := r.onMessagesForwardMessages(WithUserID(ctx, owner.ID), adminOffer)
+	if err != nil {
+		t.Fatalf("admin Add Offer forwardMessages(monoforum): %v", err)
+	}
+	adminProposal, _ := requireMonoforumNewChannelMessage(t, adminResult)
+	if saved, ok := adminProposal.GetSavedPeerID(); !ok {
+		t.Fatalf("admin proposal missing saved_peer_id")
+	} else if peer, ok := saved.(*tg.PeerUser); !ok || peer.UserID != sub.ID {
+		t.Fatalf("admin proposal saved_peer_id = %#v, want subscriber %d", saved, sub.ID)
+	}
+}
+
+func requireMonoforumNewChannelMessage(t *testing.T, updatesClass tg.UpdatesClass) (*tg.Message, *tg.UpdateNewChannelMessage) {
+	t.Helper()
+	updates, ok := updatesClass.(*tg.Updates)
+	if !ok {
+		t.Fatalf("updates = %T, want *tg.Updates", updatesClass)
+	}
+	for _, update := range updates.Updates {
+		newMessage, ok := update.(*tg.UpdateNewChannelMessage)
+		if !ok {
+			continue
+		}
+		message, ok := newMessage.Message.(*tg.Message)
+		if !ok {
+			t.Fatalf("new channel message = %T, want *tg.Message", newMessage.Message)
+		}
+		return message, newMessage
+	}
+	t.Fatalf("updates missing UpdateNewChannelMessage: %#v", updates.Updates)
+	return nil, nil
+}

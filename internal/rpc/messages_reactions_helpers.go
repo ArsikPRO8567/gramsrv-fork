@@ -177,6 +177,8 @@ func messageReactionErr(err error) error {
 
 func channelReactionErr(err error) error {
 	switch {
+	case errors.Is(err, domain.ErrMessageIDInvalid):
+		return messageIDInvalidErr()
 	case errors.Is(err, domain.ErrReactionInvalid):
 		return reactionInvalidErr()
 	case errors.Is(err, domain.ErrReactionsTooMany):

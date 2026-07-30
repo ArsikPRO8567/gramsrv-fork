@@ -414,8 +414,6 @@ func forwardMessagesUnsupportedOptionErr(req *tg.MessagesForwardMessagesRequest)
 		return starsAmountInvalidErr()
 	case req.AllowPaidFloodskip:
 		return paymentUnsupportedErr()
-	case !req.SuggestedPost.Zero():
-		return suggestedPostPeerInvalidErr()
 	default:
 		return nil
 	}

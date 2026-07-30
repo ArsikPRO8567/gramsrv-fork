@@ -516,6 +516,10 @@ func (s *ChannelStore) getChannelMessagesForMember(ctx context.Context, viewerUs
 AND id = ANY($2::int[])
 AND (NOT deleted OR ($4 > 0 AND id = $4))
 AND (($3 <= 0 OR id > $3) OR ($4 > 0 AND id = $4))`
+	if channel.Monoforum && !member.CanManageDirectMessages() {
+		args = append(args, string(domain.PeerTypeUser), viewerUserID)
+		where += fmt.Sprintf("\nAND saved_peer_type = $%d AND saved_peer_id = $%d", len(args)-1, len(args))
+	}
 	rows, err := s.db.Query(ctx, `
 SELECT `+channelMessageColumns+`
 FROM channel_messages
