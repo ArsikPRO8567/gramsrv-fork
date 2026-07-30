@@ -203,6 +203,65 @@ func TestSendMonoforumMessageAndHistoryPostgres(t *testing.T) {
 	if len(exactMessages.Messages) != 1 || exactMessages.Messages[0].ID != m1.Message.ID {
 		t.Fatalf("subscriber exact monoforum messages = %+v, want only own message %d", exactMessages.Messages, m1.Message.ID)
 	}
+	monoBeforeViews, err := channels.GetChannelByID(ctx, monoID)
+	if err != nil {
+		t.Fatalf("get monoforum before views: %v", err)
+	}
+	subViews, err := channels.GetChannelMessageViews(ctx, domain.ChannelMessageViewsRequest{
+		UserID: sub.ID, ChannelID: monoID, IDs: []int{m1.Message.ID, otherMessage.Message.ID},
+		Increment: true, Date: 1700001006,
+	})
+	if err != nil {
+		t.Fatalf("subscriber get monoforum message views: %v", err)
+	}
+	if len(subViews.Views) != 1 || subViews.Views[m1.Message.ID] != 1 {
+		t.Fatalf("subscriber monoforum views = %+v, want own message %d at 1", subViews.Views, m1.Message.ID)
+	}
+	if _, ok := subViews.Views[otherMessage.Message.ID]; ok {
+		t.Fatalf("subscriber monoforum views leaked other saved_peer message %d", otherMessage.Message.ID)
+	}
+	var hiddenViews int
+	var hiddenViewer bool
+	if err := pool.QueryRow(ctx, `
+SELECT m.views_count,
+       EXISTS (
+           SELECT 1
+           FROM channel_message_viewers v
+           WHERE v.channel_id = m.channel_id
+             AND v.message_id = m.id
+             AND v.viewer_user_id = $3
+       )
+FROM channel_messages m
+WHERE m.channel_id = $1 AND m.id = $2`, monoID, otherMessage.Message.ID, sub.ID).Scan(&hiddenViews, &hiddenViewer); err != nil {
+		t.Fatalf("load hidden monoforum view state: %v", err)
+	}
+	if hiddenViews != 0 || hiddenViewer {
+		t.Fatalf("hidden monoforum view state = count %d viewer %v, want 0/false", hiddenViews, hiddenViewer)
+	}
+	repeatedViews, err := channels.GetChannelMessageViews(ctx, domain.ChannelMessageViewsRequest{
+		UserID: sub.ID, ChannelID: monoID, IDs: []int{m1.Message.ID},
+		Increment: true, Date: 1700001007,
+	})
+	if err != nil || repeatedViews.Views[m1.Message.ID] != 1 {
+		t.Fatalf("repeated subscriber monoforum views = %+v, %v; want idempotent 1", repeatedViews.Views, err)
+	}
+	adminViews, err := channels.GetChannelMessageViews(ctx, domain.ChannelMessageViewsRequest{
+		UserID: owner.ID, ChannelID: monoID, IDs: []int{m1.Message.ID, otherMessage.Message.ID},
+		Increment: true, Date: 1700001008,
+	})
+	if err != nil {
+		t.Fatalf("admin get monoforum message views: %v", err)
+	}
+	if len(adminViews.Views) != 2 || adminViews.Views[m1.Message.ID] != 2 || adminViews.Views[otherMessage.Message.ID] != 1 {
+		t.Fatalf("admin monoforum views = %+v, want both saved peers at 2/1", adminViews.Views)
+	}
+	monoAfterViews, err := channels.GetChannelByID(ctx, monoID)
+	if err != nil {
+		t.Fatalf("get monoforum after views: %v", err)
+	}
+	if monoAfterViews.Pts != monoBeforeViews.Pts {
+		t.Fatalf("message views advanced monoforum pts = %d, want unchanged %d", monoAfterViews.Pts, monoBeforeViews.Pts)
+	}
 	if _, err := channels.SetChannelMessageReactions(ctx, domain.SetChannelMessageReactionsRequest{
 		UserID: sub.ID, ChannelID: monoID, MessageID: m1.Message.ID,
 		Reactions: []domain.MessageReaction{{Type: domain.MessageReactionEmoji, Emoticon: "\U0001f44d"}},

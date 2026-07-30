@@ -468,11 +468,11 @@ func TestMonoforumSendMessageWritePath(t *testing.T) {
 	}
 }
 
-// TestMonoforumForwardSuggestedPostAndReactionWritePath 回归 DrKLO 的三条真实路径：
+// TestMonoforumForwardSuggestedPostAndMessageMetadataPaths 回归 DrKLO 的四条真实路径：
 // Add Offer 用 forwardMessages+suggested_post 新建建议，Edit Price/Edit Time 再回复原建议；
-// get/send reaction 则必须允许无 member 行的订阅者访问自己的 saved_peer，且不能按猜测 id
-// 跨到另一订阅者的子会话。
-func TestMonoforumForwardSuggestedPostAndReactionWritePath(t *testing.T) {
+// getMessagesViews 与 get/send reaction 必须允许无 member 行的订阅者访问自己的 saved_peer，
+// 且不能按猜测 id 跨到另一订阅者的子会话。
+func TestMonoforumForwardSuggestedPostAndMessageMetadataPaths(t *testing.T) {
 	ctx := context.Background()
 	userStore := memory.NewUserStore()
 	owner, err := userStore.Create(ctx, domain.User{AccessHash: 31, Phone: "15550004001", FirstName: "Owner"})
@@ -524,6 +524,50 @@ func TestMonoforumForwardSuggestedPostAndReactionWritePath(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("seed other subscriber message: %v", err)
+	}
+
+	// DrKLO 会为带 views/replies 的可见消息每 5 秒批量刷新一次。返回向量必须
+	// 保持请求位置，同时不能因 synthetic viewer 无 channel_members 行而报 CHANNEL_PRIVATE，
+	// 也不能让猜测到的其它 saved_peer 消息被读取或递增。
+	messageViews, err := r.onMessagesGetMessagesViews(WithUserID(ctx, sub.ID), &tg.MessagesGetMessagesViewsRequest{
+		Peer:      monoInput,
+		ID:        []int{original.Message.ID, otherMessage.Message.ID},
+		Increment: true,
+	})
+	if err != nil {
+		t.Fatalf("subscriber getMessagesViews(monoforum): %v", err)
+	}
+	if len(messageViews.Views) != 2 || len(messageViews.Chats) == 0 {
+		t.Fatalf("subscriber getMessagesViews = %+v, want two positional views with channel context", messageViews)
+	}
+	if got, ok := messageViews.Views[0].GetViews(); !ok || got != 1 {
+		t.Fatalf("subscriber own message views = %d/%v, want 1/true", got, ok)
+	}
+	if got, ok := messageViews.Views[1].GetViews(); ok || got != 0 {
+		t.Fatalf("subscriber cross-saved-peer views = %d/%v, want 0/false", got, ok)
+	}
+	repeatedMessageViews, err := r.onMessagesGetMessagesViews(WithUserID(ctx, sub.ID), &tg.MessagesGetMessagesViewsRequest{
+		Peer: monoInput, ID: []int{original.Message.ID}, Increment: true,
+	})
+	if err != nil {
+		t.Fatalf("subscriber repeated getMessagesViews(monoforum): %v", err)
+	}
+	if got, ok := repeatedMessageViews.Views[0].GetViews(); !ok || got != 1 {
+		t.Fatalf("subscriber repeated message views = %d/%v, want idempotent 1/true", got, ok)
+	}
+	adminMessageViews, err := r.onMessagesGetMessagesViews(WithUserID(ctx, owner.ID), &tg.MessagesGetMessagesViewsRequest{
+		Peer:      monoInput,
+		ID:        []int{original.Message.ID, otherMessage.Message.ID},
+		Increment: true,
+	})
+	if err != nil {
+		t.Fatalf("admin getMessagesViews(monoforum): %v", err)
+	}
+	if got, ok := adminMessageViews.Views[0].GetViews(); !ok || got != 2 {
+		t.Fatalf("admin first saved-peer views = %d/%v, want 2/true", got, ok)
+	}
+	if got, ok := adminMessageViews.Views[1].GetViews(); !ok || got != 1 {
+		t.Fatalf("admin second saved-peer views = %d/%v, want 1/true", got, ok)
 	}
 
 	// Android 打开 reaction 状态时会先发 getMessagesReactions。订阅者没有 channel_members

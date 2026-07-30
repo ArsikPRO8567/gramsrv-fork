@@ -141,6 +141,43 @@ func TestSendMonoforumMessageAndHistory(t *testing.T) {
 	if len(exactMessages.Messages) != 1 || exactMessages.Messages[0].ID != m1.Message.ID {
 		t.Fatalf("subscriber exact monoforum messages = %+v, want only own message %d", exactMessages.Messages, m1.Message.ID)
 	}
+	ptsBeforeViews := store.channels[monoID].Pts
+	subViews, err := store.GetChannelMessageViews(ctx, domain.ChannelMessageViewsRequest{
+		UserID: 42, ChannelID: monoID, IDs: []int{m1.Message.ID, otherMessage.Message.ID},
+		Increment: true, Date: 1_700_001_006,
+	})
+	if err != nil {
+		t.Fatalf("subscriber get monoforum message views: %v", err)
+	}
+	if len(subViews.Views) != 1 || subViews.Views[m1.Message.ID] != 1 {
+		t.Fatalf("subscriber monoforum views = %+v, want own message %d at 1", subViews.Views, m1.Message.ID)
+	}
+	if _, ok := subViews.Views[otherMessage.Message.ID]; ok {
+		t.Fatalf("subscriber monoforum views leaked other saved_peer message %d", otherMessage.Message.ID)
+	}
+	repeatedViews, err := store.GetChannelMessageViews(ctx, domain.ChannelMessageViewsRequest{
+		UserID: 42, ChannelID: monoID, IDs: []int{m1.Message.ID},
+		Increment: true, Date: 1_700_001_007,
+	})
+	if err != nil || repeatedViews.Views[m1.Message.ID] != 1 {
+		t.Fatalf("repeated subscriber monoforum views = %+v, %v; want idempotent 1", repeatedViews.Views, err)
+	}
+	if got := store.msgViews[monoID][otherMessage.Message.ID]; got != 0 {
+		t.Fatalf("hidden saved_peer views = %d, want 0 before admin view", got)
+	}
+	adminViews, err := store.GetChannelMessageViews(ctx, domain.ChannelMessageViewsRequest{
+		UserID: 1, ChannelID: monoID, IDs: []int{m1.Message.ID, otherMessage.Message.ID},
+		Increment: true, Date: 1_700_001_008,
+	})
+	if err != nil {
+		t.Fatalf("admin get monoforum message views: %v", err)
+	}
+	if len(adminViews.Views) != 2 || adminViews.Views[m1.Message.ID] != 2 || adminViews.Views[otherMessage.Message.ID] != 1 {
+		t.Fatalf("admin monoforum views = %+v, want both saved peers at 2/1", adminViews.Views)
+	}
+	if got := store.channels[monoID].Pts; got != ptsBeforeViews {
+		t.Fatalf("message views advanced monoforum pts = %d, want unchanged %d", got, ptsBeforeViews)
+	}
 	if _, err := store.SetChannelMessageReactions(ctx, domain.SetChannelMessageReactionsRequest{
 		UserID: 42, ChannelID: monoID, MessageID: m1.Message.ID,
 		Reactions: []domain.MessageReaction{{Type: domain.MessageReactionEmoji, Emoticon: "\U0001f44d"}},
