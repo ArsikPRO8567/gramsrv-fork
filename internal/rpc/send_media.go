@@ -269,7 +269,9 @@ func (r *Router) onMessagesSendMedia(ctx context.Context, req *tg.MessagesSendMe
 	// 原始 TL 指纹；编码失败则留空，由 store 使用 domain fallback。
 	idempotencyFingerprint, _ := sendMediaIdempotencyFingerprint(req)
 	// 媒体 caption 里的链接/@mention/#hashtag 等同样补自动高亮实体（客户端未带时）。
-	req.Entities = augmentAutoEntities(req.Message, req.Entities)
+	// 派生结果保持在局部变量中，不能回写原始 TL request，否则同一请求对象重试时指纹会
+	// 从“客户端输入”变成“服务端派生输入”，错误触发 RANDOM_ID_DUPLICATE。
+	entities := r.augmentAutoEntities(req.Message, req.Entities)
 	userID, _, err := r.currentUserID(ctx)
 	if err != nil {
 		return nil, internalErr()
@@ -351,7 +353,7 @@ func (r *Router) onMessagesSendMedia(ctx context.Context, req *tg.MessagesSendMe
 			IdempotencyFingerprint: idempotencyFingerprint,
 			IdempotencyPreflighted: replay.checked,
 			Message:                req.Message,
-			Entities:               domainMessageEntities(req.Entities),
+			Entities:               domainMessageEntities(entities),
 			Media:                  media,
 			ReplyTo:                replyTo,
 			Silent:                 req.Silent,
@@ -414,7 +416,7 @@ func (r *Router) onMessagesSendMedia(ctx context.Context, req *tg.MessagesSendMe
 			idempotencyFingerprint: idempotencyFingerprint,
 			idempotencyPreflighted: replay.checked,
 			message:                req.Message,
-			entities:               req.Entities,
+			entities:               entities,
 			media:                  media,
 			silent:                 req.Silent,
 			noforwards:             req.Noforwards,
@@ -429,7 +431,7 @@ func (r *Router) onMessagesSendMedia(ctx context.Context, req *tg.MessagesSendMe
 		idempotencyFingerprint: idempotencyFingerprint,
 		idempotencyPreflighted: replay.checked,
 		message:                req.Message,
-		entities:               req.Entities,
+		entities:               entities,
 		media:                  media,
 		silent:                 req.Silent,
 		noforwards:             req.Noforwards,
@@ -583,7 +585,7 @@ func (r *Router) onMessagesSendMultiMedia(ctx context.Context, req *tg.MessagesS
 			idempotencyFingerprint: idempotencyFingerprint,
 			idempotencyPreflighted: replays[i].checked,
 			message:                item.Message,
-			entities:               augmentAutoEntities(item.Message, item.Entities),
+			entities:               r.augmentAutoEntities(item.Message, item.Entities),
 			media:                  media,
 			silent:                 req.Silent,
 			noforwards:             req.Noforwards,

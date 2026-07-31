@@ -161,6 +161,34 @@ func TestAppLinkBuilderPreservesLegacyAndSupportsHostBase(t *testing.T) {
 	}
 }
 
+func TestAppLinkBuilderAcceptsEntityURL(t *testing.T) {
+	hosted, err := NewAppLinkBuilder("telesrv", "owpg://links.example.test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name string
+		raw  string
+		want bool
+	}{
+		{name: "legacy route", raw: "telesrv://resolve?domain=Alice", want: true},
+		{name: "legacy case insensitive", raw: "TELESRV://resolve?domain=Alice", want: true},
+		{name: "configured host base", raw: "owpg://links.example.test/Alice", want: true},
+		{name: "configured host case insensitive", raw: "OWPG://LINKS.EXAMPLE.TEST/Alice", want: true},
+		{name: "same scheme wrong host", raw: "owpg://other.example.test/Alice", want: false},
+		{name: "credentials", raw: "telesrv://user@resolve/path", want: false},
+		{name: "port", raw: "telesrv://resolve:443/path", want: false},
+		{name: "unconfigured scheme", raw: "other://resolve", want: false},
+		{name: "missing route host", raw: "telesrv://", want: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := hosted.AcceptsEntityURL(tc.raw); got != tc.want {
+				t.Fatalf("AcceptsEntityURL(%q) = %v, want %v", tc.raw, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestValidateAppName(t *testing.T) {
 	if got, err := ValidateAppName("  Example Chat  "); err != nil || got != "Example Chat" {
 		t.Fatalf("ValidateAppName valid = %q, %v", got, err)

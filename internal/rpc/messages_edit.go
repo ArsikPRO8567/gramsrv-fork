@@ -50,7 +50,7 @@ func (r *Router) onMessagesEditMessage(ctx context.Context, req *tg.MessagesEdit
 	if hasMessage && richMessage == nil {
 		// 编辑后的文本同样补服务端自动实体（url/@mention/#hashtag/bot command），与发送一致；
 		// 覆盖频道/私聊编辑与各自的定时编辑分支（editScheduledMessage 仅由本处调用）。
-		entities = augmentAutoEntities(message, entities)
+		entities = r.augmentAutoEntities(message, entities)
 	}
 	userID, _, err := r.currentUserID(ctx)
 	if err != nil {
