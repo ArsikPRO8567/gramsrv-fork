@@ -434,12 +434,46 @@ func (s serverExchangeCompat) readUnencrypted(ctx context.Context, b *bin.Buffer
 	if err := msg.Decode(b); err != nil {
 		return err
 	}
-	if !validClientMessageIDBits(msg.MessageID) {
+	if !validUnencryptedHandshakeMessageID(msg.MessageID, msg.MessageData) {
 		return gofaster.New("bad msg type")
 	}
 	b.ResetTo(msg.MessageData)
 
 	return data.Decode(b)
+}
+
+// validUnencryptedHandshakeMessageID preserves the normal client message-id
+// rules while admitting the two sentinel ids emitted by official TDLib:
+//
+//   - PingConnectionReqPQ sends req_pq_multi with message_id=1.
+//   - HandshakeConnection sends every auth-key exchange request with message_id=0.
+//
+// The exception is deliberately constructor-scoped and is only called after an
+// auth_key_id=0 envelope has been decoded. Encrypted traffic continues through
+// validClientMessageIDBits and the full inbound preflight without this carve-out.
+func validUnencryptedHandshakeMessageID(messageID int64, messageData []byte) bool {
+	if validClientMessageIDBits(messageID) {
+		return true
+	}
+
+	payload := &bin.Buffer{Buf: messageData}
+	typeID, err := payload.PeekID()
+	if err != nil {
+		return false
+	}
+
+	switch messageID {
+	case 1:
+		return typeID == mt.ReqPqMultiRequestTypeID
+	case 0:
+		switch typeID {
+		case mt.ReqPqMultiRequestTypeID,
+			mt.ReqDHParamsRequestTypeID,
+			mt.SetClientDHParamsRequestTypeID:
+			return true
+		}
+	}
+	return false
 }
 
 type compatReqPQ struct {
