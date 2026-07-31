@@ -3,6 +3,7 @@ package rpc
 import (
 	"context"
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -284,6 +285,140 @@ func TestUsersGetUsersProjectsCollectibleUsernamesInOneBatch(t *testing.T) {
 	// Two users, one batch read: no N+1.
 	if registry.batchCalls != 1 || registry.peerCalls != 0 {
 		t.Fatalf("registry reads = batch %d / peer %d, want batch 1 / peer 0", registry.batchCalls, registry.peerCalls)
+	}
+}
+
+func TestMessageEchoProjectsCompleteUsernamesInOneBatch(t *testing.T) {
+	registry := newFakeUsernameRegistry()
+	f := newUsernameProjectionFixture(t, registry)
+	registry.byPeer[domain.Peer{Type: domain.PeerTypeUser, ID: f.owner.ID}] = []domain.Username{
+		{Username: "owner_slot", Editable: true, Active: true, SortOrder: 0},
+		{Username: "owner_collectible", Active: true, SortOrder: 1, CollectibleID: 21},
+	}
+	registry.byPeer[domain.Peer{Type: domain.PeerTypeUser, ID: f.friend.ID}] = []domain.Username{
+		{Username: "friend_slot", Editable: true, Active: true, SortOrder: 0},
+		{Username: "friend_collectible", Active: true, SortOrder: 1, CollectibleID: 22},
+	}
+
+	users := f.router.usersForMessageUpdate(context.Background(), f.owner.ID, domain.Message{
+		OwnerUserID: f.owner.ID,
+		From:        domain.Peer{Type: domain.PeerTypeUser, ID: f.owner.ID},
+		Peer:        domain.Peer{Type: domain.PeerTypeUser, ID: f.friend.ID},
+	})
+	if len(users) != 2 {
+		t.Fatalf("message echo users = %d, want owner and friend", len(users))
+	}
+	want := map[int64][]string{
+		f.owner.ID:  {"owner_slot", "owner_collectible"},
+		f.friend.ID: {"friend_slot", "friend_collectible"},
+	}
+	for _, item := range users {
+		user, ok := item.(*tg.User)
+		if !ok {
+			t.Fatalf("message echo user = %T, want *tg.User", item)
+		}
+		vector, set := user.GetUsernames()
+		if !set || !reflect.DeepEqual(usernameStrings(vector), want[user.ID]) {
+			t.Fatalf("user %d usernames = %v (set %v), want %v", user.ID, usernameStrings(vector), set, want[user.ID])
+		}
+	}
+	if registry.batchCalls != 1 || registry.peerCalls != 0 {
+		t.Fatalf("registry reads = batch %d / peer %d, want one batch read for the response", registry.batchCalls, registry.peerCalls)
+	}
+}
+
+func TestChannelMessageUpdatesProjectCompleteUsernames(t *testing.T) {
+	const (
+		viewerUserID = int64(1001)
+		senderUserID = int64(1002)
+		channelID    = int64(2001)
+	)
+	registry := newFakeUsernameRegistry()
+	registry.byPeer[domain.Peer{Type: domain.PeerTypeUser, ID: senderUserID}] = []domain.Username{
+		{Username: "channel_sender", Editable: true, Active: true, SortOrder: 0},
+		{Username: "channel_collectible", Active: true, SortOrder: 1, CollectibleID: 31},
+	}
+	router := New(Config{}, Deps{
+		Users: mapUsersService{users: map[int64]domain.User{
+			senderUserID: {ID: senderUserID, FirstName: "Sender", Username: "channel_sender"},
+		}},
+		Usernames: registry,
+	}, zaptest.NewLogger(t), clock.System)
+	message := domain.ChannelMessage{
+		ID:           41,
+		ChannelID:    channelID,
+		SenderUserID: senderUserID,
+		From:         domain.Peer{Type: domain.PeerTypeUser, ID: senderUserID},
+		Date:         1700000500,
+		Pts:          9,
+	}
+	updates := router.channelMessageUpdatesWithPeerCache(context.Background(), viewerUserID, domain.SendChannelMessageResult{
+		Channel: domain.Channel{ID: channelID, AccessHash: 22, Title: "group", Megagroup: true, Date: 1700000000},
+		Message: message,
+		Event: domain.ChannelUpdateEvent{
+			ChannelID: channelID,
+			Type:      domain.ChannelUpdateNewMessage,
+			Pts:       9,
+			PtsCount:  1,
+			Date:      message.Date,
+			Message:   message,
+		},
+	}, 0, newViewerPeerCache(router))
+	if updates == nil || len(updates.Users) != 1 {
+		t.Fatalf("channel updates users = %+v, want one sender", updates)
+	}
+	user := updates.Users[0].(*tg.User)
+	vector, set := user.GetUsernames()
+	if !set || !reflect.DeepEqual(usernameStrings(vector), []string{"channel_sender", "channel_collectible"}) {
+		t.Fatalf("channel sender usernames = %v (set %v), want complete vector", usernameStrings(vector), set)
+	}
+	if registry.peerCalls != 0 || registry.batchCalls != 1 {
+		t.Fatalf("registry reads = peer %d / batch %d, want one batched user+channel read", registry.peerCalls, registry.batchCalls)
+	}
+}
+
+func TestChannelDifferenceProjectsCompleteUsernames(t *testing.T) {
+	const (
+		viewerUserID = int64(1001)
+		senderUserID = int64(1002)
+		channelID    = int64(2001)
+	)
+	registry := newFakeUsernameRegistry()
+	registry.byPeer[domain.Peer{Type: domain.PeerTypeUser, ID: senderUserID}] = []domain.Username{
+		{Username: "difference_sender", Editable: true, Active: true, SortOrder: 0},
+		{Username: "difference_collectible", Active: true, SortOrder: 1, CollectibleID: 41},
+	}
+	router := New(Config{}, Deps{Usernames: registry}, zaptest.NewLogger(t), clock.System)
+	out := router.tgChannelDifference(context.Background(), viewerUserID, domain.ChannelDifference{
+		Final:   true,
+		Pts:     9,
+		Channel: domain.Channel{ID: channelID, AccessHash: 22, Title: "group", Megagroup: true, Date: 1700000000},
+		Self:    domain.ChannelMember{ChannelID: channelID, UserID: viewerUserID, Status: domain.ChannelMemberActive},
+		Users: []domain.User{{
+			ID:        senderUserID,
+			FirstName: "Sender",
+			Username:  "difference_sender",
+		}},
+		NewMessages: []domain.ChannelMessage{{
+			ID:           51,
+			ChannelID:    channelID,
+			SenderUserID: senderUserID,
+			From:         domain.Peer{Type: domain.PeerTypeUser, ID: senderUserID},
+			Date:         1700000600,
+			Pts:          9,
+		}},
+	})
+	diff, ok := out.(*tg.UpdatesChannelDifference)
+	if !ok || len(diff.Users) != 1 {
+		t.Fatalf("channel difference = %T %+v, want one user", out, out)
+	}
+	user := diff.Users[0].(*tg.User)
+	vector, set := user.GetUsernames()
+	if !set || !reflect.DeepEqual(usernameStrings(vector), []string{"difference_sender", "difference_collectible"}) {
+		t.Fatalf("channel difference usernames = %v (set %v), want complete vector", usernameStrings(vector), set)
+	}
+	if registry.batchCalls != 1 || registry.peerCalls != 0 {
+		t.Fatalf("registry reads = batch %d / peer %d, want one batched user+channel read", registry.batchCalls, registry.peerCalls)
 	}
 }
 

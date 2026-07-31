@@ -596,6 +596,10 @@ func (r *Router) usersForMessageUpdate(ctx context.Context, ownerUserID int64, m
 	if msg.Media != nil && msg.Media.Contact != nil {
 		add(msg.Media.Contact.UserID)
 	}
+	// A non-min User replaces the cached peer on iOS. Keep the complete
+	// username vector on synchronous message echoes instead of letting this
+	// response regress a previously hydrated profile to the legacy scalar.
+	r.applyUsernamesToPeerObjects(ctx, users, nil)
 	return users
 }
 
@@ -658,6 +662,7 @@ func (r *Router) usersForMessageUpdates(ctx context.Context, ownerUserID int64, 
 			}
 		}
 	}
+	r.applyUsernamesToPeerObjects(ctx, users, nil)
 	return users
 }
 

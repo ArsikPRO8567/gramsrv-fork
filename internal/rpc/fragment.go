@@ -255,6 +255,57 @@ func (r *Router) applyUsernamesToPeerObjects(ctx context.Context, users []tg.Use
 	}
 	peers := make([]domain.Peer, 0, len(users)+len(chats))
 	seen := make(map[domain.Peer]struct{}, len(users)+len(chats))
+	peers = appendUsernameProjectionPeers(peers, seen, users, chats)
+	if len(peers) == 0 {
+		return
+	}
+	byPeer := r.usernameRegistryMap(ctx, peers)
+	if len(byPeer) == 0 {
+		return
+	}
+	applyUsernamesFromRegistry(users, chats, byPeer)
+}
+
+// applyUsernamesToUpdatesBatch projects one username-registry snapshot over a
+// whole outbox claim. A claim may contain repeated peer objects for several
+// events and viewers; collecting the peer union first keeps the hot path at one
+// registry round trip rather than one read per event or online session.
+func (r *Router) applyUsernamesToUpdatesBatch(ctx context.Context, updates []*tg.Updates) {
+	if r.deps.Usernames == nil || len(updates) == 0 {
+		return
+	}
+	peerCapacity := 0
+	for _, update := range updates {
+		if update != nil {
+			peerCapacity += len(update.Users) + len(update.Chats)
+		}
+	}
+	if peerCapacity == 0 {
+		return
+	}
+	peers := make([]domain.Peer, 0, peerCapacity)
+	seen := make(map[domain.Peer]struct{}, peerCapacity)
+	for _, update := range updates {
+		if update == nil {
+			continue
+		}
+		peers = appendUsernameProjectionPeers(peers, seen, update.Users, update.Chats)
+	}
+	if len(peers) == 0 {
+		return
+	}
+	byPeer := r.usernameRegistryMap(ctx, peers)
+	if len(byPeer) == 0 {
+		return
+	}
+	for _, update := range updates {
+		if update != nil {
+			applyUsernamesFromRegistry(update.Users, update.Chats, byPeer)
+		}
+	}
+}
+
+func appendUsernameProjectionPeers(peers []domain.Peer, seen map[domain.Peer]struct{}, users []tg.UserClass, chats []tg.ChatClass) []domain.Peer {
 	addPeer := func(peer domain.Peer) {
 		if peer.ID == 0 {
 			return
@@ -275,14 +326,7 @@ func (r *Router) applyUsernamesToPeerObjects(ctx context.Context, users []tg.Use
 			addPeer(domain.Peer{Type: domain.PeerTypeChannel, ID: ch.ID})
 		}
 	}
-	if len(peers) == 0 {
-		return
-	}
-	byPeer := r.usernameRegistryMap(ctx, peers)
-	if len(byPeer) == 0 {
-		return
-	}
-	applyUsernamesFromRegistry(users, chats, byPeer)
+	return peers
 }
 
 // applyUsernamesFromRegistry applies a previously loaded registry snapshot.

@@ -217,6 +217,17 @@ func (r *Router) tgUpdatesDifference(ctx context.Context, viewerUserID int64, di
 	return out
 }
 
+func (r *Router) tgChannelDifference(ctx context.Context, viewerUserID int64, diff domain.ChannelDifference) tg.UpdatesChannelDifferenceClass {
+	out := tgChannelDifference(viewerUserID, diff)
+	switch v := out.(type) {
+	case *tg.UpdatesChannelDifference:
+		r.applyPeerReadModels(ctx, viewerUserID, v.Users, v.Chats)
+	case *tg.UpdatesChannelDifferenceTooLong:
+		r.applyPeerReadModels(ctx, viewerUserID, v.Users, v.Chats)
+	}
+	return out
+}
+
 func (r *Router) withStoryUpdatePeerObjects(ctx context.Context, viewerUserID int64, updates *tg.Updates, peers ...domain.Peer) *tg.Updates {
 	if updates == nil {
 		return nil
@@ -229,6 +240,28 @@ func (r *Router) withStoryUpdatePeerObjects(ctx context.Context, viewerUserID in
 		updates.Chats = appendUniqueTGChats(updates.Chats, tgChannels(viewerUserID, channels)...)
 	}
 	r.applyPeerReadModels(ctx, viewerUserID, updates.Users, updates.Chats)
+	return updates
+}
+
+// withStoryUpdatePeerObjectsForOutbox keeps the viewer-specific story overlay
+// local to one update while deferring viewer-independent username projection to
+// BuildOutboxUpdates' claim-wide pass. This avoids turning story events into an
+// extra username-registry query per event before the final batch projection.
+func (r *Router) withStoryUpdatePeerObjectsForOutbox(ctx context.Context, viewerUserID int64, updates *tg.Updates, peers ...domain.Peer) *tg.Updates {
+	if updates == nil {
+		return nil
+	}
+	users, channels := r.storyPeerObjects(ctx, viewerUserID, peers)
+	if len(users) > 0 {
+		projected := tgUsersForViewer(viewerUserID, r.withUsersPresence(users))
+		updates.Users = appendUniqueTGUsers(updates.Users, projected...)
+	}
+	if len(channels) > 0 {
+		updates.Chats = appendUniqueTGChats(updates.Chats, tgChannels(viewerUserID, channels)...)
+	}
+	r.withBotProfileFlagsForUsers(ctx, updates.Users)
+	r.applyStoryMaxIDsToPeerObjects(ctx, viewerUserID, updates.Users, updates.Chats)
+	r.applyBotVerificationIconsToPeerObjects(ctx, updates.Users, updates.Chats)
 	return updates
 }
 

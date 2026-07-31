@@ -955,6 +955,23 @@ func channelMessageFanoutOwnerIDs(res domain.SendChannelMessageResult, extraUser
 
 // channelMessagesFanoutOwnerIDs 同上，但取多条结果（批量转发汇成一个 job）的 owner id 并集。
 func channelMessagesFanoutOwnerIDs(results []domain.SendChannelMessageResult, extraUserIDs []int64) []int64 {
+	userIDs, _ := channelMessagesFanoutPeerRefs(results, extraUserIDs)
+	return peerIDMapKeys(userIDs)
+}
+
+func channelMessagesFanoutUsernamePeers(results []domain.SendChannelMessageResult, extraUserIDs []int64) []domain.Peer {
+	userIDs, channelIDs := channelMessagesFanoutPeerRefs(results, extraUserIDs)
+	peers := make([]domain.Peer, 0, len(userIDs)+len(channelIDs))
+	for userID := range userIDs {
+		peers = append(peers, domain.Peer{Type: domain.PeerTypeUser, ID: userID})
+	}
+	for channelID := range channelIDs {
+		peers = append(peers, domain.Peer{Type: domain.PeerTypeChannel, ID: channelID})
+	}
+	return peers
+}
+
+func channelMessagesFanoutPeerRefs(results []domain.SendChannelMessageResult, extraUserIDs []int64) (map[int64]struct{}, map[int64]struct{}) {
 	userIDs := make(map[int64]struct{}, len(results)+len(extraUserIDs)+4)
 	channelIDs := make(map[int64]struct{})
 	for _, id := range extraUserIDs {
@@ -966,7 +983,7 @@ func channelMessagesFanoutOwnerIDs(results []domain.SendChannelMessageResult, ex
 		collectChannelUpdatePeerRefs(res.Event, res.Channel.ID, userIDs, channelIDs)
 		collectChannelMessagePeerRefs(res.Message, res.Channel.ID, userIDs, channelIDs)
 	}
-	return peerIDMapKeys(userIDs)
+	return userIDs, channelIDs
 }
 
 // enqueueChannelMessageFanout 异步 fan-out 单条频道消息并预热跨 viewer 投影（「频道里出现一条新消息」
@@ -976,11 +993,14 @@ func (r *Router) enqueueChannelMessageFanout(ctx context.Context, originUserID i
 	r.enqueueBotAPIChannelMessageUpdate(ctx, originUserID, res)
 	fanoutCache := newViewerPeerCache(r)
 	ownerIDs := channelMessageFanoutOwnerIDs(res, extraUserIDs)
+	usernamePeers := channelMessagesFanoutUsernamePeers([]domain.SendChannelMessageResult{res}, extraUserIDs)
+	var usernames map[domain.Peer][]domain.Username
 	skip := skipDeliverySet(res.SkipDeliveryUserIDs)
 	r.enqueueChannelFanoutWithPrefetch(ctx, channelFanoutMessageBox, originUserID, res.Channel.ID, res.Event.Pts, res.Recipients,
 		0,
 		func(bgCtx context.Context, viewers []int64) {
 			r.prefetchChannelFanoutUsers(bgCtx, fanoutCache, viewers, ownerIDs)
+			usernames = r.usernameRegistryMap(bgCtx, usernamePeers)
 		},
 		func(bgCtx context.Context, viewerUserID int64) *tg.Updates {
 			// privacy bot 在 send 时被 SkipDeliveryUserIDs 排除（命令/@/回复以外的消息不可见）。
@@ -991,7 +1011,7 @@ func (r *Router) enqueueChannelMessageFanout(ctx context.Context, originUserID i
 			if _, skipped := skip[viewerUserID]; skipped {
 				return nil
 			}
-			return r.channelMessageUpdatesWithPeerCache(bgCtx, viewerUserID, res, 0, fanoutCache)
+			return r.channelMessageUpdatesWithPeerCacheAndUsernames(bgCtx, viewerUserID, res, 0, fanoutCache, usernames)
 		})
 }
 
@@ -1030,6 +1050,23 @@ func skipDeliverySet(ids []int64) map[int64]struct{} {
 // ServiceEvent/ServiceMessage 仅 ServiceEvent.Pts!=0 时收，对应 todo 编辑的服务消息第二容器），使预热
 // owner 集与 build 实际下发的 Users 集恰好一致——多收只会无害多预热，但镜像门控让等价测试最紧。
 func channelEditMessageFanoutOwnerIDs(res domain.EditChannelMessageResult) []int64 {
+	userIDs, _ := channelEditMessageFanoutPeerRefs(res)
+	return peerIDMapKeys(userIDs)
+}
+
+func channelEditMessageFanoutUsernamePeers(res domain.EditChannelMessageResult) []domain.Peer {
+	userIDs, channelIDs := channelEditMessageFanoutPeerRefs(res)
+	peers := make([]domain.Peer, 0, len(userIDs)+len(channelIDs))
+	for userID := range userIDs {
+		peers = append(peers, domain.Peer{Type: domain.PeerTypeUser, ID: userID})
+	}
+	for channelID := range channelIDs {
+		peers = append(peers, domain.Peer{Type: domain.PeerTypeChannel, ID: channelID})
+	}
+	return peers
+}
+
+func channelEditMessageFanoutPeerRefs(res domain.EditChannelMessageResult) (map[int64]struct{}, map[int64]struct{}) {
 	userIDs := make(map[int64]struct{}, 4)
 	channelIDs := make(map[int64]struct{})
 	if res.Event.Pts != 0 {
@@ -1040,7 +1077,7 @@ func channelEditMessageFanoutOwnerIDs(res domain.EditChannelMessageResult) []int
 		collectChannelUpdatePeerRefs(res.ServiceEvent, res.Channel.ID, userIDs, channelIDs)
 		collectChannelMessagePeerRefs(res.ServiceMessage, res.Channel.ID, userIDs, channelIDs)
 	}
-	return peerIDMapKeys(userIDs)
+	return userIDs, channelIDs
 }
 
 // enqueueChannelEditMessageFanout 异步 fan-out 一条频道编辑并预热跨 viewer 投影（editMessage/geolive/
@@ -1057,14 +1094,17 @@ func (r *Router) enqueueChannelEditMessageFanout(ctx context.Context, originUser
 	r.enqueueBotAPIChannelEditMessageUpdate(ctx, originUserID, res)
 	fanoutCache := newViewerPeerCache(r)
 	ownerIDs := channelEditMessageFanoutOwnerIDs(res)
+	usernamePeers := channelEditMessageFanoutUsernamePeers(res)
+	var usernames map[domain.Peer][]domain.Username
 	nudgePts := max(res.Event.Pts, res.ServiceEvent.Pts)
 	r.enqueueChannelFanoutWithPrefetch(ctx, channelFanoutMessageBox, originUserID, res.Channel.ID, nudgePts, res.Recipients,
 		0,
 		func(bgCtx context.Context, viewers []int64) {
 			r.prefetchChannelFanoutUsers(bgCtx, fanoutCache, viewers, ownerIDs)
+			usernames = r.usernameRegistryMap(bgCtx, usernamePeers)
 		},
 		func(bgCtx context.Context, viewerUserID int64) *tg.Updates {
-			return r.channelEditMessageUpdatesWithPeerCache(bgCtx, viewerUserID, res, fanoutCache)
+			return r.channelEditMessageUpdatesWithPeerCacheAndUsernames(bgCtx, viewerUserID, res, fanoutCache, usernames)
 		})
 }
 
@@ -1075,13 +1115,16 @@ func (r *Router) enqueueChannelMessagesFanout(ctx context.Context, originUserID,
 	r.enqueueBotAPIChannelMessagesUpdate(ctx, originUserID, results)
 	fanoutCache := newViewerPeerCache(r)
 	ownerIDs := channelMessagesFanoutOwnerIDs(results, extraUserIDs)
+	usernamePeers := channelMessagesFanoutUsernamePeers(results, extraUserIDs)
+	var usernames map[domain.Peer][]domain.Username
 	r.enqueueChannelFanoutWithPrefetch(ctx, channelFanoutMessageBox, originUserID, channelID, pts, recipients,
 		int64(len(results))*(64<<10),
 		func(bgCtx context.Context, viewers []int64) {
 			r.prefetchChannelFanoutUsers(bgCtx, fanoutCache, viewers, ownerIDs)
+			usernames = r.usernameRegistryMap(bgCtx, usernamePeers)
 		},
 		func(bgCtx context.Context, viewerUserID int64) *tg.Updates {
-			return r.channelMessagesUpdatesWithPeerCache(bgCtx, viewerUserID, results, nil, false, extraUserIDs, fanoutCache)
+			return r.channelMessagesUpdatesWithPeerCacheAndUsernames(bgCtx, viewerUserID, results, nil, false, extraUserIDs, fanoutCache, usernames)
 		})
 }
 
