@@ -34,7 +34,7 @@ This document describes every setting loaded by `internal/config`. Defaults and 
 | `TELESRV_MTPROTO_RPC_TIMEOUT` | duration / `30s` | End-to-end handler timeout for scheduled RPC work. |
 | `TELESRV_MTPROTO_RPC_GLOBAL_WORKERS` | int / `256` | Shared fair-scheduler worker count. |
 | `TELESRV_MTPROTO_RPC_GLOBAL_MAX_TASKS` | int / `8192` | Process-wide scheduled/in-flight RPC task cap. |
-| `TELESRV_MTPROTO_RPC_GLOBAL_MAX_BYTES` | int64 bytes / `536870912` | Process-wide queued/in-flight RPC request-body budget. |
+| `TELESRV_MTPROTO_RPC_GLOBAL_MAX_BYTES` | int64 charge bytes / `536870912` | Process-wide reserved/queued/in-flight RPC memory charge. Exact admission reserves a conservative typed-materialization charge from wire size and grows it atomically before a nested-gzip-expanded graph is decoded; grow failure rejects the complete candidate batch. This is not an equal amount of concurrently receivable wire bytes. |
 | `TELESRV_MTPROTO_RPC_RESULT_CACHE_MAX_ENTRIES` | int / `262144` | Global ownership entries for pending owners, completed results, and tombstones during the in-process 331-second replay window. |
 | `TELESRV_MTPROTO_RPC_RESULT_CACHE_MAX_BYTES` | int64 bytes / `67108864` | Global retained-byte budget. Owner admission reserves one byte; Put transfers it to a body or tombstone. Must be at least `16775168`. |
 | `TELESRV_MTPROTO_RPC_RESULT_CACHE_AUTH_MAX_ENTRIES` | int / `32768` | Per raw-auth-key ownership entries; charged together with global and session scopes. |
@@ -42,11 +42,18 @@ This document describes every setting loaded by `internal/config`. Defaults and 
 | `TELESRV_MTPROTO_RPC_RESULT_CACHE_SESSION_MAX_ENTRIES` | int / `16384` | Per `raw auth key + session_id` ownership entries. |
 | `TELESRV_MTPROTO_RPC_RESULT_CACHE_SESSION_MAX_BYTES` | int64 bytes / `16777216` | Per `raw auth key + session_id` retained bytes; large enough for one legal outbound body. |
 | `TELESRV_MTPROTO_RPC_RESULT_PENDING_PER_AUTH` | int / `2048` | Additional active-owner cap per raw auth key; no greater than global pending tasks or auth entries. |
-| `TELESRV_MTPROTO_INBOUND_FRAME_GLOBAL_MAX_BYTES` | int64 bytes / `536870912` | Process-wide reservation for transport wire bytes plus maximum decrypted plaintext, acquired before payload allocation. |
+| `TELESRV_MTPROTO_INBOUND_FRAME_GLOBAL_MAX_BYTES` | int64 bytes / `536870912` | Process-wide reservation for transport wire bytes, maximum decrypted plaintext, and every live outer/nested gzip expansion, acquired before the corresponding payload allocation. |
 | `TELESRV_MTPROTO_OUTBOUND_QUEUE_SIZE` | int / `128` | Per-connection normal outbound mailbox capacity. |
 | `TELESRV_MTPROTO_OUTBOUND_CONTROL_QUEUE_SIZE` | int / `32` | Per-connection control-message mailbox capacity. |
 | `TELESRV_MTPROTO_OUTBOUND_TRACKED_GLOBAL_MAX_BYTES` | int64 bytes / `536870912` | Global budget for tracked resend-pending message bodies. |
 | `TELESRV_MTPROTO_OUTBOUND_WRITE_GLOBAL_MAX_BYTES` | int64 bytes / `536870912` | Global budget for concurrent encrypted wire/codec/obfuscation scratch. |
+
+Nested gzip admission adds no environment setting. Code-enforced ceilings are
+10 MiB of output per `gzip_packed` envelope and 32 MiB of cumulative expansion
+work per transport frame across outer, nested, sibling, failed, and
+authoritative-profile re-decode attempts. Releasing a live expanded buffer
+returns process memory but does not refund that frame's CPU/work counter.
+Retained typed graphs remain charged to the RPC scheduler budget above.
 
 ## 3. HTTP endpoints, public links, and administration
 
