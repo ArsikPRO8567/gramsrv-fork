@@ -2,6 +2,7 @@ package memory
 
 import (
 	"context"
+	"math/rand/v2"
 	"sort"
 	"strings"
 	"sync"
@@ -251,6 +252,20 @@ func (s *StarGiftStore) ActiveCollectibleRevision(_ context.Context, giftID int6
 	defer s.mu.Unlock()
 	revision, ok := s.collectibles[giftID]
 	return cloneCollectibleRevision(revision), ok, nil
+}
+
+func (s *StarGiftStore) ActiveCollectibleProjection(_ context.Context, giftID int64, samplePerKind int) (domain.StarGiftCollectibleRevision, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	revision, ok := s.collectibles[giftID]
+	if !ok {
+		return domain.StarGiftCollectibleRevision{}, false, nil
+	}
+	projection := cloneCollectibleRevision(revision)
+	projection.Models = projectCollectibleAttributes(projection.Models, domain.StarGiftCollectibleModel, samplePerKind)
+	projection.Patterns = projectCollectibleAttributes(projection.Patterns, domain.StarGiftCollectiblePattern, samplePerKind)
+	projection.Backdrops = projectCollectibleAttributes(projection.Backdrops, domain.StarGiftCollectibleBackdrop, samplePerKind)
+	return projection, true, nil
 }
 
 func (s *StarGiftStore) CollectibleAvailability(_ context.Context, giftIDs []int64) (map[int64]domain.StarGiftCollectibleAvailability, error) {
@@ -846,6 +861,34 @@ func cloneCollectibleRevision(in domain.StarGiftCollectibleRevision) domain.Star
 	out.Models = clone(in.Models)
 	out.Patterns = clone(in.Patterns)
 	out.Backdrops = clone(in.Backdrops)
+	return out
+}
+
+func projectCollectibleAttributes(in []domain.StarGiftCollectibleAttribute, kind domain.StarGiftCollectibleAttributeKind, samplePerKind int) []domain.StarGiftCollectibleAttribute {
+	out := in
+	if samplePerKind > 0 {
+		out = make([]domain.StarGiftCollectibleAttribute, 0, len(in))
+		for _, attribute := range in {
+			if attribute.RarityKind != domain.StarGiftRarityPermille || attribute.RarityPermille <= 0 ||
+				(kind == domain.StarGiftCollectibleModel && attribute.Crafted) {
+				continue
+			}
+			out = append(out, attribute)
+		}
+		for i := 0; i < len(out) && i < samplePerKind; i++ {
+			j := i + rand.IntN(len(out)-i)
+			out[i], out[j] = out[j], out[i]
+		}
+		if len(out) > samplePerKind {
+			out = out[:samplePerKind]
+		}
+	}
+	for i := range out {
+		if out[i].Animation != nil {
+			out[i].Animation.JSON = nil
+			out[i].Animation.TGS = nil
+		}
+	}
 	return out
 }
 

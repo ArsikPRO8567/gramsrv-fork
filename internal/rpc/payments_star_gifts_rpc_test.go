@@ -2,6 +2,7 @@ package rpc
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	"github.com/iamxvbaba/td/bin"
@@ -304,7 +305,7 @@ func TestSavedStarGiftProjectionCombinesHistoricalCatalogWithCurrentCollectibleA
 		historical.ID: {UpgradeStars: 75, SupplyTotal: 500, Issued: 12},
 	}
 
-	projected := tgSavedStarGifts([]domain.SavedStarGift{saved}, map[int64]domain.StarGift{historical.RevisionID: historical}, availability)
+	projected := tgSavedStarGifts(0, []domain.SavedStarGift{saved}, map[int64]domain.StarGift{historical.RevisionID: historical}, availability)
 	if len(projected) != 1 || !projected[0].CanUpgrade {
 		t.Fatalf("saved gift = %#v, want current pool to make historical gift upgradable", projected)
 	}
@@ -339,7 +340,7 @@ func TestSavedStarGiftProjectionCombinesHistoricalCatalogWithCurrentCollectibleA
 	}
 
 	availability[historical.ID] = domain.StarGiftCollectibleAvailability{UpgradeStars: 75, SupplyTotal: 500, Issued: 500}
-	soldOut := tgSavedStarGifts([]domain.SavedStarGift{saved}, map[int64]domain.StarGift{historical.RevisionID: historical}, availability)[0]
+	soldOut := tgSavedStarGifts(0, []domain.SavedStarGift{saved}, map[int64]domain.StarGift{historical.RevisionID: historical}, availability)[0]
 	if soldOut.CanUpgrade {
 		t.Fatal("sold-out collectible pool must not advertise upgrade")
 	}
@@ -349,7 +350,7 @@ func TestSavedStarGiftProjectionCombinesHistoricalCatalogWithCurrentCollectibleA
 		t.Fatal("sold-out catalog projection must not expose upgrade_stars")
 	}
 	saved.PrepaidUpgradeStars = 75
-	soldOutPrepaid := tgSavedStarGifts([]domain.SavedStarGift{saved}, map[int64]domain.StarGift{historical.RevisionID: historical}, availability)[0]
+	soldOutPrepaid := tgSavedStarGifts(0, []domain.SavedStarGift{saved}, map[int64]domain.StarGift{historical.RevisionID: historical}, availability)[0]
 	if soldOutPrepaid.CanUpgrade {
 		t.Fatal("sold-out prepaid gift must not advertise an upgrade the aggregate will reject")
 	}
@@ -375,7 +376,7 @@ func TestSavedStarGiftProjectionPreservesCollectibleLifecycle(t *testing.T) {
 		CanExportAt: exportAt, TransferStars: 25, CanTransferAt: transferAt, CanResellAt: resellAt,
 		DropOriginalDetailsStars: 30, CanCraftAt: readyAt,
 	}
-	projected := tgSavedStarGifts([]domain.SavedStarGift{saved}, nil, nil)
+	projected := tgSavedStarGifts(0, []domain.SavedStarGift{saved}, nil, nil)
 	if len(projected) != 1 {
 		t.Fatalf("saved lifecycle projection count = %d", len(projected))
 	}
@@ -401,7 +402,7 @@ func TestSavedStarGiftProjectionPreservesCollectibleLifecycle(t *testing.T) {
 		}
 	}
 	assertLifecycle(t, projected[0])
-	zero := tgSavedStarGifts([]domain.SavedStarGift{{
+	zero := tgSavedStarGifts(0, []domain.SavedStarGift{{
 		Owner: domain.Peer{Type: domain.PeerTypeUser, ID: 7102}, GiftID: giftID, RevisionID: revision,
 		MsgID: 45, Date: 101, UniqueGiftID: unique.ID, Unique: &unique,
 	}}, nil, nil)[0]
@@ -427,7 +428,7 @@ func TestSavedStarGiftProjectionPreservesCollectibleLifecycle(t *testing.T) {
 	channelSaved.Owner = domain.Peer{Type: domain.PeerTypeChannel, ID: 8102}
 	channelSaved.MsgID = 0
 	channelSaved.SavedID = 51
-	channelProjected := tgSavedStarGifts([]domain.SavedStarGift{channelSaved}, nil, nil)[0]
+	channelProjected := tgSavedStarGifts(0, []domain.SavedStarGift{channelSaved}, nil, nil)[0]
 	if _, ok := channelProjected.GetCanCraftAt(); ok {
 		t.Fatal("channel can_craft_at must be absent until channel Craft is executable")
 	}
@@ -581,6 +582,59 @@ func TestMessageStarGiftProjectionSeparatesPaidPriceFromPrepaidAmount(t *testing
 		if !ok || !decodedUpgraded.Upgraded || decodedUpgraded.UpgradeMsgID != 88 || decodedUpgraded.CanUpgrade {
 			t.Fatalf("Layer %d upgraded action lost transition flags: %#v", profile, decodedUpgradedObject)
 		}
+	}
+}
+
+func TestStarGiftPrepaidUpgradeProjectionIsViewerScoped(t *testing.T) {
+	const (
+		senderID = int64(7101)
+		ownerID  = int64(7102)
+		giftID   = int64(8101)
+		revision = int64(9101)
+	)
+	action := &domain.MessageStarGiftAction{
+		GiftID: giftID, PeerUserID: ownerID, To: domain.Peer{Type: domain.PeerTypeUser, ID: ownerID},
+		CanUpgrade: true, PrepaidUpgradeHash: "prepaid-upgrade-hash-0123456789",
+	}
+	ownerMessage := domain.Message{
+		ID: 20, OwnerUserID: ownerID, Peer: domain.Peer{Type: domain.PeerTypeUser, ID: senderID},
+		Media: &domain.MessageMedia{Kind: domain.MessageMediaKindService, ServiceAction: &domain.MessageServiceAction{
+			Kind: domain.MessageServiceActionStarGift, StarGift: action,
+		}},
+	}
+	ownerAction := tgMessage(ownerMessage).(*tg.MessageService).Action.(*tg.MessageActionStarGift)
+	if !ownerAction.CanUpgrade {
+		t.Fatal("owner message lost receiver-only can_upgrade")
+	}
+	if hash, ok := ownerAction.GetPrepaidUpgradeHash(); ok || hash != "" {
+		t.Fatalf("owner message exposed prepaid hash %q set=%v", hash, ok)
+	}
+
+	senderMessage := ownerMessage
+	senderMessage.OwnerUserID = senderID
+	senderMessage.Peer = domain.Peer{Type: domain.PeerTypeUser, ID: ownerID}
+	senderMessage.Out = true
+	senderAction := tgMessage(senderMessage).(*tg.MessageService).Action.(*tg.MessageActionStarGift)
+	if senderAction.CanUpgrade {
+		t.Fatal("sender message exposed receiver-only can_upgrade")
+	}
+	if hash, ok := senderAction.GetPrepaidUpgradeHash(); !ok || hash != action.PrepaidUpgradeHash {
+		t.Fatalf("sender message prepaid hash = %q set=%v", hash, ok)
+	}
+
+	saved := domain.SavedStarGift{
+		Owner: domain.Peer{Type: domain.PeerTypeUser, ID: ownerID}, GiftID: giftID, RevisionID: revision,
+		MsgID: 20, Date: 100, PrepaidUpgradeHash: action.PrepaidUpgradeHash,
+	}
+	catalog := map[int64]domain.StarGift{revision: {ID: giftID, RevisionID: revision}}
+	availability := map[int64]domain.StarGiftCollectibleAvailability{giftID: {UpgradeStars: 25, SupplyTotal: 10}}
+	ownerSaved := tgSavedStarGifts(ownerID, []domain.SavedStarGift{saved}, catalog, availability)[0]
+	if hash, ok := ownerSaved.GetPrepaidUpgradeHash(); ok || hash != "" {
+		t.Fatalf("owner saved gift exposed prepaid hash %q set=%v", hash, ok)
+	}
+	viewerSaved := tgSavedStarGifts(senderID, []domain.SavedStarGift{saved}, catalog, availability)[0]
+	if hash, ok := viewerSaved.GetPrepaidUpgradeHash(); !ok || hash != action.PrepaidUpgradeHash {
+		t.Fatalf("non-owner saved gift prepaid hash = %q set=%v", hash, ok)
 	}
 }
 
@@ -758,6 +812,76 @@ func TestStarGiftCollectiblePreviewUpgradeFormUniqueAndServiceProjection(t *test
 		if decodedActionGift, ok := decodedAction.Gift.(*tg.StarGiftUnique); !ok || !decodedAction.Upgrade || decodedAction.SavedID != 444 || decodedActionGift.Slug != unique.Slug {
 			t.Fatalf("Layer %d unique action lost fields: %#v", profile, decodedAction)
 		}
+	}
+}
+
+func TestStarGiftUpgradePreviewBoundsRandomSampleWithoutShrinkingFullAttributes(t *testing.T) {
+	r, _, owner, gift := starGiftTestRouter(t)
+	ctx := WithUserID(context.Background(), owner.ID)
+	giftService, ok := r.deps.Gifts.(*appstargifts.Service)
+	if !ok {
+		t.Fatalf("gift service = %T", r.deps.Gifts)
+	}
+
+	models := make([]domain.StarGiftCollectibleAttribute, 0, 7)
+	patterns := make([]domain.StarGiftCollectibleAttribute, 0, 6)
+	backdrops := make([]domain.StarGiftCollectibleAttribute, 0, 6)
+	for i := 0; i < 6; i++ {
+		models = append(models, collectibleRPCAttribute(domain.StarGiftCollectibleModel, int64(8200+i), fmt.Sprintf("Model %d", i)))
+		patterns = append(patterns, collectibleRPCAttribute(domain.StarGiftCollectiblePattern, int64(8300+i), fmt.Sprintf("Pattern %d", i)))
+		backdrops = append(backdrops, collectibleRPCAttribute(domain.StarGiftCollectibleBackdrop, int64(8400+i), fmt.Sprintf("Backdrop %d", i)))
+	}
+	crafted := collectibleRPCAttribute(domain.StarGiftCollectibleModel, 8299, "Crafted")
+	crafted.Crafted = true
+	crafted.RarityKind = domain.StarGiftRarityLegendary
+	crafted.RarityPermille = 0
+	models = append(models, crafted)
+	if _, err := giftService.PublishCollectibleRevision(context.Background(), domain.StarGiftCollectibleWrite{
+		GiftID: gift.ID, UpgradeStars: 75, SupplyTotal: 500, SlugPrefix: "bounded-preview",
+		Models: models, Patterns: patterns, Backdrops: backdrops, Actor: "test", CommandID: "bounded-preview",
+	}); err != nil {
+		t.Fatalf("publish collectible pool: %v", err)
+	}
+
+	preview, err := r.onPaymentsGetStarGiftUpgradePreview(ctx, gift.ID)
+	if err != nil {
+		t.Fatalf("get bounded upgrade preview: %v", err)
+	}
+	counts := map[domain.StarGiftCollectibleAttributeKind]int{}
+	identities := map[string]struct{}{}
+	for _, attribute := range preview.SampleAttributes {
+		var kind domain.StarGiftCollectibleAttributeKind
+		var identity string
+		switch value := attribute.(type) {
+		case *tg.StarGiftAttributeModel:
+			kind = domain.StarGiftCollectibleModel
+			if value.Crafted {
+				t.Fatal("ordinary upgrade preview included crafted model")
+			}
+			identity = fmt.Sprintf("model:%d", value.Document.GetID())
+		case *tg.StarGiftAttributePattern:
+			kind = domain.StarGiftCollectiblePattern
+			identity = fmt.Sprintf("pattern:%d", value.Document.GetID())
+		case *tg.StarGiftAttributeBackdrop:
+			kind = domain.StarGiftCollectibleBackdrop
+			identity = fmt.Sprintf("backdrop:%d", value.BackdropID)
+		default:
+			t.Fatalf("preview attribute = %T", attribute)
+		}
+		if _, duplicate := identities[identity]; duplicate {
+			t.Fatalf("duplicate preview identity %q", identity)
+		}
+		identities[identity] = struct{}{}
+		counts[kind]++
+	}
+	if len(preview.SampleAttributes) != 9 || counts[domain.StarGiftCollectibleModel] != 3 ||
+		counts[domain.StarGiftCollectiblePattern] != 3 || counts[domain.StarGiftCollectibleBackdrop] != 3 {
+		t.Fatalf("bounded preview count = %d kinds=%v, want three per kind", len(preview.SampleAttributes), counts)
+	}
+
+	all, err := r.onPaymentsGetStarGiftUpgradeAttributes(ctx, gift.ID)
+	if err != nil || len(all.Attributes) != 19 {
+		t.Fatalf("complete upgrade attributes = %d err=%v, want 19", len(all.Attributes), err)
 	}
 }
 

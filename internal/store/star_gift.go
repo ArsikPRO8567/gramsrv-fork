@@ -26,6 +26,10 @@ type StarGiftStore interface {
 	// PublishCollectibleRevision validates and atomically publishes a new immutable attribute pool.
 	PublishCollectibleRevision(ctx context.Context, write domain.StarGiftCollectibleWrite) (domain.StarGiftCollectibleRevision, error)
 	ActiveCollectibleRevision(ctx context.Context, giftID int64) (domain.StarGiftCollectibleRevision, bool, error)
+	// ActiveCollectibleProjection omits heavyweight animation bodies from read-only client/admin
+	// projections. samplePerKind=0 returns the complete attribute metadata; a positive value
+	// returns at most that many randomly selected ordinary-upgrade attributes per kind.
+	ActiveCollectibleProjection(ctx context.Context, giftID int64, samplePerKind int) (domain.StarGiftCollectibleRevision, bool, error)
 	CollectibleAvailability(ctx context.Context, giftIDs []int64) (map[int64]domain.StarGiftCollectibleAvailability, error)
 	CollectibleAnimationJSON(ctx context.Context, giftID int64, kind domain.StarGiftCollectibleAttributeKind, attributeID int64) ([]byte, bool, error)
 	UniqueBySlug(ctx context.Context, slug string) (domain.UniqueStarGift, bool, error)

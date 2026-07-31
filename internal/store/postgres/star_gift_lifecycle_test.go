@@ -1,10 +1,60 @@
 package postgres
 
 import (
+	"context"
 	"testing"
 
 	"telesrv/internal/domain"
 )
+
+func TestProjectPrivateStarGiftPurchaseScopesViewerCapabilities(t *testing.T) {
+	media := &domain.MessageMedia{
+		Kind: domain.MessageMediaKindService,
+		ServiceAction: &domain.MessageServiceAction{
+			Kind: domain.MessageServiceActionStarGift,
+			StarGift: &domain.MessageStarGiftAction{
+				PeerUserID: 200, To: domain.Peer{Type: domain.PeerTypeUser, ID: 200},
+				CanUpgrade: true, PrepaidUpgradeHash: "prepaid-upgrade-hash-0123456789",
+			},
+		},
+	}
+	req := &domain.SendPrivateTextRequest{SenderUserID: 100, RecipientUserID: 200, Media: media}
+	projection, err := projectPrivateStarGiftPurchase(context.Background(), nil, req)
+	if err != nil {
+		t.Fatalf("project purchase: %v", err)
+	}
+	shared := privateStarGiftAction(projection.Shared)
+	sender := privateStarGiftAction(projection.Sender)
+	recipient := privateStarGiftAction(projection.Recipient)
+	if shared == nil || shared.CanUpgrade || shared.PrepaidUpgradeHash != "" {
+		t.Fatalf("shared projection retained viewer capability: %+v", shared)
+	}
+	if sender == nil || sender.CanUpgrade || sender.PrepaidUpgradeHash == "" {
+		t.Fatalf("sender projection = %+v, want hash without can_upgrade", sender)
+	}
+	if recipient == nil || !recipient.CanUpgrade || recipient.PrepaidUpgradeHash != "" {
+		t.Fatalf("recipient projection = %+v, want can_upgrade without hash", recipient)
+	}
+	if original := privateStarGiftAction(media); original == nil || !original.CanUpgrade || original.PrepaidUpgradeHash == "" {
+		t.Fatalf("source projection was mutated: %+v", original)
+	}
+
+	selfReq := &domain.SendPrivateTextRequest{SenderUserID: 200, RecipientUserID: 200, Media: media}
+	selfProjection, err := projectPrivateStarGiftPurchase(context.Background(), nil, selfReq)
+	if err != nil {
+		t.Fatalf("project self purchase: %v", err)
+	}
+	self := privateStarGiftAction(selfProjection.Sender)
+	if self == nil || !self.CanUpgrade || self.PrepaidUpgradeHash != "" {
+		t.Fatalf("self-owner projection = %+v, want can_upgrade without hash", self)
+	}
+
+	bad := *req
+	bad.RecipientUserID = 300
+	if _, err := projectPrivateStarGiftPurchase(context.Background(), nil, &bad); err == nil {
+		t.Fatal("mismatched gift owner and recipient was accepted")
+	}
+}
 
 func TestTransferUniqueActionSavedIDNamespace(t *testing.T) {
 	saved := domain.SavedStarGift{SavedID: 42, CanCraftAt: 1_780_000_123}

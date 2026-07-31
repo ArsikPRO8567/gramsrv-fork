@@ -243,7 +243,7 @@ func tgMessageServiceAction(msg domain.Message) tg.MessageActionClass {
 			Peers:    tgPeerList(shared.Peers),
 		}
 	case domain.MessageServiceActionStarGift:
-		return tgMessageActionStarGift(m.ServiceAction.StarGift)
+		return tgMessageActionStarGiftForViewer(m.ServiceAction.StarGift, msg.OwnerUserID)
 	case domain.MessageServiceActionStarGiftUnique:
 		return tgMessageActionStarGiftUnique(m.ServiceAction.StarGiftUnique)
 	case domain.MessageServiceActionStarGiftOffer:

@@ -442,10 +442,22 @@ func collectibleDocumentAttributes(kind domain.StarGiftCollectibleAttributeKind)
 }
 
 func (s *Service) CollectiblePreview(ctx context.Context, giftID int64) (domain.StarGiftUpgradePreview, bool, error) {
+	return s.collectiblePreview(ctx, giftID, 0)
+}
+
+// CollectiblePreviewSample returns the small randomized working set consumed by official-client
+// upgrade rollers. The complete published pool remains available through CollectiblePreview for
+// payments.getStarGiftUpgradeAttributes and the admin editor.
+func (s *Service) CollectiblePreviewSample(ctx context.Context, giftID int64) (domain.StarGiftUpgradePreview, bool, error) {
+	const attributesPerKind = 3
+	return s.collectiblePreview(ctx, giftID, attributesPerKind)
+}
+
+func (s *Service) collectiblePreview(ctx context.Context, giftID int64, samplePerKind int) (domain.StarGiftUpgradePreview, bool, error) {
 	if s == nil || s.store == nil || giftID <= 0 {
 		return domain.StarGiftUpgradePreview{}, false, nil
 	}
-	revision, ok, err := s.store.ActiveCollectibleRevision(ctx, giftID)
+	revision, ok, err := s.store.ActiveCollectibleProjection(ctx, giftID, samplePerKind)
 	if err != nil || !ok || !revision.Published {
 		return domain.StarGiftUpgradePreview{}, false, err
 	}
@@ -899,9 +911,11 @@ func (s *Service) SetPinned(ctx context.Context, owner domain.Peer, savedGiftIDs
 
 func (s *Service) RecordSavedGift(ctx context.Context, gift domain.SavedStarGift) (int64, error) {
 	if gift.UniqueGiftID == 0 && gift.PrepaidUpgradeStars == 0 && gift.PrepaidUpgradeHash == "" && s.store != nil {
-		if revision, ok, err := s.store.ActiveCollectibleRevision(ctx, gift.GiftID); err != nil {
+		availability, err := s.store.CollectibleAvailability(ctx, []int64{gift.GiftID})
+		if err != nil {
 			return 0, err
-		} else if ok && revision.Published && revision.Issued < revision.SupplyTotal {
+		}
+		if current, ok := availability[gift.GiftID]; ok && current.Issued < current.SupplyTotal {
 			var token [32]byte
 			if _, err := rand.Read(token[:]); err != nil {
 				return 0, fmt.Errorf("generate prepaid star gift upgrade hash: %w", err)

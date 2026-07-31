@@ -131,6 +131,7 @@ func (s *StarGiftLifecycleStore) PurchaseStarGift(ctx context.Context, req domai
 			result.Gift, result.Saved, result.Balance = gift, saved, balance
 			return nil
 		},
+		projectMedia: projectPrivateStarGiftPurchase,
 		after: func(ctx context.Context, tx pgx.Tx, sent domain.SendPrivateTextResult) error {
 			msgID := sent.RecipientMessage.ID
 			if msgID <= 0 {

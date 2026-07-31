@@ -54,6 +54,12 @@ func projectPrivateStarGiftSourceRef(
 		sharedAction.GiftMsgID = 0
 		senderAction.GiftMsgID = 0
 		recipientAction.GiftMsgID = 0
+		// messageActionStarGift.can_upgrade is receiver-only. A separate
+		// prepayment notification shares one logical private message, but its
+		// payer box must not advertise owner actions.
+		sharedAction.CanUpgrade = false
+		senderAction.CanUpgrade = req.SenderUserID == sourceOwnerUserID && senderAction.CanUpgrade
+		recipientAction.CanUpgrade = req.RecipientUserID == sourceOwnerUserID && recipientAction.CanUpgrade
 		if req.SenderUserID == sourceOwnerUserID {
 			senderAction.GiftMsgID = sourceOwnerBoxID
 		} else {
@@ -63,6 +69,66 @@ func projectPrivateStarGiftSourceRef(
 		return privateSendMediaProjection{}, fmt.Errorf("project private star gift source: unsupported media")
 	}
 
+	return privateSendMediaProjection{Shared: shared, Sender: sender, Recipient: recipient}, nil
+}
+
+// projectPrivateStarGiftPurchase scopes the two mutually exclusive actions of
+// an ordinary user gift to the correct account-local message box:
+//   - the gift owner/receiver may upgrade it and must not receive the separate
+//     prepayment hash;
+//   - the non-owner sender may use the hash to prepay for the owner's upgrade,
+//     but must not receive the receiver-only can_upgrade capability.
+//
+// The shared logical envelope carries neither viewer-only field. This keeps a
+// future read/replay path from accidentally treating it as either participant's
+// projection while the two message_boxes remain the durable wire truth.
+func projectPrivateStarGiftPurchase(
+	_ context.Context,
+	_ pgx.Tx,
+	req *domain.SendPrivateTextRequest,
+) (privateSendMediaProjection, error) {
+	if req == nil || req.Media == nil || req.SenderUserID <= 0 || req.RecipientUserID <= 0 {
+		return privateSendMediaProjection{}, fmt.Errorf("project private star gift purchase: invalid scope")
+	}
+	action := privateStarGiftAction(req.Media)
+	if action == nil {
+		return privateSendMediaProjection{}, fmt.Errorf("project private star gift purchase: unsupported media")
+	}
+	ownerUserID := action.PeerUserID
+	if ownerUserID == 0 && action.To.Type == domain.PeerTypeUser {
+		ownerUserID = action.To.ID
+	}
+	if ownerUserID <= 0 || ownerUserID != req.RecipientUserID {
+		return privateSendMediaProjection{}, fmt.Errorf(
+			"project private star gift purchase: owner %d does not match recipient %d",
+			ownerUserID, req.RecipientUserID,
+		)
+	}
+
+	shared, err := cloneMessageMedia(req.Media)
+	if err != nil {
+		return privateSendMediaProjection{}, err
+	}
+	sender, err := cloneMessageMedia(req.Media)
+	if err != nil {
+		return privateSendMediaProjection{}, err
+	}
+	recipient, err := cloneMessageMedia(req.Media)
+	if err != nil {
+		return privateSendMediaProjection{}, err
+	}
+
+	sharedAction := privateStarGiftAction(shared)
+	senderAction := privateStarGiftAction(sender)
+	recipientAction := privateStarGiftAction(recipient)
+	sharedAction.PrepaidUpgradeHash = ""
+	sharedAction.CanUpgrade = false
+	if req.SenderUserID == ownerUserID {
+		senderAction.PrepaidUpgradeHash = ""
+	} else {
+		senderAction.CanUpgrade = false
+	}
+	recipientAction.PrepaidUpgradeHash = ""
 	return privateSendMediaProjection{Shared: shared, Sender: sender, Recipient: recipient}, nil
 }
 
@@ -97,6 +163,8 @@ func encodeSharedPrivateStarGiftMedia(media *domain.MessageMedia) ([]byte, error
 		action.UpgradeMsgID = 0
 		if action.PeerUserID > 0 || action.To.Type == domain.PeerTypeUser {
 			action.SavedID = 0
+			action.PrepaidUpgradeHash = ""
+			action.CanUpgrade = false
 		}
 	case privateStarGiftUniqueAction(shared) != nil:
 		action := privateStarGiftUniqueAction(shared)

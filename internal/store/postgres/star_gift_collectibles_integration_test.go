@@ -70,6 +70,22 @@ func TestStarGiftCollectibleUpgradeAggregatePostgres(t *testing.T) {
 		poolRevision.Models[1].RarityPermille != 0 || poolRevision.Models[0].OfficialDocumentID != 5100000000000000001 {
 		t.Fatalf("published pool = %+v", poolRevision)
 	}
+	storedRevision, found, err := gifts.ActiveCollectibleRevision(ctx, entry.Gift.ID)
+	if err != nil || !found || storedRevision.Models[0].Animation == nil || len(storedRevision.Models[0].Animation.JSON) == 0 {
+		t.Fatalf("full active collectible revision = found:%v err:%v value:%+v", found, err, storedRevision)
+	}
+	fullProjection, found, err := gifts.ActiveCollectibleProjection(ctx, entry.Gift.ID, 0)
+	if err != nil || !found || len(fullProjection.Models) != 3 || len(fullProjection.Patterns) != 2 || len(fullProjection.Backdrops) != 2 ||
+		fullProjection.Models[0].Animation == nil || len(fullProjection.Models[0].Animation.JSON) != 0 ||
+		fullProjection.Patterns[0].Animation == nil || len(fullProjection.Patterns[0].Animation.JSON) != 0 {
+		t.Fatalf("complete collectible projection = found:%v err:%v value:%+v", found, err, fullProjection)
+	}
+	sampleProjection, found, err := gifts.ActiveCollectibleProjection(ctx, entry.Gift.ID, 1)
+	if err != nil || !found || len(sampleProjection.Models) != 1 || len(sampleProjection.Patterns) != 1 || len(sampleProjection.Backdrops) != 1 ||
+		sampleProjection.Models[0].Crafted || sampleProjection.Models[0].RarityKind != domain.StarGiftRarityPermille ||
+		sampleProjection.Models[0].Animation == nil || len(sampleProjection.Models[0].Animation.JSON) != 0 {
+		t.Fatalf("sampled collectible projection = found:%v err:%v value:%+v", found, err, sampleProjection)
+	}
 	availability, err := gifts.CollectibleAvailability(ctx, []int64{entry.Gift.ID, entry.Gift.ID + 1})
 	if err != nil {
 		t.Fatalf("collectible availability: %v", err)

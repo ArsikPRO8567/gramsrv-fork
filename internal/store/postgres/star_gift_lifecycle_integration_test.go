@@ -89,8 +89,14 @@ func TestStarGiftLifecycleAggregatePostgres(t *testing.T) {
 	}
 	ordinaryAction := purchased.Send.RecipientMessage.Media.ServiceAction.StarGift
 	if ordinaryAction == nil || !ordinaryAction.CanUpgrade || ordinaryAction.PrepaidUpgrade ||
-		ordinaryAction.UpgradePriceStars != 100 || ordinaryAction.UpgradeStars != 0 {
+		ordinaryAction.UpgradePriceStars != 100 || ordinaryAction.UpgradeStars != 0 ||
+		ordinaryAction.PrepaidUpgradeHash != "" {
 		t.Fatalf("ordinary purchase action mixed paid price with prepaid amount: %+v", ordinaryAction)
+	}
+	senderOrdinaryAction := purchased.Send.SenderMessage.Media.ServiceAction.StarGift
+	if senderOrdinaryAction == nil || senderOrdinaryAction.CanUpgrade ||
+		senderOrdinaryAction.PrepaidUpgradeHash != purchased.Saved.PrepaidUpgradeHash {
+		t.Fatalf("ordinary sender purchase projection = %+v", senderOrdinaryAction)
 	}
 	replayedPurchase, err := lifecycle.PurchaseStarGift(ctx, purchaseReq)
 	if err != nil || !replayedPurchase.Duplicate || replayedPurchase.Saved.ID != purchased.Saved.ID || replayedPurchase.Balance.Balance != 9950 ||
@@ -98,6 +104,8 @@ func TestStarGiftLifecycleAggregatePostgres(t *testing.T) {
 		replayedPurchase.Send.RecipientMessage.ID != purchased.Send.RecipientMessage.ID {
 		t.Fatalf("purchase replay = %+v err %v", replayedPurchase, err)
 	}
+	verifyPrepaidViewerProjectionMigration(t, ctx, pool, purchased.Saved.ID, owner.ID, buyer.ID,
+		purchased.Send.RecipientMessage.ID, purchased.Send.SenderMessage.ID)
 
 	target, price, err := lifecycle.PrepaidUpgradeTarget(ctx, ownerPeer, purchased.Saved.PrepaidUpgradeHash)
 	if err != nil || target.ID != purchased.Saved.ID || price != 100 {
@@ -1524,6 +1532,110 @@ WHERE target_user_id=$1 AND pts=$2 AND event_type='edit_message'`, userID, pts).
 	}
 	assertMigratedAction(ownerUserID, ownerPrepayMessageID, ownerUpgradeMessageID)
 	assertMigratedAction(payerUserID, payerPrepayMessageID, 0)
+}
+
+func verifyPrepaidViewerProjectionMigration(
+	t *testing.T,
+	ctx context.Context,
+	pool *pgxpool.Pool,
+	savedGiftID int64,
+	ownerUserID int64,
+	senderUserID int64,
+	ownerMessageID int,
+	senderMessageID int,
+) {
+	t.Helper()
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin prepaid viewer migration probe: %v", err)
+	}
+	defer func() { _ = tx.Rollback(context.Background()) }()
+
+	var hash string
+	if err := tx.QueryRow(ctx, `SELECT prepaid_upgrade_hash FROM peer_star_gifts WHERE id=$1`, savedGiftID).Scan(&hash); err != nil || hash == "" {
+		t.Fatalf("load prepaid hash for viewer migration probe: hash=%q err=%v", hash, err)
+	}
+	var ownerPtsBefore, senderPtsBefore int
+	if err := tx.QueryRow(ctx, `SELECT contiguous_pts FROM user_update_watermarks WHERE user_id=$1`, ownerUserID).Scan(&ownerPtsBefore); err != nil {
+		t.Fatalf("load owner watermark before viewer migration: %v", err)
+	}
+	if err := tx.QueryRow(ctx, `SELECT contiguous_pts FROM user_update_watermarks WHERE user_id=$1`, senderUserID).Scan(&senderPtsBefore); err != nil {
+		t.Fatalf("load sender watermark before viewer migration: %v", err)
+	}
+
+	var messageSenderID, privateMessageID int64
+	if err := tx.QueryRow(ctx, `SELECT message_sender_id,private_message_id FROM message_boxes
+WHERE owner_user_id=$1 AND box_id=$2 AND NOT deleted`, ownerUserID, ownerMessageID).
+		Scan(&messageSenderID, &privateMessageID); err != nil {
+		t.Fatalf("load ordinary gift message root for viewer migration: %v", err)
+	}
+	if _, err := tx.Exec(ctx, `UPDATE message_boxes
+SET media=jsonb_set(jsonb_set(media,'{service_action,star_gift,can_upgrade}','true'::jsonb,true),
+                     '{service_action,star_gift,prepaid_upgrade_hash}',to_jsonb($3::text),true)
+WHERE (owner_user_id=$1 AND box_id=$4) OR (owner_user_id=$2 AND box_id=$5)`,
+		ownerUserID, senderUserID, hash, ownerMessageID, senderMessageID); err != nil {
+		t.Fatalf("restore stale prepaid viewer boxes: %v", err)
+	}
+	if _, err := tx.Exec(ctx, `UPDATE private_messages
+SET media=jsonb_set(jsonb_set(media,'{service_action,star_gift,can_upgrade}','true'::jsonb,true),
+                     '{service_action,star_gift,prepaid_upgrade_hash}',to_jsonb($3::text),true)
+WHERE sender_user_id=$1 AND id=$2`, messageSenderID, privateMessageID, hash); err != nil {
+		t.Fatalf("restore stale prepaid shared message: %v", err)
+	}
+
+	migrationSQL, err := deploy.Migrations.ReadFile("migrations/0163_star_gift_prepaid_viewer_projection.up.sql")
+	if err != nil {
+		t.Fatalf("read prepaid viewer migration: %v", err)
+	}
+	if _, err := tx.Exec(ctx, string(migrationSQL)); err != nil {
+		t.Fatalf("apply prepaid viewer migration probe: %v", err)
+	}
+
+	assertProjection := func(userID int64, messageID int, wantCanUpgrade bool, wantHash string, ptsBefore int) {
+		t.Helper()
+		var mediaJSON string
+		var pts int
+		if err := tx.QueryRow(ctx, `SELECT media::text,pts FROM message_boxes
+WHERE owner_user_id=$1 AND box_id=$2 AND NOT deleted`, userID, messageID).Scan(&mediaJSON, &pts); err != nil {
+			t.Fatalf("load migrated viewer box %d/%d: %v", userID, messageID, err)
+		}
+		media, err := decodeMessageMedia(mediaJSON)
+		action := privateStarGiftAction(media)
+		if err != nil || action == nil || action.CanUpgrade != wantCanUpgrade || action.PrepaidUpgradeHash != wantHash {
+			t.Fatalf("migrated viewer box %d/%d = %+v err=%v", userID, messageID, action, err)
+		}
+		if pts != ptsBefore+1 {
+			t.Fatalf("migrated viewer box %d/%d pts=%d want=%d", userID, messageID, pts, ptsBefore+1)
+		}
+		var eventCount, outboxCount int
+		if err := tx.QueryRow(ctx, `SELECT COUNT(*) FROM user_update_events
+WHERE user_id=$1 AND pts=$2 AND event_type='edit_message' AND message_box_id=$3`, userID, pts, messageID).Scan(&eventCount); err != nil {
+			t.Fatalf("load migrated viewer event: %v", err)
+		}
+		if err := tx.QueryRow(ctx, `SELECT COUNT(*) FROM dispatch_outbox
+WHERE target_user_id=$1 AND pts=$2 AND event_type='edit_message'`, userID, pts).Scan(&outboxCount); err != nil {
+			t.Fatalf("load migrated viewer outbox: %v", err)
+		}
+		if eventCount != 1 || outboxCount != 1 {
+			t.Fatalf("migrated viewer event/outbox counts=%d/%d", eventCount, outboxCount)
+		}
+	}
+	assertProjection(ownerUserID, ownerMessageID, true, "", ownerPtsBefore)
+	assertProjection(senderUserID, senderMessageID, false, hash, senderPtsBefore)
+
+	var sharedHash, sharedCanUpgrade *string
+	if err := tx.QueryRow(ctx, `SELECT media #>> '{service_action,star_gift,prepaid_upgrade_hash}',
+media #>> '{service_action,star_gift,can_upgrade}' FROM private_messages WHERE sender_user_id=$1 AND id=$2`,
+		messageSenderID, privateMessageID).Scan(&sharedHash, &sharedCanUpgrade); err != nil {
+		t.Fatalf("load migrated shared viewer projection: %v", err)
+	}
+	if sharedHash != nil || sharedCanUpgrade != nil {
+		t.Fatalf("shared viewer projection retained hash/can_upgrade: hash=%v can=%v", sharedHash, sharedCanUpgrade)
+	}
+	var storedHash string
+	if err := tx.QueryRow(ctx, `SELECT prepaid_upgrade_hash FROM peer_star_gifts WHERE id=$1`, savedGiftID).Scan(&storedHash); err != nil || storedHash != hash {
+		t.Fatalf("viewer migration changed aggregate hash=%q want=%q err=%v", storedHash, hash, err)
+	}
 }
 
 func craftedSourceEditForUserAndGift(result domain.StarGiftCraftResult, userID, uniqueGiftID int64) domain.EditedMessageForUser {

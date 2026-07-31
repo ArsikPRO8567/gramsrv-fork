@@ -166,4 +166,10 @@ func TestCreateCatalogBundleMaterializesPublishableCollectibleDocuments(t *testi
 	if !pattern.Attributes[1].TextColor {
 		t.Fatalf("pattern render attribute = %+v, want text_color", pattern.Attributes[1])
 	}
+	preview, found, err := svc.CollectiblePreviewSample(ctx, result.Catalog.Gift.ID)
+	if err != nil || !found || len(preview.Models) != 2 || len(preview.Patterns) != 2 || len(preview.Backdrops) != 2 ||
+		preview.Models[0].Animation == nil || len(preview.Models[0].Animation.JSON) != 0 ||
+		preview.Patterns[0].Animation == nil || len(preview.Patterns[0].Animation.JSON) != 0 {
+		t.Fatalf("collectible preview sample = found:%v err:%v value:%+v", found, err, preview)
+	}
 }

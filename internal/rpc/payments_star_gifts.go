@@ -876,7 +876,7 @@ func (r *Router) tgSavedStarGiftsResponse(ctx context.Context, viewerUserID int6
 	if err != nil {
 		return nil, err
 	}
-	projected := tgSavedStarGifts(gifts, catalog, availability)
+	projected := tgSavedStarGifts(viewerUserID, gifts, catalog, availability)
 	out := &tg.PaymentsSavedStarGifts{
 		Count: count,
 		Gifts: projected,
@@ -990,6 +990,30 @@ func tgStarGift(g domain.StarGift) *tg.StarGift {
 }
 
 // tgMessageActionStarGift 把礼物服务消息载荷投影为 messageActionStarGift。
+func tgMessageActionStarGiftForViewer(in *domain.MessageStarGiftAction, viewerUserID int64) tg.MessageActionClass {
+	if in == nil {
+		return &tg.MessageActionEmpty{}
+	}
+	ownerUserID := in.PeerUserID
+	if ownerUserID == 0 && in.To.Type == domain.PeerTypeUser {
+		ownerUserID = in.To.ID
+	}
+	if ownerUserID <= 0 || viewerUserID <= 0 {
+		return tgMessageActionStarGift(in)
+	}
+	projected := *in
+	if viewerUserID == ownerUserID {
+		// The owner upgrades through InputSavedStarGift. Exposing the separate
+		// prepayment hash makes DrKLO prefer the wrong invoice family and use the
+		// private dialog peer (the sender) as the alleged gift owner.
+		projected.PrepaidUpgradeHash = ""
+	} else {
+		// Telegram defines messageActionStarGift.can_upgrade as receiver-only.
+		projected.CanUpgrade = false
+	}
+	return tgMessageActionStarGift(&projected)
+}
+
 func tgMessageActionStarGift(in *domain.MessageStarGiftAction) tg.MessageActionClass {
 	if in == nil {
 		return &tg.MessageActionEmpty{}
@@ -1088,7 +1112,7 @@ func (r *Router) resolveStarGiftCatalog(ctx context.Context, gifts []domain.Save
 }
 
 // tgSavedStarGifts 把已收到礼物实例投影为 []tg.SavedStarGift。
-func tgSavedStarGifts(gifts []domain.SavedStarGift, catalog map[int64]domain.StarGift, availability map[int64]domain.StarGiftCollectibleAvailability) []tg.SavedStarGift {
+func tgSavedStarGifts(viewerUserID int64, gifts []domain.SavedStarGift, catalog map[int64]domain.StarGift, availability map[int64]domain.StarGiftCollectibleAvailability) []tg.SavedStarGift {
 	out := make([]tg.SavedStarGift, 0, len(gifts))
 	for _, g := range gifts {
 		item := tg.SavedStarGift{
@@ -1126,7 +1150,11 @@ func tgSavedStarGifts(gifts []domain.SavedStarGift, catalog map[int64]domain.Sta
 				item.SetUpgradeStars(g.PrepaidUpgradeStars)
 				item.CanUpgrade = true
 			}
-			if g.PrepaidUpgradeHash != "" && g.PrepaidUpgradeStars == 0 && canIssue {
+			// This hash starts the separate "prepay someone else's upgrade"
+			// invoice. The owner must use InputSavedStarGift instead; otherwise
+			// DrKLO prefers the hash path and substitutes the private dialog peer.
+			ownerIsViewer := g.Owner.Type == domain.PeerTypeUser && g.Owner.ID == viewerUserID
+			if g.PrepaidUpgradeHash != "" && g.PrepaidUpgradeStars == 0 && canIssue && !ownerIsViewer {
 				item.SetPrepaidUpgradeHash(g.PrepaidUpgradeHash)
 			}
 		}
