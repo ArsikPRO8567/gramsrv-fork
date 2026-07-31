@@ -1,6 +1,7 @@
 package mtprotoedge
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -44,6 +45,14 @@ type admissionOnlyLayerRPC struct {
 	dispatcher *tlprofile.Dispatcher
 	mu         sync.Mutex
 	published  []publishedLayerEvidence
+}
+
+// legacyAdmissionOnlyLayerRPC intentionally exposes only the original
+// Limits-based admission interfaces. It guards source and runtime compatibility
+// for implementations compiled before caller-owned AdmissionOptions existed.
+type legacyAdmissionOnlyLayerRPC struct {
+	dispatcher    *tlprofile.Dispatcher
+	lastRemaining int
 }
 
 type orderedAdmissionOnlyLayerRPC struct {
@@ -221,6 +230,10 @@ func newAdmissionOnlyLayerRPC() *admissionOnlyLayerRPC {
 	return &admissionOnlyLayerRPC{dispatcher: tlprofile.NewDispatcher()}
 }
 
+func newLegacyAdmissionOnlyLayerRPC() *legacyAdmissionOnlyLayerRPC {
+	return &legacyAdmissionOnlyLayerRPC{dispatcher: tlprofile.NewDispatcher()}
+}
+
 func newOrderedAdmissionOnlyLayerRPC() *orderedAdmissionOnlyLayerRPC {
 	return &orderedAdmissionOnlyLayerRPC{
 		admissionOnlyLayerRPC: newAdmissionOnlyLayerRPC(),
@@ -265,12 +278,46 @@ func (h *admissionOnlyLayerRPC) AdmitLayer(profile tlprofile.Profile, b *bin.Buf
 	return h.dispatcher.Admit(profile, b, limits)
 }
 
+func (h *admissionOnlyLayerRPC) AdmitLayerWithOptions(profile tlprofile.Profile, b *bin.Buffer, options tlprofile.AdmissionOptions) (tlprofile.Admission, error) {
+	return h.dispatcher.AdmitWithOptions(profile, b, options)
+}
+
 func (h *admissionOnlyLayerRPC) AdmitDefaultLayer(profile tlprofile.Profile, b *bin.Buffer, limits tlprofile.Limits) (tlprofile.Admission, error) {
 	return h.dispatcher.AdmitDefault(profile, b, limits)
 }
 
+func (h *admissionOnlyLayerRPC) AdmitDefaultLayerWithOptions(profile tlprofile.Profile, b *bin.Buffer, options tlprofile.AdmissionOptions) (tlprofile.Admission, error) {
+	return h.dispatcher.AdmitDefaultWithOptions(profile, b, options)
+}
+
 func (h *admissionOnlyLayerRPC) AdmitUnprofiled(b *bin.Buffer, limits tlprofile.Limits) (tlprofile.Admission, error) {
 	return h.dispatcher.AdmitUnprofiled(b, limits)
+}
+
+func (h *admissionOnlyLayerRPC) AdmitUnprofiledWithOptions(b *bin.Buffer, options tlprofile.AdmissionOptions) (tlprofile.Admission, error) {
+	return h.dispatcher.AdmitUnprofiledWithOptions(b, options)
+}
+
+func (h *legacyAdmissionOnlyLayerRPC) AdmitLayer(profile tlprofile.Profile, b *bin.Buffer, limits tlprofile.Limits) (tlprofile.Admission, error) {
+	request, err := h.dispatcher.Admit(profile, b, limits)
+	h.lastRemaining = b.Len()
+	return request, err
+}
+
+func (h *legacyAdmissionOnlyLayerRPC) AdmitDefaultLayer(profile tlprofile.Profile, b *bin.Buffer, limits tlprofile.Limits) (tlprofile.Admission, error) {
+	request, err := h.dispatcher.AdmitDefault(profile, b, limits)
+	h.lastRemaining = b.Len()
+	return request, err
+}
+
+func (h *legacyAdmissionOnlyLayerRPC) AdmitUnprofiled(b *bin.Buffer, limits tlprofile.Limits) (tlprofile.Admission, error) {
+	request, err := h.dispatcher.AdmitUnprofiled(b, limits)
+	h.lastRemaining = b.Len()
+	return request, err
+}
+
+func (*legacyAdmissionOnlyLayerRPC) DispatchAdmitted(context.Context, [8]byte, int64, int64, uint64, tlprofile.Admission) (tlprofile.Result, string, error) {
+	return nil, "", fmt.Errorf("admission-only handler")
 }
 
 func (*admissionOnlyLayerRPC) DispatchAdmitted(context.Context, [8]byte, int64, int64, uint64, tlprofile.Admission) (tlprofile.Result, string, error) {
@@ -299,6 +346,99 @@ func (h *admissionOnlyLayerRPC) publications() []publishedLayerEvidence {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	return append([]publishedLayerEvidence(nil), h.published...)
+}
+
+func TestLegacyLayerRPCAdmissionInterfacesRemainCompatible(t *testing.T) {
+	t.Run("inherited default accepts explicit correction", func(t *testing.T) {
+		handler := newLegacyAdmissionOnlyLayerRPC()
+		s := New(Options{DC: 2, LayerRPC: handler})
+		body := exactLayerRPCBody(t, &tg.InvokeWithLayerRequest{
+			Layer: 225,
+			Query: &tg.HelpGetConfigRequest{},
+		})
+
+		request, method, err := s.decodeInboundLayerRPCWithOptions(
+			LayerProfileSnapshot{Profile: tlprofile.Profile228, Origin: LayerProfileInherited},
+			body,
+			tlprofile.AdmissionOptions{
+				Limits: inboundLayerDecodeLimits,
+				ExpandGZIP: func([]byte, int) ([]byte, func(), error) {
+					t.Fatal("plain legacy admission unexpectedly requested gzip expansion")
+					return nil, nil, nil
+				},
+			},
+		)
+		if err != nil {
+			t.Fatalf("legacy default admission: %v", err)
+		}
+		if method != "help.getConfig" {
+			t.Fatalf("method = %q, want help.getConfig", method)
+		}
+		if request.Call().Profile() != tlprofile.Profile225 {
+			t.Fatalf("call profile = %d, want 225", request.Call().Profile())
+		}
+		if profile, ok := request.ProfileEvidence(); !ok || profile != tlprofile.Profile225 {
+			t.Fatalf("profile evidence = %d/%v, want 225/true", profile, ok)
+		}
+		if handler.lastRemaining != 0 {
+			t.Fatalf("successful legacy admission left %d bytes", handler.lastRemaining)
+		}
+	})
+
+	t.Run("unprofiled selector remains supported", func(t *testing.T) {
+		handler := newLegacyAdmissionOnlyLayerRPC()
+		s := New(Options{DC: 2, LayerRPC: handler})
+		body := exactLayerRPCBody(t, &tg.InvokeWithLayerRequest{
+			Layer: 225,
+			Query: &tg.HelpGetNearestDCRequest{},
+		})
+
+		request, method, err := s.decodeInboundLayerRPCWithOptions(
+			LayerProfileSnapshot{},
+			body,
+			tlprofile.AdmissionOptions{Limits: inboundLayerDecodeLimits},
+		)
+		if err != nil {
+			t.Fatalf("legacy unprofiled admission: %v", err)
+		}
+		if method != "help.getNearestDc" {
+			t.Fatalf("method = %q, want help.getNearestDc", method)
+		}
+		if request.Call().Profile() != tlprofile.Profile225 {
+			t.Fatalf("call profile = %d, want 225", request.Call().Profile())
+		}
+	})
+
+	t.Run("nested gzip requires explicit optional capability", func(t *testing.T) {
+		handler := newLegacyAdmissionOnlyLayerRPC()
+		s := New(Options{DC: 2, LayerRPC: handler})
+		body, _ := tdlibNestedGZIPBody(t, tlprofile.Profile228, &tg.HelpGetConfigRequest{})
+		original := append([]byte(nil), body...)
+
+		_, _, err := s.decodeInboundLayerRPCWithOptions(
+			LayerProfileSnapshot{},
+			body,
+			tlprofile.AdmissionOptions{
+				Limits: inboundLayerDecodeLimits,
+				ExpandGZIP: func([]byte, int) ([]byte, func(), error) {
+					t.Fatal("legacy handler unexpectedly received options-only gzip expander")
+					return nil, nil, nil
+				},
+			},
+		)
+		if !errors.Is(err, errLayerRPCAdmissionCapability) {
+			t.Fatalf("nested gzip error = %v, want admission capability error", err)
+		}
+		if !errors.Is(err, tlprofile.ErrGZIPExpanderMissing) {
+			t.Fatalf("nested gzip error = %v, want generated missing-expander cause", err)
+		}
+		if handler.lastRemaining != len(body) {
+			t.Fatalf("failed legacy admission retained %d/%d input bytes", handler.lastRemaining, len(body))
+		}
+		if !bytes.Equal(body, original) {
+			t.Fatal("failed legacy admission mutated caller wire bytes")
+		}
+	})
 }
 
 func TestNestedExplicitLayerAdmissionErrorsAreNotDefaultFailures(t *testing.T) {
@@ -833,11 +973,12 @@ func TestSameMsgIDNakedReplayUsesWinnerAdmissionProfile(t *testing.T) {
 	}
 	c220 := &Conn{authKeyID: authKeyID, sessionID: sessionID}
 	c227 := &Conn{authKeyID: authKeyID, sessionID: sessionID}
-	winner, err := s.acquireAdmittedLayerRPC(c220, &item220, nil)
+	options := tlprofile.AdmissionOptions{Limits: inboundLayerDecodeLimits}
+	winner, err := s.acquireAdmittedLayerRPC(c220, &item220, nil, options, nil)
 	if err != nil || winner.state != rpcResultAcquireOwner || winner.owner == nil {
 		t.Fatalf("winner = state:%d err:%v", winner.state, err)
 	}
-	loser, err := s.acquireAdmittedLayerRPC(c227, &item227, nil)
+	loser, err := s.acquireAdmittedLayerRPC(c227, &item227, nil, options, nil)
 	if err != nil || loser.state != rpcResultAcquirePending || loser.admissionSeq != winner.admissionSeq {
 		t.Fatalf("loser join = state:%d seq:%d err:%v, winner seq:%d", loser.state, loser.admissionSeq, err, winner.admissionSeq)
 	}
@@ -852,7 +993,7 @@ func TestSameMsgIDNakedReplayUsesWinnerAdmissionProfile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.acquireAdmittedLayerRPC(c220, &changed, nil); !errors.Is(err, ErrRPCResultIdentityMismatch) {
+	if _, err := s.acquireAdmittedLayerRPC(c220, &changed, nil, options, nil); !errors.Is(err, ErrRPCResultIdentityMismatch) {
 		t.Fatalf("same-msg_id changed body err=%v, want identity mismatch", err)
 	}
 	winner.owner.Abort()

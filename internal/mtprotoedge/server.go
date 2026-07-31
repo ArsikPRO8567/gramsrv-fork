@@ -70,6 +70,14 @@ type LayerRPCHandler interface {
 	) (tlprofile.Result, string, error)
 }
 
+// LayerRPCOptionsAdmitter extends the stable handler boundary with
+// caller-owned admission capabilities. Implementations that do not expose it
+// remain usable for requests that need only Limits.
+type LayerRPCOptionsAdmitter interface {
+	AdmitLayerWithOptions(profile tlprofile.Profile, b *bin.Buffer, options tlprofile.AdmissionOptions) (tlprofile.Admission, error)
+	AdmitUnprofiledWithOptions(b *bin.Buffer, options tlprofile.AdmissionOptions) (tlprofile.Admission, error)
+}
+
 // LayerRPCDefaultProfileAdmitter decodes with a recoverable inherited/default
 // profile. Production handlers should implement it with the same sparse
 // tlprofile dispatcher and semantic adapter registry used by AdmitLayer. The split keeps old
@@ -77,6 +85,12 @@ type LayerRPCHandler interface {
 // a previously explicit Conn profile.
 type LayerRPCDefaultProfileAdmitter interface {
 	AdmitDefaultLayer(profile tlprofile.Profile, b *bin.Buffer, limits tlprofile.Limits) (tlprofile.Admission, error)
+}
+
+// LayerRPCDefaultProfileOptionsAdmitter is the capability-aware form used when
+// exact admission needs caller-owned resources such as bounded gzip expansion.
+type LayerRPCDefaultProfileOptionsAdmitter interface {
+	AdmitDefaultLayerWithOptions(profile tlprofile.Profile, b *bin.Buffer, options tlprofile.AdmissionOptions) (tlprofile.Admission, error)
 }
 
 // LayerRPCSessionProfileResolver may restore an exact profile only when it was

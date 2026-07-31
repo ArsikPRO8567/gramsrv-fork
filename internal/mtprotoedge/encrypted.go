@@ -349,6 +349,35 @@ func (e *dispatchBadMsgError) Error() string {
 	return fmt.Sprintf("bad client message %d/%d: code %d", e.msgID, e.seqNo, e.code)
 }
 
+var errGZIPExpansionLimit = errors.New("gzip expansion limit exceeded")
+
+type gzipExpansionWorkError struct {
+	expanded int
+	cause    error
+}
+
+func (e *gzipExpansionWorkError) Error() string {
+	if e == nil || e.cause == nil {
+		return "gzip expansion failed"
+	}
+	return e.cause.Error()
+}
+
+func (e *gzipExpansionWorkError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.cause
+}
+
+func gzipExpansionWork(err error) int {
+	var work *gzipExpansionWorkError
+	if errors.As(err, &work) && work.expanded > 0 {
+		return work.expanded
+	}
+	return 0
+}
+
 // decodeGZIPWithGlobalBudget reserves the maximum single-wrapper output before
 // decompression starts. Once the actual size is known the excess reservation is
 // returned, while the actual output remains charged until the inbound plan is
@@ -356,6 +385,16 @@ func (e *dispatchBadMsgError) Error() string {
 // This closes the gap where every connection read goroutine could otherwise hold
 // an unaccounted 10 MiB expansion before the shared RPC scheduler saw the body.
 func (s *Server) decodeGZIPWithGlobalBudget(b *bin.Buffer) ([]byte, func(), error) {
+	return s.decodeGZIPWithGlobalBudgetLimit(b, maxSingleGZIPExpandedBytes)
+}
+
+// decodeGZIPWithGlobalBudgetLimit is the caller-bounded form used by exact
+// Layer admission. limit is also capped by the protocol's single-wrapper
+// ceiling; the returned bytes remain charged until release is called.
+func (s *Server) decodeGZIPWithGlobalBudgetLimit(b *bin.Buffer, limit int) ([]byte, func(), error) {
+	if limit <= 0 || limit > maxSingleGZIPExpandedBytes {
+		return nil, func() {}, fmt.Errorf("invalid gzip expansion limit %d", limit)
+	}
 	compressed, err := gzipPackedBytesView(b)
 	if err != nil {
 		return nil, func() {}, err
@@ -368,7 +407,7 @@ func (s *Server) decodeGZIPWithGlobalBudget(b *bin.Buffer) ([]byte, func(), erro
 		}
 	}
 	if s.frameBudget != nil {
-		reserved, err = s.frameBudget.reserve(maxSingleGZIPExpandedBytes, 0)
+		reserved, err = s.frameBudget.reserve(int64(limit), 0)
 		if err != nil {
 			return nil, func() {}, err
 		}
@@ -379,19 +418,22 @@ func (s *Server) decodeGZIPWithGlobalBudget(b *bin.Buffer) ([]byte, func(), erro
 		release()
 		return nil, func() {}, err
 	}
-	data, readErr := io.ReadAll(io.LimitReader(r, maxSingleGZIPExpandedBytes+1))
+	data, readErr := io.ReadAll(io.LimitReader(r, int64(limit)+1))
 	closeErr := r.Close()
 	if readErr != nil {
 		release()
-		return nil, func() {}, readErr
+		return nil, func() {}, &gzipExpansionWorkError{expanded: len(data), cause: readErr}
 	}
 	if closeErr != nil {
 		release()
-		return nil, func() {}, closeErr
+		return nil, func() {}, &gzipExpansionWorkError{expanded: len(data), cause: closeErr}
 	}
-	if len(data) > maxSingleGZIPExpandedBytes {
+	if len(data) > limit {
 		release()
-		return nil, func() {}, fmt.Errorf("gzip expansion %d exceeds %d", len(data), maxSingleGZIPExpandedBytes)
+		return nil, func() {}, &gzipExpansionWorkError{
+			expanded: len(data),
+			cause:    fmt.Errorf("%w: expansion %d exceeds %d", errGZIPExpansionLimit, len(data), limit),
+		}
 	}
 	if reserved > int64(len(data)) {
 		s.frameBudget.release(reserved - int64(len(data)))

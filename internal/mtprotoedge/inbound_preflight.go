@@ -92,6 +92,11 @@ type inboundPlan struct {
 	ackIDs     []int64
 	logicalMin int64
 	releases   []func()
+	// gzipExpandedBytes is the non-refundable per-frame decompression work
+	// already performed by outer and exact-layer nested gzip envelopes. Memory
+	// reservations are released when their buffers die, but this cumulative
+	// counter prevents sibling RPCs from recycling the same CPU budget.
+	gzipExpandedBytes int
 
 	rpcReservation *inboundRPCBatchReservation
 	rpcTasks       []inboundRPC
@@ -314,6 +319,7 @@ func (s *Server) preflightInbound(cs *connState, msgID int64, seqNo int32, body 
 		plan.close()
 		return nil, err
 	}
+	plan.gzipExpandedBytes = budget.expanded
 	plan.staged = overlay.staged
 	if plan.logicalMin == 0 {
 		plan.close()
