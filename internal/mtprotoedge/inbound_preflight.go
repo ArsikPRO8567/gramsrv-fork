@@ -454,7 +454,7 @@ func (s *Server) walkInbound(
 		return &dispatchBadMsgError{msgID: msgID, seqNo: seqNo, code: code}
 	}
 
-	content := clientMessageNeedsAck(typeID)
+	content := clientMessageIsContentRelated(typeID, seqNo)
 	if record, seen := overlay.seenRecord(msgID); seen {
 		if record.seqNo != seqNo || record.content != content {
 			return &dispatchBadMsgError{msgID: msgID, seqNo: seqNo, code: badMsgContainer}

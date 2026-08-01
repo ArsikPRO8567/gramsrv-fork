@@ -1205,9 +1205,9 @@ func TestSessionManagerPush(t *testing.T) {
 
 	// 各发一个 ping 建立 session，触发注册（并清掉 new_session_created/pong/ack）。
 	msgGen := proto.NewMessageIDGen(time.Now)
-	sendEncrypted(t, conn1, cipher1, auth1, msgGen.New(proto.MessageFromClient), &mt.PingRequest{PingID: 1})
+	sendEncryptedWithSeq(t, conn1, cipher1, auth1, msgGen.New(proto.MessageFromClient), 1, &mt.PingRequest{PingID: 1})
 	collectReplies(t, conn1, cipher1, auth1.AuthKey, mt.PongTypeID)
-	sendEncrypted(t, conn2, cipher2, auth2, msgGen.New(proto.MessageFromClient), &mt.PingRequest{PingID: 2})
+	sendEncryptedWithSeq(t, conn2, cipher2, auth2, msgGen.New(proto.MessageFromClient), 1, &mt.PingRequest{PingID: 2})
 	collectReplies(t, conn2, cipher2, auth2.AuthKey, mt.PongTypeID)
 
 	if got := srv.Conns().Online(); got != 2 {

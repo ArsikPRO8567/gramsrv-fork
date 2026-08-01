@@ -1481,15 +1481,15 @@ func validateClientEnvelope(now time.Time, msgID int64, seqNo int32, typeID uint
 	if msgTime.After(now.Add(30 * time.Second)) {
 		return badMsgIDTooHigh
 	}
-	if clientMessageAllowsEitherSeqParity(typeID) {
-		return 0
-	}
-	if clientMessageNeedsAck(typeID) {
+	switch clientMessageContentPolicyFor(typeID) {
+	case clientMessageContentRequired:
 		if seqNo%2 == 0 {
 			return badMsgSeqNotOdd
 		}
-	} else if seqNo%2 != 0 {
-		return badMsgSeqNotEven
+	case clientMessageContentForbidden:
+		if seqNo%2 != 0 {
+			return badMsgSeqNotEven
+		}
 	}
 	return 0
 }
@@ -1498,48 +1498,68 @@ func validateClientContainerEnvelope(msgID int64, seqNo int32, typeID uint32) in
 	if !validClientMessageIDBits(msgID) {
 		return badMsgIDInvalidBits
 	}
-	if clientMessageAllowsEitherSeqParity(typeID) {
-		return 0
-	}
-	if clientMessageNeedsAck(typeID) {
+	switch clientMessageContentPolicyFor(typeID) {
+	case clientMessageContentRequired:
 		if seqNo%2 == 0 {
 			return badMsgSeqNotOdd
 		}
-	} else if seqNo%2 != 0 {
-		return badMsgSeqNotEven
+	case clientMessageContentForbidden:
+		if seqNo%2 != 0 {
+			return badMsgSeqNotEven
+		}
 	}
 	return 0
 }
 
-func clientMessageAllowsEitherSeqParity(typeID uint32) bool {
-	switch typeID {
-	case mt.PingDelayDisconnectRequestTypeID,
-		// get_future_salts 的 seqno 奇偶在客户端间不一致：部分客户端按内容消息发奇数，
-		// gotd 按服务消息发偶数。两者都合法（官方服务器都接受），故不在此卡奇偶，避免
-		// 误判 bad_msg 触发客户端重连风暴。ack/content 行为仍由 clientMessageNeedsAck 决定。
-		mt.GetFutureSaltsRequestTypeID:
-		return true
-	default:
-		return false
-	}
-}
+type clientMessageContentPolicy uint8
 
-func clientMessageNeedsAck(typeID uint32) bool {
+const (
+	clientMessageContentRequired clientMessageContentPolicy = iota + 1
+	clientMessageContentForbidden
+	clientMessageContentOptional
+)
+
+// clientMessageContentPolicyFor classifies the client envelope, not merely the
+// constructor's usual sending convention. MTProto requires API RPCs to be
+// content-related and requires containers/acknowledgements to be irrelevant,
+// but clients may mark the other service constructors as either. TDLib uses
+// even sequence numbers for its reconnect state/resend/cancel service batch,
+// while gotd and DrKLO use odd sequence numbers for some of the same requests.
+func clientMessageContentPolicyFor(typeID uint32) clientMessageContentPolicy {
 	switch typeID {
 	case proto.MessageContainerTypeID,
 		mt.MsgsAckTypeID,
+		mt.MsgCopyTypeID:
+		return clientMessageContentForbidden
+	case mt.PingRequestTypeID,
 		mt.PingDelayDisconnectRequestTypeID,
-		mt.DestroySessionRequestTypeID,
-		mt.HTTPWaitRequestTypeID,
-		mt.BadMsgNotificationTypeID,
-		mt.BadServerSaltTypeID,
+		mt.GetFutureSaltsRequestTypeID,
+		mt.MsgsStateReqTypeID,
+		mt.MsgResendReqTypeID,
 		mt.MsgsAllInfoTypeID,
 		mt.MsgsStateInfoTypeID,
+		mt.DestroySessionRequestTypeID,
+		mt.HTTPWaitRequestTypeID,
+		mt.RPCDropAnswerRequestTypeID,
+		mt.BadMsgNotificationTypeID,
+		mt.BadServerSaltTypeID,
 		mt.MsgDetailedInfoTypeID,
-		mt.MsgNewDetailedInfoTypeID:
-		return false
+		mt.MsgNewDetailedInfoTypeID,
+		destroyAuthKeyRequestTypeID:
+		return clientMessageContentOptional
 	default:
+		return clientMessageContentRequired
+	}
+}
+
+func clientMessageIsContentRelated(typeID uint32, seqNo int32) bool {
+	switch clientMessageContentPolicyFor(typeID) {
+	case clientMessageContentRequired:
 		return true
+	case clientMessageContentOptional:
+		return seqNo%2 != 0
+	default:
+		return false
 	}
 }
 

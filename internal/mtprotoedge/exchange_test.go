@@ -1044,7 +1044,7 @@ func TestReconnectFakeReqPQThenEncryptedFrame(t *testing.T) {
 	cancel()
 
 	msgGen := tgproto.NewMessageIDGen(time.Now)
-	sendEncrypted(t, conn, cipher, auth, msgGen.New(tgproto.MessageFromClient), &mt.PingRequest{PingID: 7})
+	sendEncryptedWithSeq(t, conn, cipher, auth, msgGen.New(tgproto.MessageFromClient), 1, &mt.PingRequest{PingID: 7})
 
 	var resPQFrame bin.Buffer
 	ctx, cancel = context.WithTimeout(context.Background(), 5*time.Second)

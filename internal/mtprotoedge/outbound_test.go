@@ -544,7 +544,7 @@ func TestOutboundActorSerializesConcurrentSends(t *testing.T) {
 	conn, auth, cipher := dialHandshake(t, addr, dc, pub)
 
 	clientMsgID := proto.NewMessageIDGen(time.Now)
-	sendEncrypted(t, conn, cipher, auth, clientMsgID.New(proto.MessageFromClient), &mt.PingRequest{PingID: 1})
+	sendEncryptedWithSeq(t, conn, cipher, auth, clientMsgID.New(proto.MessageFromClient), 1, &mt.PingRequest{PingID: 1})
 	collectReplies(t, conn, cipher, auth.AuthKey, mt.MsgsAckTypeID)
 	freezeActiveTestSessionProfile(t, srv.Conns(), auth.AuthKey.ID, auth.SessionID, tlprofile.ProfileCanonical)
 	srv.Conns().SetReceivesUpdates(auth.SessionID, true)
@@ -1034,7 +1034,7 @@ func TestOutboundResendAndAckState(t *testing.T) {
 	conn, auth, cipher := dialHandshake(t, addr, dc, pub)
 
 	clientMsgID := proto.NewMessageIDGen(time.Now)
-	sendEncrypted(t, conn, cipher, auth, clientMsgID.New(proto.MessageFromClient), &mt.PingRequest{PingID: 1})
+	sendEncryptedWithSeq(t, conn, cipher, auth, clientMsgID.New(proto.MessageFromClient), 1, &mt.PingRequest{PingID: 1})
 	collectReplies(t, conn, cipher, auth.AuthKey, mt.MsgsAckTypeID)
 	freezeActiveTestSessionProfile(t, srv.Conns(), auth.AuthKey.ID, auth.SessionID, tlprofile.ProfileCanonical)
 	srv.Conns().SetReceivesUpdates(auth.SessionID, true)
