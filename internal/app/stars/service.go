@@ -14,6 +14,7 @@ import (
 // Service 是 Stars 账本应用服务。
 type Service struct {
 	store       store.StarsStore
+	giftStore   store.StarsGiftPurchaseStore
 	grantAmount int64
 	now         func() time.Time
 }
@@ -24,6 +25,11 @@ type Option func(*Service)
 // WithStartingGrant 设置惰性首读授予的起始余额；amount<=0 关闭自动授予。
 func WithStartingGrant(amount int64) Option {
 	return func(s *Service) { s.grantAmount = amount }
+}
+
+// WithGiftPurchaseStore enables the atomic fiat Stars-gift checkout aggregate.
+func WithGiftPurchaseStore(st store.StarsGiftPurchaseStore) Option {
+	return func(s *Service) { s.giftStore = st }
 }
 
 // WithClock 注入时钟（测试用）。
@@ -88,4 +94,26 @@ func (s *Service) ListTransactions(ctx context.Context, userID int64, query doma
 		return domain.StarsTransactionPage{}, err
 	}
 	return s.store.ListTransactions(ctx, userID, query)
+}
+
+// IssueGiftPurchaseForm persists a short-lived, exact checkout intent.
+func (s *Service) IssueGiftPurchaseForm(ctx context.Context, form domain.StarsGiftPurchaseForm) (domain.StarsGiftPurchaseForm, error) {
+	if s.giftStore == nil || form.BuyerUserID <= 0 || form.RecipientUserID <= 0 ||
+		form.BuyerUserID == form.RecipientUserID || form.Stars <= 0 || form.Amount <= 0 ||
+		form.Currency == "" || form.IssuedAt <= 0 || form.ExpiresAt != form.IssuedAt+600 {
+		return domain.StarsGiftPurchaseForm{}, domain.ErrStarsGiftFormInvalid
+	}
+	return s.giftStore.IssueStarsGiftPurchaseForm(ctx, form)
+}
+
+// PurchaseGift settles one exact persisted form. Package validation remains at
+// the RPC boundary as well, while the store revalidates the persisted tuple
+// under lock before performing any write.
+func (s *Service) PurchaseGift(ctx context.Context, req domain.StarsGiftPurchaseRequest) (domain.StarsGiftPurchaseResult, error) {
+	if s.giftStore == nil || req.FormID == 0 || req.BuyerUserID <= 0 || req.RecipientUserID <= 0 ||
+		req.BuyerUserID == req.RecipientUserID || req.Stars <= 0 || req.Amount <= 0 ||
+		req.Currency == "" || req.Date <= 0 {
+		return domain.StarsGiftPurchaseResult{}, domain.ErrStarsGiftFormInvalid
+	}
+	return s.giftStore.PurchaseStarsGift(ctx, req)
 }

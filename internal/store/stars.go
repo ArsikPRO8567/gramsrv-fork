@@ -22,3 +22,11 @@ type StarsStore interface {
 	// ListTransactions 按方向与顺序做 keyset 分页，返回一页流水 + 当前余额。
 	ListTransactions(ctx context.Context, userID int64, query domain.StarsTransactionQuery) (domain.StarsTransactionPage, error)
 }
+
+// StarsGiftPurchaseStore owns the fiat gift aggregate. A successful purchase
+// must commit the recipient balance/ledger and both account message-box events
+// in the same transaction; exact form retries return the original receipt.
+type StarsGiftPurchaseStore interface {
+	IssueStarsGiftPurchaseForm(context.Context, domain.StarsGiftPurchaseForm) (domain.StarsGiftPurchaseForm, error)
+	PurchaseStarsGift(context.Context, domain.StarsGiftPurchaseRequest) (domain.StarsGiftPurchaseResult, error)
+}

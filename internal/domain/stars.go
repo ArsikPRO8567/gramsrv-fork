@@ -17,6 +17,38 @@ type StarsBalance struct {
 	Granted bool  // 起始授予是否已应用（惰性首读授予的幂等守卫）
 }
 
+// StarsGiftPurchaseForm binds one short-lived fiat Stars-gift checkout to its
+// authenticated buyer, recipient and exact server-advertised package. The
+// client may echo these values but cannot use a form for a different intent.
+type StarsGiftPurchaseForm struct {
+	FormID          int64
+	BuyerUserID     int64
+	RecipientUserID int64
+	Stars           int64
+	Currency        string
+	Amount          int64
+	IssuedAt        int
+	ExpiresAt       int
+}
+
+// StarsGiftPurchaseRequest is the immutable settlement command carried by
+// inputInvoiceStars(inputStorePaymentStarsGift).
+type StarsGiftPurchaseRequest struct {
+	StarsGiftPurchaseForm
+	Date            int
+	OriginAuthKeyID [8]byte
+	OriginSessionID int64
+}
+
+// StarsGiftPurchaseResult is the atomically committed recipient credit and
+// bilateral service-message receipt. Duplicate means an exact form replay.
+type StarsGiftPurchaseResult struct {
+	RecipientBalance StarsBalance
+	Send             SendPrivateTextResult
+	TransactionID    string
+	Duplicate        bool
+}
+
 // StarsTransactionReason 标记一条流水的语义（投影到 tg.StarsTransaction 的标志位/标题）。
 type StarsTransactionReason string
 
@@ -152,6 +184,12 @@ var (
 	ErrStarsInvalidAmount = errors.New("stars: invalid amount")
 	// ErrStarsTransactionQueryInvalid 表示内部构造了不可能的流水方向。
 	ErrStarsTransactionQueryInvalid = errors.New("stars: invalid transaction query")
+	// ErrStarsGiftFormInvalid covers a missing/cross-account/mutated form.
+	ErrStarsGiftFormInvalid = errors.New("stars: gift form invalid")
+	// ErrStarsGiftFormExpired is returned before any settlement write.
+	ErrStarsGiftFormExpired = errors.New("stars: gift form expired")
+	// ErrStarsGiftUnavailable covers a recipient that cannot receive the gift.
+	ErrStarsGiftUnavailable = errors.New("stars: gift unavailable")
 )
 
 // StarsPaymentRequiredError reports the minimum paid-message authorization the

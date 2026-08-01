@@ -30,6 +30,82 @@ func devStarsTopupOptions() []tg.StarsTopupOption {
 	}
 }
 
+func devStarsGiftOptions() []tg.StarsGiftOption {
+	// No store_product is advertised: telesrv has no Google/Apple product and
+	// sideloaded Android clients must use the invoice checkout path.
+	return []tg.StarsGiftOption{
+		{Stars: 1000, Currency: "USD", Amount: 99},
+		{Stars: 2500, Currency: "USD", Amount: 199},
+		{Stars: 5000, Currency: "USD", Amount: 399},
+	}
+}
+
+type starsGiftPurchaseService interface {
+	IssueGiftPurchaseForm(context.Context, domain.StarsGiftPurchaseForm) (domain.StarsGiftPurchaseForm, error)
+	PurchaseGift(context.Context, domain.StarsGiftPurchaseRequest) (domain.StarsGiftPurchaseResult, error)
+}
+
+func userGiftUnavailableErr() error { return tgerr.New(400, "USER_GIFT_UNAVAILABLE") }
+
+func (r *Router) onPaymentsGetStarsGiftOptions(ctx context.Context, req *tg.PaymentsGetStarsGiftOptionsRequest) ([]tg.StarsGiftOption, error) {
+	userID, _, err := r.currentUserID(ctx)
+	if err != nil {
+		return nil, internalErr()
+	}
+	if req != nil {
+		if input, ok := req.GetUserID(); ok {
+			if _, err := r.starsGiftRecipient(ctx, userID, input); err != nil {
+				return nil, err
+			}
+		}
+	}
+	return devStarsGiftOptions(), nil
+}
+
+func (r *Router) starsGiftRecipient(ctx context.Context, buyerUserID int64, input tg.InputUserClass) (domain.User, error) {
+	if inputUserIsEmpty(input) || r.deps.Users == nil {
+		return domain.User{}, userIDInvalidErr()
+	}
+	recipient, found, err := r.userFromInput(ctx, buyerUserID, input)
+	if err != nil {
+		return domain.User{}, internalErr()
+	}
+	if !found || recipient.ID <= 0 || recipient.Deleted {
+		return domain.User{}, userIDInvalidErr()
+	}
+	if recipient.ID == buyerUserID {
+		return domain.User{}, userGiftUnavailableErr()
+	}
+	blocked, err := r.peerBlocksUser(ctx, buyerUserID, recipient.ID)
+	if err != nil {
+		return domain.User{}, err
+	}
+	if blocked {
+		return domain.User{}, userGiftUnavailableErr()
+	}
+	return recipient, nil
+}
+
+func validateStarsGiftOption(purpose *tg.InputStorePaymentStarsGift) (tg.StarsGiftOption, error) {
+	if purpose == nil || purpose.UserID == nil || purpose.Stars <= 0 || purpose.Amount <= 0 || purpose.Currency == "" {
+		return tg.StarsGiftOption{}, starsAmountInvalidErr()
+	}
+	for _, option := range devStarsGiftOptions() {
+		if option.Stars == purpose.Stars && option.Currency == purpose.Currency && option.Amount == purpose.Amount {
+			return option, nil
+		}
+	}
+	return tg.StarsGiftOption{}, starsFormAmountMismatchErr()
+}
+
+func starsGiftPurpose(inv *tg.InputInvoiceStars) (*tg.InputStorePaymentStarsGift, bool) {
+	if inv == nil {
+		return nil, false
+	}
+	purpose, ok := inv.Purpose.(*tg.InputStorePaymentStarsGift)
+	return purpose, ok && purpose != nil
+}
+
 // onPaymentsGetStarGifts 返回可购买礼物目录（hash 命中返回 NotModified）。
 func (r *Router) onPaymentsGetStarGifts(ctx context.Context, hash int) (tg.PaymentsStarGiftsClass, error) {
 	if r.deps.Gifts == nil {
@@ -71,6 +147,9 @@ func (r *Router) onPaymentsGetPaymentForm(ctx context.Context, req *tg.PaymentsG
 	}
 
 	if inv, ok := req.Invoice.(*tg.InputInvoiceStars); ok {
+		if purpose, gift := starsGiftPurpose(inv); gift {
+			return r.starsGiftPaymentForm(ctx, userID, purpose)
+		}
 		purpose, ok := starsTopupPurpose(inv)
 		if !ok {
 			return nil, notImplementedErr()
@@ -149,6 +228,36 @@ func (r *Router) onPaymentsGetPaymentForm(ctx context.Context, req *tg.PaymentsG
 	}, nil
 }
 
+func (r *Router) starsGiftPaymentForm(ctx context.Context, buyerUserID int64, purpose *tg.InputStorePaymentStarsGift) (tg.PaymentsPaymentFormClass, error) {
+	if _, err := validateStarsGiftOption(purpose); err != nil {
+		return nil, err
+	}
+	recipient, err := r.starsGiftRecipient(ctx, buyerUserID, purpose.UserID)
+	if err != nil {
+		return nil, err
+	}
+	service, ok := r.deps.Stars.(starsGiftPurchaseService)
+	if !ok {
+		return nil, notImplementedErr()
+	}
+	now := int(r.clock.Now().Unix())
+	form, err := service.IssueGiftPurchaseForm(ctx, domain.StarsGiftPurchaseForm{
+		BuyerUserID: buyerUserID, RecipientUserID: recipient.ID,
+		Stars: purpose.Stars, Currency: purpose.Currency, Amount: purpose.Amount,
+		IssuedAt: now, ExpiresAt: now + 600,
+	})
+	if err != nil {
+		return nil, starsGiftPurchaseErr(err)
+	}
+	users := []domain.User{domain.OfficialSystemUser(), recipient}
+	return &tg.PaymentsPaymentFormStars{
+		FormID: form.FormID, BotID: domain.OfficialSystemUserID,
+		Title: "Gift Stars", Description: "Gift Stars to a friend",
+		Invoice: tg.Invoice{Currency: "XTR", Prices: []tg.LabeledPrice{{Label: branding.StarsName, Amount: purpose.Stars}}},
+		Users:   tgUsersForViewer(buyerUserID, users),
+	}, nil
+}
+
 // onPaymentsSendStarsForm 处理 star gift 与 Stars topup：
 //   - star gift: Debit→投递/记账，失败补偿退款。
 //   - topup: 校验测试包白名单→Credit 本地账本。
@@ -165,6 +274,9 @@ func (r *Router) onPaymentsSendStarsForm(ctx context.Context, req *tg.PaymentsSe
 	}
 
 	if inv, ok := req.Invoice.(*tg.InputInvoiceStars); ok {
+		if purpose, gift := starsGiftPurpose(inv); gift {
+			return r.sendStarsGiftPurchase(ctx, userID, req.FormID, purpose)
+		}
 		return r.sendStarsTopupForm(ctx, userID, req.FormID, inv)
 	}
 	if inv, ok := req.Invoice.(*tg.InputInvoiceStarGiftUpgrade); ok {
@@ -264,6 +376,78 @@ func (r *Router) onPaymentsSendStarsForm(ctx context.Context, req *tg.PaymentsSe
 	appendStarGiftBalanceUpdate(updates, domain.StarGiftCurrencyStars, result.Balance.Balance)
 	r.invalidateStarGiftOwner(peer)
 	return &tg.PaymentsPaymentResult{Updates: updates}, nil
+}
+
+// onPaymentsSendPaymentForm is the Android invoice-billing completion path.
+// The local development provider does not charge an external card, but it
+// accepts only a persisted Stars-gift form and runs the same atomic settlement
+// as TDesktop's paymentFormStars/sendStarsForm compatibility path.
+func (r *Router) onPaymentsSendPaymentForm(ctx context.Context, req *tg.PaymentsSendPaymentFormRequest) (tg.PaymentsPaymentResultClass, error) {
+	if req == nil {
+		return nil, inputRequestInvalidErr()
+	}
+	userID, _, err := r.currentUserID(ctx)
+	if err != nil {
+		return nil, internalErr()
+	}
+	inv, ok := req.Invoice.(*tg.InputInvoiceStars)
+	if !ok {
+		return nil, notImplementedErr()
+	}
+	purpose, ok := starsGiftPurpose(inv)
+	if !ok {
+		return nil, notImplementedErr()
+	}
+	if req.Credentials == nil {
+		return nil, tgerr.New(400, "PAYMENT_CREDENTIALS_INVALID")
+	}
+	if req.TipAmount != 0 {
+		return nil, tgerr.New(400, "TIP_AMOUNT_INVALID")
+	}
+	return r.sendStarsGiftPurchase(ctx, userID, req.FormID, purpose)
+}
+
+func (r *Router) sendStarsGiftPurchase(ctx context.Context, buyerUserID, formID int64, purpose *tg.InputStorePaymentStarsGift) (tg.PaymentsPaymentResultClass, error) {
+	if formID == 0 {
+		return nil, formIDEmptyErr()
+	}
+	if _, err := validateStarsGiftOption(purpose); err != nil {
+		return nil, err
+	}
+	recipient, err := r.starsGiftRecipient(ctx, buyerUserID, purpose.UserID)
+	if err != nil {
+		return nil, err
+	}
+	service, ok := r.deps.Stars.(starsGiftPurchaseService)
+	if !ok {
+		return nil, notImplementedErr()
+	}
+	result, err := service.PurchaseGift(ctx, domain.StarsGiftPurchaseRequest{
+		StarsGiftPurchaseForm: domain.StarsGiftPurchaseForm{
+			FormID: formID, BuyerUserID: buyerUserID, RecipientUserID: recipient.ID,
+			Stars: purpose.Stars, Currency: purpose.Currency, Amount: purpose.Amount,
+		},
+		Date: int(r.clock.Now().Unix()), OriginAuthKeyID: rawAuthKeyIDForOrigin(ctx),
+		OriginSessionID: sessionIDOrZero(ctx),
+	})
+	if err != nil {
+		return nil, starsGiftPurchaseErr(err)
+	}
+	updates := r.starGiftSendUpdates(ctx, buyerUserID, result.Send)
+	return &tg.PaymentsPaymentResult{Updates: updates}, nil
+}
+
+func starsGiftPurchaseErr(err error) error {
+	switch {
+	case errors.Is(err, domain.ErrStarsGiftFormExpired):
+		return tgerr.New(400, "FORM_EXPIRED")
+	case errors.Is(err, domain.ErrStarsGiftFormInvalid):
+		return starsFormAmountMismatchErr()
+	case errors.Is(err, domain.ErrStarsGiftUnavailable):
+		return userGiftUnavailableErr()
+	default:
+		return internalErr()
+	}
 }
 
 func (r *Router) sendStarGiftMemoryPurchase(ctx context.Context, userID int64, peer domain.Peer, gift domain.StarGift,

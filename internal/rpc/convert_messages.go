@@ -244,6 +244,21 @@ func tgMessageServiceAction(msg domain.Message) tg.MessageActionClass {
 		}
 	case domain.MessageServiceActionStarGift:
 		return tgMessageActionStarGiftForViewer(m.ServiceAction.StarGift, msg.OwnerUserID)
+	case domain.MessageServiceActionGiftStars:
+		action := m.ServiceAction.GiftStars
+		if action == nil || action.Currency == "" || action.Amount <= 0 || action.Stars <= 0 {
+			return &tg.MessageActionEmpty{}
+		}
+		out := &tg.MessageActionGiftStars{
+			Currency: action.Currency,
+			Amount:   action.Amount,
+			Stars:    action.Stars,
+		}
+		// Telegram only exposes the provider transaction id to the receiver.
+		if !msg.Out && action.TransactionID != "" {
+			out.SetTransactionID(action.TransactionID)
+		}
+		return out
 	case domain.MessageServiceActionStarGiftUnique:
 		return tgMessageActionStarGiftUnique(m.ServiceAction.StarGiftUnique)
 	case domain.MessageServiceActionStarGiftOffer:

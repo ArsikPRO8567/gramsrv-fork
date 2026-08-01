@@ -916,7 +916,10 @@ func run(logger *zap.Logger) error {
 	encryptedQueueStore := postgres.NewEncryptedQueueStore(pool)
 	secretChatService := secretchatapp.NewService(secretChatStore, encryptedQueueStore, secretChatIDAllocator)
 	starsStore := postgres.NewStarsStore(pool)
-	starsService := stars.NewService(starsStore, stars.WithStartingGrant(cfg.StarsStartingGrant))
+	starsGiftPurchaseStore := postgres.NewStarsGiftPurchaseStore(pool, messageStore)
+	starsService := stars.NewService(starsStore,
+		stars.WithStartingGrant(cfg.StarsStartingGrant),
+		stars.WithGiftPurchaseStore(starsGiftPurchaseStore))
 	starGiftStore := postgres.NewStarGiftStore(pool)
 	starGiftUpgradeStore := postgres.NewStarGiftUpgradeStore(pool, messageStore, postgres.WithStarGiftLifecyclePolicy(domain.StarGiftLifecyclePolicy{
 		TransferStars: cfg.StarGiftTransferStars, DropOriginalDetailsStars: cfg.StarGiftDropOriginalDetailsStars,

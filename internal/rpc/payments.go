@@ -15,6 +15,9 @@ import (
 // registerPayments 注册 payments.* RPC：Stars 本地账本（余额/流水真实化）+ 其余
 // gift/auction/revenue 第一阶段兼容桩。
 func (r *Router) registerPayments(d *tlprofile.Dispatcher) {
+	registerRPC[*tg.PaymentsGetStarsGiftOptionsRequest](d, tlprofile.SemanticMethodPaymentsGetStarsGiftOptions, func(ctx context.Context, req *tg.PaymentsGetStarsGiftOptionsRequest) (any, error) {
+		return r.onPaymentsGetStarsGiftOptions(ctx, req)
+	})
 	registerRPC[*tg.PaymentsGetStarsTopupOptionsRequest](d, tlprofile.SemanticMethodPaymentsGetStarsTopupOptions, func(ctx context.Context, layerRequest *tg.PaymentsGetStarsTopupOptionsRequest) (any,
 
 		// premium 订阅赠送 telesrv 不实现（无支付流），返回空选项。关键作用：TDesktop 送礼框
@@ -65,6 +68,9 @@ func (r *Router) registerPayments(d *tlprofile.Dispatcher) {
 	})
 	registerRPC[*tg.PaymentsSendStarsFormRequest](d, tlprofile.SemanticMethodPaymentsSendStarsForm, func(ctx context.Context, layerRequest *tg.PaymentsSendStarsFormRequest) (any, error) {
 		return r.onPaymentsSendStarsForm(ctx, layerRequest)
+	})
+	registerRPC[*tg.PaymentsSendPaymentFormRequest](d, tlprofile.SemanticMethodPaymentsSendPaymentForm, func(ctx context.Context, req *tg.PaymentsSendPaymentFormRequest) (any, error) {
+		return r.onPaymentsSendPaymentForm(ctx, req)
 	})
 	registerRPC[*tg.PaymentsGetSavedStarGiftsRequest](d, tlprofile.SemanticMethodPaymentsGetSavedStarGifts, func(ctx context.Context, layerRequest *tg.PaymentsGetSavedStarGiftsRequest) (any, error) {
 		return r.onPaymentsGetSavedStarGifts(ctx, layerRequest)

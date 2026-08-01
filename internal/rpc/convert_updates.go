@@ -27,6 +27,9 @@ func tgUpdatesDifference(viewerUserID int64, diff domain.UpdateDifference) tg.Up
 				out.NewMessages = append(out.NewMessages, msg)
 				addMessageUsers(out, seenUsers, event.Message)
 			}
+			if balance := tgGiftStarsBalanceUpdate(event.Message); balance != nil {
+				out.OtherUpdates = append(out.OtherUpdates, balance)
+			}
 		case domain.UpdateEventReadHistoryInbox:
 			if update := tgReadHistoryInboxUpdate(event); update != nil {
 				out.OtherUpdates = append(out.OtherUpdates, update)

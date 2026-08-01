@@ -570,6 +570,9 @@ const (
 	// MessageServiceActionStarGift 映射 messageActionStarGift：收到一份 Star 礼物。
 	// 礼物快照（贴纸/星价）内嵌在 action 里，收礼人无需额外拉取即可渲染气泡。
 	MessageServiceActionStarGift MessageServiceActionKind = "star_gift"
+	// MessageServiceActionGiftStars maps messageActionGiftStars: fiat-purchased
+	// Stars credited directly to a friend, distinct from collectible Star Gifts.
+	MessageServiceActionGiftStars MessageServiceActionKind = "gift_stars"
 	// MessageServiceActionStarGiftUnique maps messageActionStarGiftUnique. The
 	// immutable collectible snapshot is carried by the service message so an
 	// exact replay/difference never depends on mutable catalog state.
@@ -659,9 +662,22 @@ type MessageServiceAction struct {
 	ChatThemeEmoticon     string                              `json:"chat_theme_emoticon,omitempty"`
 	NoForwards            *MessageNoForwardsAction            `json:"no_forwards,omitempty"`
 	StarGift              *MessageStarGiftAction              `json:"star_gift,omitempty"`
+	GiftStars             *MessageGiftStarsAction             `json:"gift_stars,omitempty"`
 	StarGiftUnique        *MessageStarGiftUniqueAction        `json:"star_gift_unique,omitempty"`
 	StarGiftOffer         *MessageStarGiftOfferAction         `json:"star_gift_offer,omitempty"`
 	StarGiftOfferDeclined *MessageStarGiftOfferDeclinedAction `json:"star_gift_offer_declined,omitempty"`
+}
+
+// MessageGiftStarsAction is the immutable service-message projection. The
+// recipient-only BalanceAfter field is not encoded in messageActionGiftStars;
+// it lets online push and offline difference attach the matching non-PTS
+// updateStarsBalance without querying mutable current state.
+type MessageGiftStarsAction struct {
+	Currency      string `json:"currency"`
+	Amount        int64  `json:"amount"`
+	Stars         int64  `json:"stars"`
+	TransactionID string `json:"transaction_id,omitempty"`
+	BalanceAfter  int64  `json:"balance_after"`
 }
 
 // MessageStarGiftAction 是 messageActionStarGift 的协议中立载荷：内嵌礼物快照（贴纸/星价）
