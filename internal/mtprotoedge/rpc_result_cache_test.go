@@ -187,8 +187,8 @@ func TestRPCResultCacheFairReservationLifecycleReturnsEveryScope(t *testing.T) {
 	}
 
 	cache.Put(auth, 1, 102, &encodedOutboundMessage{body: make([]byte, 2)})
-	if got := cache.completedBytes.snapshot(); got != 3 {
-		t.Fatalf("replacement did not resize global bytes: %d", got)
+	if got := cache.completedBytes.snapshot(); got != 5 {
+		t.Fatalf("duplicate publication changed immutable global bytes: %d", got)
 	}
 	now = now.Add(rpcResultCacheTTL + time.Second)
 	_, _ = cache.Get(auth, 1, 102)
@@ -536,7 +536,7 @@ func TestRPCResultCacheDuplicatePutPreservesCompletedExecutionMetadata(t *testin
 	cache.Put(keyID, sessionID, reqMsgID, second)
 
 	replay, err := cache.Acquire(keyID, sessionID, reqMsgID)
-	if err != nil || replay.state != rpcResultAcquireCompleted || replay.encoded != second ||
+	if err != nil || replay.state != rpcResultAcquireCompleted || replay.encoded != first ||
 		!replay.executionKnown || !replay.executionOK {
 		t.Fatalf("duplicate Put metadata = %#v, err=%v", replay, err)
 	}
@@ -609,18 +609,18 @@ func TestRPCResultCacheByteBudgetReturnsOnReplaceExpiryAndCapacity(t *testing.T)
 
 	cache.Put(keyID, 1, 101, &encodedOutboundMessage{body: make([]byte, 4)})
 	cache.Put(keyID, 1, 101, &encodedOutboundMessage{body: make([]byte, 7)})
-	if got := cache.completedBytes.snapshot(); got != 7 {
-		t.Fatalf("completed bytes after growing replacement = %d, want 7", got)
+	if got := cache.completedBytes.snapshot(); got != 4 {
+		t.Fatalf("completed bytes after duplicate publication = %d, want 4", got)
 	}
-	if usage := cache.fairBudget.sessionSnapshot(keyID, 1); usage.entries != 1 || usage.bytes != 7 {
-		t.Fatalf("replacement fair reservation after growth = %#v", usage)
+	if usage := cache.fairBudget.sessionSnapshot(keyID, 1); usage.entries != 1 || usage.bytes != 4 {
+		t.Fatalf("immutable fair reservation after duplicate = %#v", usage)
 	}
 	cache.Put(keyID, 1, 101, &encodedOutboundMessage{body: make([]byte, 2)})
-	if got := cache.completedBytes.snapshot(); got != 2 {
-		t.Fatalf("completed bytes after shrinking replacement = %d, want 2", got)
+	if got := cache.completedBytes.snapshot(); got != 4 {
+		t.Fatalf("completed bytes after second duplicate = %d, want 4", got)
 	}
-	if usage := cache.fairBudget.sessionSnapshot(keyID, 1); usage.entries != 1 || usage.bytes != 2 {
-		t.Fatalf("replacement fair reservation after shrink = %#v", usage)
+	if usage := cache.fairBudget.sessionSnapshot(keyID, 1); usage.entries != 1 || usage.bytes != 4 {
+		t.Fatalf("immutable fair reservation after second duplicate = %#v", usage)
 	}
 
 	now = now.Add(rpcResultCacheTTL + time.Second)
@@ -712,23 +712,19 @@ func TestRPCResultCacheByteCapacityReclaimsExpiredAcrossShards(t *testing.T) {
 }
 
 func TestRPCResultCacheServerOptionsPropagateFairLimits(t *testing.T) {
-	sessionBytes := int64(maxOutboundBodyBytes)
 	s := New(Options{
 		RPCGlobalMaxTasks:               6,
 		RPCResultCacheMaxEntries:        12,
-		RPCResultCacheMaxBytes:          sessionBytes + 2048,
 		RPCResultCacheAuthMaxEntries:    8,
-		RPCResultCacheAuthMaxBytes:      sessionBytes + 1024,
 		RPCResultCacheSessionMaxEntries: 4,
-		RPCResultCacheSessionMaxBytes:   sessionBytes,
 		RPCResultPendingPerAuth:         3,
 	})
-	if s.rpcResults.completedEntries.max != 12 || s.rpcResults.completedBytes.max != sessionBytes+2048 {
+	if s.rpcResults.completedEntries.max != 12 || s.rpcResults.completedBytes.max != 12 {
 		t.Fatalf("global option propagation = %d/%d", s.rpcResults.completedEntries.max, s.rpcResults.completedBytes.max)
 	}
 	budget := s.rpcResults.fairBudget
-	if budget.authLimit.entries != 8 || budget.authLimit.bytes != sessionBytes+1024 ||
-		budget.sessionLimit.entries != 4 || budget.sessionLimit.bytes != sessionBytes || budget.pendingPerAuth != 3 {
+	if budget.authLimit.entries != 8 || budget.authLimit.bytes != 8 ||
+		budget.sessionLimit.entries != 4 || budget.sessionLimit.bytes != 4 || budget.pendingPerAuth != 3 {
 		t.Fatalf("fair option propagation = auth:%#v session:%#v pending:%d",
 			budget.authLimit, budget.sessionLimit, budget.pendingPerAuth)
 	}
@@ -738,11 +734,8 @@ func TestRPCResultCacheServerOptionsFailFast(t *testing.T) {
 	base := Options{
 		RPCGlobalMaxTasks:               6,
 		RPCResultCacheMaxEntries:        12,
-		RPCResultCacheMaxBytes:          64 << 20,
 		RPCResultCacheAuthMaxEntries:    8,
-		RPCResultCacheAuthMaxBytes:      32 << 20,
 		RPCResultCacheSessionMaxEntries: 4,
-		RPCResultCacheSessionMaxBytes:   16 << 20,
 		RPCResultPendingPerAuth:         3,
 	}
 	tests := []struct {
@@ -750,7 +743,6 @@ func TestRPCResultCacheServerOptionsFailFast(t *testing.T) {
 		mutate func(*Options)
 	}{
 		{name: "entry hierarchy", mutate: func(o *Options) { o.RPCResultCacheAuthMaxEntries = 13 }},
-		{name: "body does not fit session", mutate: func(o *Options) { o.RPCResultCacheSessionMaxBytes = maxOutboundBodyBytes - 1 }},
 		{name: "pending hierarchy", mutate: func(o *Options) { o.RPCResultPendingPerAuth = 7 }},
 	}
 	for _, test := range tests {

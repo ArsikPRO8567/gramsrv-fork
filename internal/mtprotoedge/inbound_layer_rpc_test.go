@@ -541,7 +541,7 @@ func TestBatchProvisionalCursorKeepsRegistryWatermarkAcrossOldReplay(t *testing.
 		t.Fatalf("old owner err=%v", err)
 	}
 	oldClaim.owner.CompleteExecution(true)
-	s.rpcResults.Put(authKeyID, sessionID, 100, &encodedOutboundMessage{body: []byte{1}, reqMsgID: 100})
+	storeLogicalRPCResultForTest(t, s, c, 100, &encodedOutboundMessage{body: []byte{1}, reqMsgID: 100})
 
 	nakedBody := exactOutboundLayerRPCBody(t, tlprofile.Profile227, &tg.MessagesGetHistoryRequest{
 		Peer: &tg.InputPeerSelf{}, Limit: 1,
@@ -559,6 +559,131 @@ func TestBatchProvisionalCursorKeepsRegistryWatermarkAcrossOldReplay(t *testing.
 	}
 	if profile, ok := s.rpcResults.ExactAdmissionProfile(authKeyID, sessionID, 108); !ok || profile != tlprofile.Profile227 {
 		t.Fatalf("following naked admission profile = (%d,%v), want registry Layer 227", profile, ok)
+	}
+}
+
+func TestAcknowledgedExactRPCReleasesReplayReceipt(t *testing.T) {
+	handler := &replayProfileCaptureLayerRPC{admissionOnlyLayerRPC: newAdmissionOnlyLayerRPC()}
+	s := New(Options{DC: 2, LayerRPC: handler})
+	authKeyID := [8]byte{0x31, 0xa1}
+	const sessionID, reqMsgID = int64(3191), int64(100)
+	body := exactLayerRPCBody(t, &tg.InvokeWithLayerRequest{
+		Layer: 225, Query: &tg.HelpGetConfigRequest{},
+	})
+	admitted, _, err := s.decodeInboundLayerRPC(
+		LayerProfileSnapshot{Profile: tlprofile.Profile225, Origin: LayerProfileExplicit}, body,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner, err := s.rpcResults.AcquireLayerIdentified(
+		authKeyID, sessionID, reqMsgID,
+		admitted.Call().Profile(), admitted.Prepared().Identity(),
+	)
+	if err != nil || owner.state != rpcResultAcquireOwner {
+		t.Fatalf("owner = %#v, err=%v", owner, err)
+	}
+	owner.owner.CompleteExecution(true)
+	logical := &Conn{authKeyID: authKeyID, sessionID: sessionID}
+	storeLogicalRPCResultForTest(t, s, logical, reqMsgID, &encodedOutboundMessage{
+		body: make([]byte, 32), reqMsgID: reqMsgID,
+	})
+	acknowledgeLogicalRPCResultForTest(t, s, logical, reqMsgID)
+
+	replacement := &Conn{authKeyID: authKeyID, sessionID: sessionID, metrics: NopMetrics{}}
+	replacement.startInboundRPCScheduler(s.rpcScheduler, 1, 8, time.Second)
+	defer replacement.Close()
+	plan := &inboundPlan{items: []inboundItem{{kind: inboundItemRPC, msgID: reqMsgID, body: body}}}
+	defer plan.close()
+	if err := s.prepareInboundLayerRPCBatch(context.Background(), replacement, plan); err != nil {
+		t.Fatal(err)
+	}
+	if plan.items[0].kind != inboundItemRPC || plan.items[0].payload == nil {
+		t.Fatalf("post-ACK request = kind:%d payload:%T", plan.items[0].kind, plan.items[0].payload)
+	}
+	if len(plan.rpcTasks) != 1 || len(plan.rpcOwners) != 1 || len(plan.rewrapAliases) != 0 || plan.rpcReservation == nil {
+		t.Fatalf("post-ACK request scheduling: tasks=%d owners=%d aliases=%d reservation=%v",
+			len(plan.rpcTasks), len(plan.rpcOwners), len(plan.rewrapAliases), plan.rpcReservation != nil)
+	}
+	if profiles, known := handler.capturedProfiles(); len(profiles) != 0 || len(known) != 0 {
+		t.Fatalf("ACKed duplicate ran replay side effects: profiles=%v known=%v", profiles, known)
+	}
+	claim, err := s.rpcResults.AcquireLayerIdentified(
+		authKeyID, sessionID, reqMsgID,
+		admitted.Call().Profile(), admitted.Prepared().Identity(),
+	)
+	if err != nil || claim.state != rpcResultAcquirePending || claim.admissionSeq == owner.admissionSeq {
+		t.Fatalf("post-ACK claim after preflight = %#v, err=%v", claim, err)
+	}
+}
+
+func TestAcknowledgedExactInitRewrapReleasesReplayReceipt(t *testing.T) {
+	handler := &replayProfileCaptureLayerRPC{admissionOnlyLayerRPC: newAdmissionOnlyLayerRPC()}
+	s := New(Options{DC: 2, LayerRPC: handler})
+	authKeyID := [8]byte{0x31, 0xa2}
+	const sessionID, oldReqID, newReqID = int64(3192), int64(100), int64(104)
+	c := &Conn{authKeyID: authKeyID, sessionID: sessionID, metrics: NopMetrics{}}
+	if err := c.SeedInheritedLayerProfile(tlprofile.Profile227); err != nil {
+		t.Fatal(err)
+	}
+	c.startInboundRPCScheduler(s.rpcScheduler, 1, 8, time.Second)
+	defer c.Close()
+
+	inner := exactOutboundLayerRPCBody(t, tlprofile.Profile227, &tg.HelpGetConfigRequest{})
+	oldPlan := &inboundPlan{items: []inboundItem{{kind: inboundItemRPC, msgID: oldReqID, body: inner}}}
+	defer oldPlan.close()
+	if err := s.prepareInboundLayerRPCBatch(context.Background(), c, oldPlan); err != nil {
+		t.Fatal(err)
+	}
+	if len(oldPlan.rpcOwners) != 1 || s.rpcRewrap.total != 1 {
+		t.Fatalf("old exact candidate = owners:%d candidates:%d", len(oldPlan.rpcOwners), s.rpcRewrap.total)
+	}
+
+	wrapped := exactLayerRPCBody(t, &tg.InvokeWithLayerRequest{
+		Layer: 227,
+		Query: &tg.InitConnectionRequest{
+			APIID: 6, DeviceModel: "Pixel", SystemVersion: "SDK 36", AppVersion: "12.8.1",
+			SystemLangCode: "en", LangPack: "android", LangCode: "en",
+			Query: &tg.HelpGetConfigRequest{},
+		},
+	})
+	admitted, _, err := s.decodeInboundLayerRPC(
+		LayerProfileSnapshot{Profile: tlprofile.Profile227, Origin: LayerProfileExplicit}, wrapped,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	newOwner, err := s.rpcResults.AcquireLayerIdentified(
+		authKeyID, sessionID, newReqID,
+		admitted.Call().Profile(), admitted.Prepared().Identity(),
+	)
+	if err != nil || newOwner.state != rpcResultAcquireOwner {
+		t.Fatalf("new exact receipt owner = %#v, err=%v", newOwner, err)
+	}
+	newOwner.owner.CompleteExecution(true)
+	storeLogicalRPCResultForTest(t, s, c, newReqID, &encodedOutboundMessage{
+		body: make([]byte, 32), reqMsgID: newReqID,
+	})
+	acknowledgeLogicalRPCResultForTest(t, s, c, newReqID)
+	// In the real delivery path a successful rewrap commits its source candidate.
+	// Clear the synthetic pending candidate before observing post-ACK admission.
+	s.rpcRewrap.clearSession(c)
+
+	newPlan := &inboundPlan{items: []inboundItem{{kind: inboundItemRPC, msgID: newReqID, body: wrapped}}}
+	defer newPlan.close()
+	if err := s.prepareInboundLayerRPCBatch(context.Background(), c, newPlan); err != nil {
+		t.Fatal(err)
+	}
+	if newPlan.items[0].kind != inboundItemRPC || newPlan.items[0].payload == nil ||
+		len(newPlan.rpcTasks) != 1 || len(newPlan.rpcOwners) != 1 || len(newPlan.rewrapAliases) != 0 {
+		t.Fatalf("post-ACK init request scheduling: kind=%d tasks=%d owners=%d aliases=%d",
+			newPlan.items[0].kind, len(newPlan.rpcTasks), len(newPlan.rpcOwners), len(newPlan.rewrapAliases))
+	}
+	if s.rpcRewrap.total != 0 {
+		t.Fatalf("ACKed exact init rewrap left %d candidates", s.rpcRewrap.total)
+	}
+	if profiles, known := handler.capturedProfiles(); len(profiles) != 0 || len(known) != 0 {
+		t.Fatalf("ACKed exact init rewrap ran replay side effects: profiles=%v known=%v", profiles, known)
 	}
 }
 
@@ -921,7 +1046,7 @@ func TestInvariantReplayNeverCachesInternalCanonicalProfile(t *testing.T) {
 	}
 
 	owner.CompleteExecution(true)
-	s.rpcResults.Put(authKeyID, sessionID, 100, &encodedOutboundMessage{body: []byte{1}, reqMsgID: 100})
+	storeLogicalRPCResultForTest(t, s, original, 100, &encodedOutboundMessage{body: []byte{1}, reqMsgID: 100})
 	if profile, ok := s.rpcResults.ExactAdmissionProfile(authKeyID, sessionID, 100); ok || profile != 0 {
 		t.Fatalf("completed invariant cached profile=(%d,%v)", profile, ok)
 	}
@@ -1121,7 +1246,7 @@ func TestOldCompletedLayerRequestCannotRollBackCorrectedSession(t *testing.T) {
 		t.Fatal("old request did not acquire owner")
 	}
 	oldOwner.CompleteExecution(true)
-	s.rpcResults.Put(authKeyID, sessionID, 100, &encodedOutboundMessage{body: []byte{1}, reqMsgID: 100})
+	storeLogicalRPCResultForTest(t, s, c, 100, &encodedOutboundMessage{body: []byte{1}, reqMsgID: 100})
 
 	correctPlan := &inboundPlan{items: []inboundItem{{
 		kind: inboundItemRPC, msgID: 104,
@@ -1187,7 +1312,7 @@ func TestLogicalSessionLayerWatermarkSurvivesResultExpiryAndOldContainer(t *test
 	if oldOwner == nil || !oldOwner.CompleteExecution(true) {
 		t.Fatal("old Layer 225 request did not establish a completed owner")
 	}
-	s.rpcResults.Put(authKeyID, sessionID, oldMsgID, &encodedOutboundMessage{body: []byte{1}, reqMsgID: oldMsgID})
+	storeLogicalRPCResultForTest(t, s, original, oldMsgID, &encodedOutboundMessage{body: []byte{1}, reqMsgID: oldMsgID})
 
 	correctPlan := &inboundPlan{items: []inboundItem{{
 		kind: inboundItemRPC, msgID: correctedMsgID,

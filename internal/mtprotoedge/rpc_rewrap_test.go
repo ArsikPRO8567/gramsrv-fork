@@ -1,6 +1,7 @@
 package mtprotoedge
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"errors"
@@ -445,7 +446,7 @@ func TestInitRewrapAfterWritingReplaysWithoutBusinessExecution(t *testing.T) {
 	if !oldOwner.HandOff() {
 		t.Fatal("old owner handoff failed")
 	}
-	s.rpcResults.Put(c.authKeyID, c.sessionID, oldReqID, encoded)
+	storeLogicalRPCResultForTest(t, s, c, oldReqID, encoded)
 
 	deadline := time.Now().Add(2 * time.Second)
 	var replayed *encodedOutboundMessage
@@ -534,7 +535,7 @@ func TestInitRewrapAliasesExecutionAndRetargetsQueuedResult(t *testing.T) {
 		t.Fatal("old owner handoff failed")
 	}
 	encoded.markDelivered()
-	s.rpcResults.Put(c.authKeyID, c.sessionID, oldReqID, encoded)
+	storeLogicalRPCResultForTest(t, s, c, oldReqID, encoded)
 
 	var (
 		aliased *encodedOutboundMessage
@@ -772,7 +773,7 @@ func TestRetargetedRPCRestoreIsOrderedAndIndependentOfGlobalHookExecutor(t *test
 		t.Fatalf("retargeted physical req_msg_id = %d, want %d", got, newReqID)
 	}
 	encoded.markDelivered()
-	s.rpcResults.Put(c.authKeyID, c.sessionID, oldReqID, encoded)
+	storeLogicalRPCResultForTest(t, s, c, oldReqID, encoded)
 
 	deadline := time.Now().Add(time.Second)
 	for order.Load() != 2 && time.Now().Before(deadline) {
@@ -1108,7 +1109,8 @@ func TestRPCRewrapSubscriberPanicCannotLoseClaimedLogicalHook(t *testing.T) {
 	if pending != 0 {
 		t.Fatalf("restore barriers after subscriber panic = %d, want 0", pending)
 	}
-	if cached, ok := s.rpcResults.Get(c.authKeyID, c.sessionID, reqMsgID); !ok || cached != encoded {
-		t.Fatalf("completed result after subscriber panic = (%p, %v), want (%p, true)", cached, ok, encoded)
+	if cached, ok := s.rpcResults.Get(c.authKeyID, c.sessionID, reqMsgID); !ok ||
+		cached.delivery != encoded.delivery || !bytes.Equal(cached.body, encoded.body) || cached.replayMsgID == 0 {
+		t.Fatalf("logical outbox result after subscriber panic = (%p, %v), source=%p", cached, ok, encoded)
 	}
 }

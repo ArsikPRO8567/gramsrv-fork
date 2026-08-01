@@ -171,6 +171,10 @@ func notifySessionDestroyed(observer SessionLifecycleObserver, authKeyID [8]byte
 type SessionManager struct {
 	mu        sync.RWMutex
 	bySession map[sessionKey]*Conn
+	// logicalSessions owns MTProto resend state independently of physical Conn
+	// generations. It is bounded by the Server-wide tracked-body budget and a
+	// short offline retention window; ACK and destroy release bodies immediately.
+	logicalSessions map[sessionKey]*logicalSession
 	// claims owns the provisional -> active gap. A claimant is intentionally
 	// absent from every push/online index until its required session control frame
 	// is on the wire and PublishActivation validates the same owner.
@@ -188,6 +192,7 @@ type SessionManager struct {
 	pending                map[sessionKey][]queuedPush // updates-ready 前暂存的主动推送
 	flushing               map[sessionKey]bool         // 置位时暂存正在排空的 session；排空完成前推送继续进 pending 保序
 	pendingBudget          *outboundTrackedBudget      // 未就绪 session 暂存 encoded body 的进程级上限
+	logicalSessionReleased func(sessionKey)
 
 	lifecycle SessionLifecycleObserver
 	log       *zap.Logger
@@ -200,6 +205,7 @@ func NewSessionManager(log *zap.Logger) *SessionManager {
 	}
 	return &SessionManager{
 		bySession:              make(map[sessionKey]*Conn),
+		logicalSessions:        make(map[sessionKey]*logicalSession),
 		claims:                 make(map[sessionKey]*Conn),
 		claimsByAuth:           make(map[[8]byte]map[int64]*Conn),
 		byAuthKey:              make(map[[8]byte]map[int64]*Conn),
@@ -222,6 +228,12 @@ func NewSessionManager(log *zap.Logger) *SessionManager {
 func (m *SessionManager) SetLifecycleObserver(observer SessionLifecycleObserver) {
 	m.mu.Lock()
 	m.lifecycle = observer
+	m.mu.Unlock()
+}
+
+func (m *SessionManager) setLogicalSessionReleaseHook(hook func(sessionKey)) {
+	m.mu.Lock()
+	m.logicalSessionReleased = hook
 	m.mu.Unlock()
 }
 
@@ -634,6 +646,7 @@ func (m *SessionManager) AbortActivation(c *Conn) {
 			m.deletePendingLocked(key)
 			delete(m.flushing, key)
 		}
+		m.markLogicalSessionOfflineLocked(key, time.Now())
 		owned = true
 	}
 	m.mu.Unlock()
@@ -677,6 +690,7 @@ func (m *SessionManager) Unregister(c *Conn) {
 			zap.Int("online", len(m.bySession)),
 		)
 	}
+	m.markLogicalSessionOfflineLocked(key, time.Now())
 	m.mu.Unlock()
 	if observer != nil {
 		observer.SessionOffline(c.authKeyID, c.sessionID, offlineUser, lastForUser)
@@ -692,6 +706,7 @@ func (m *SessionManager) DestroySessionForAuthKey(authKeyID [8]byte, sessionID i
 	if !ok {
 		if claim := m.claims[key]; claim != nil {
 			m.retireClaimLocked(key, claim, true)
+			outbound := m.destroyLogicalSessionLocked(key)
 			m.mu.Unlock()
 			if !forceCloseConnBatch([]*Conn{claim}, forceCloseBatchTimeout) {
 				m.log.Warn("Claimed session close exceeded shared deadline",
@@ -699,15 +714,23 @@ func (m *SessionManager) DestroySessionForAuthKey(authKeyID [8]byte, sessionID i
 					zap.Int64("session_id", sessionID),
 				)
 			}
+			if outbound != nil {
+				m.releaseLogicalSession(key, outbound)
+			}
 			notifySessionDestroyed(observer, authKeyID, sessionID)
 			return true
 		}
 		m.deletePendingLocked(key)
+		outbound := m.destroyLogicalSessionLocked(key)
 		m.mu.Unlock()
+		if outbound != nil {
+			m.releaseLogicalSession(key, outbound)
+		}
 		notifySessionDestroyed(observer, authKeyID, sessionID)
 		return false
 	}
 	offlineUser := m.retireConnLocked(c, true)
+	outbound := m.destroyLogicalSessionLocked(key)
 	lastForUser := offlineUser != 0 && len(m.byUser[offlineUser]) == 0
 	m.log.Debug("Session destroyed",
 		zap.String("auth_key_id", sessionKeyLog(authKeyID)),
@@ -720,6 +743,9 @@ func (m *SessionManager) DestroySessionForAuthKey(authKeyID [8]byte, sessionID i
 			zap.String("auth_key_id", sessionKeyLog(authKeyID)),
 			zap.Int64("session_id", sessionID),
 		)
+	}
+	if outbound != nil {
+		m.releaseLogicalSession(key, outbound)
 	}
 	if observer != nil && offlineUser != 0 {
 		observer.SessionOffline(authKeyID, sessionID, offlineUser, lastForUser)
@@ -815,6 +841,7 @@ func (m *SessionManager) bindAuthKeyLocked(c *Conn, key sessionKey, authKeyID [8
 		removeBusinessAuthKeyIndex(m.byBusinessAuthKey, oldAuthKeyID, key)
 	}
 	c.SetBusinessAuthKeyID(authKeyID)
+	m.bindLogicalSessionAuthKeyLocked(key, authKeyID)
 	addBusinessAuthKeyIndex(m.byBusinessAuthKey, authKeyID, key, c)
 	if changed {
 		if oldUserID != 0 {
@@ -865,6 +892,7 @@ func (m *SessionManager) CloseSessionsForBusinessAuthKey(authKeyID [8]byte) int 
 	m.mu.Lock()
 	var conns []*Conn
 	var events []offlineEvent
+	var logicalRelease []*logicalSession
 	for key, c := range m.businessAuthKeyCandidatesLocked(authKeyID) {
 		if !connUsesBusinessAuthKey(c, authKeyID) {
 			continue
@@ -880,6 +908,14 @@ func (m *SessionManager) CloseSessionsForBusinessAuthKey(authKeyID [8]byte) int 
 		m.retireClaimLocked(key, c, true)
 		conns = append(conns, c)
 	}
+	for key, logical := range m.logicalSessions {
+		if logical == nil || (key.authKeyID != authKeyID &&
+			(!logical.businessAuthResolved || logical.businessAuthKeyID != authKeyID)) {
+			continue
+		}
+		delete(m.logicalSessions, key)
+		logicalRelease = append(logicalRelease, logical)
+	}
 	observer := m.lifecycle
 	if len(conns) > 0 {
 		m.log.Debug("Force close sessions for revoked auth key",
@@ -893,6 +929,9 @@ func (m *SessionManager) CloseSessionsForBusinessAuthKey(authKeyID [8]byte) int 
 			zap.String("auth_key_id", sessionKeyLog(authKeyID)),
 			zap.Int("sessions", len(conns)),
 		)
+	}
+	for _, logical := range logicalRelease {
+		m.releaseLogicalSession(logical.key, logical.outbound)
 	}
 	if observer != nil {
 		for _, e := range events {
@@ -2567,6 +2606,7 @@ func (m *SessionManager) RunPendingSweeper(ctx context.Context, interval time.Du
 		case <-ticker.C:
 		}
 		m.sweepStalePending()
+		m.sweepLogicalSessions(time.Now())
 	}
 }
 

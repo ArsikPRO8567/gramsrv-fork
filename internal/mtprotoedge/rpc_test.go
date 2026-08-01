@@ -118,7 +118,7 @@ func TestLayerRPCGetConfigUsesExactAdmittedProfile(t *testing.T) {
 	}
 }
 
-func TestInboundRPCQueueFullReturnsFloodWait(t *testing.T) {
+func TestInboundRPCQueueFullReturnsWorkerBusy(t *testing.T) {
 	const dc = 2
 	handler := &blockingRPC{
 		started: make(chan struct{}, 1),
@@ -152,8 +152,8 @@ func TestInboundRPCQueueFullReturnsFloodWait(t *testing.T) {
 	if err := rpcErr.Decode(&bin.Buffer{Buf: result.Result}); err != nil {
 		t.Fatalf("decode rpc_error: %v", err)
 	}
-	if rpcErr.ErrorCode != 420 || rpcErr.ErrorMessage != "FLOOD_WAIT_1" {
-		t.Fatalf("rpc_error = %d %q, want 420 FLOOD_WAIT_1", rpcErr.ErrorCode, rpcErr.ErrorMessage)
+	if rpcErr.ErrorCode != rpcWorkerBusyErrorCode || rpcErr.ErrorMessage != rpcWorkerBusyErrorMessage {
+		t.Fatalf("rpc_error = %d %q, want %d %s", rpcErr.ErrorCode, rpcErr.ErrorMessage, rpcWorkerBusyErrorCode, rpcWorkerBusyErrorMessage)
 	}
 	close(handler.release)
 }

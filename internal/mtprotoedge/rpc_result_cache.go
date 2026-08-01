@@ -2,6 +2,7 @@ package mtprotoedge
 
 import (
 	"container/list"
+	"context"
 	"encoding/binary"
 	"hash/maphash"
 	"sync"
@@ -26,12 +27,6 @@ const (
 	rpcResultCacheSessionMaxEntries  = 1 << 14
 	rpcResultCacheSessionMaxBytes    = 16 << 20
 	rpcResultFlightMaxPendingPerAuth = 1 << 11
-	// Keep every transport-legal rpc_result cacheable. Converting the constant
-	// difference to uint64 intentionally fails compilation if a future transport
-	// limit grows beyond the completed-result budget.
-	_ = uint64(rpcResultCacheMaxBytes - maxOutboundBodyBytes)
-	_ = uint64(rpcResultCacheAuthMaxBytes - maxOutboundBodyBytes)
-	_ = uint64(rpcResultCacheSessionMaxBytes - maxOutboundBodyBytes)
 	// rpcResultCacheShards hashes the complete replay identity with a random
 	// per-instance maphash seed. Including req_msg_id spreads one hot session's
 	// independent requests instead of forcing them through one mutex. The shard
@@ -46,7 +41,10 @@ type rpcResultCacheKey struct {
 }
 
 type rpcResultCacheEntry struct {
-	key            rpcResultCacheKey
+	key rpcResultCacheKey
+	// encoded is used only by legacy focused constructors whose cache has no
+	// SessionManager. Production rows are metadata receipts and always leave it
+	// nil; exact bytes have one owner in the logical-session outbox.
 	encoded        *encodedOutboundMessage
 	size           int
 	expiresAt      time.Time
@@ -54,6 +52,10 @@ type rpcResultCacheEntry struct {
 	admissionSeq   uint64
 	executionKnown bool
 	executionOK    bool
+	// acknowledged exists only for the ACK-before-Put race. A completed row is
+	// removed immediately on ACK; unlike the previous design, success receipts
+	// are not retained for the rest of the 331-second horizon.
+	acknowledged bool
 	// capacity marks a bounded replay tombstone. The original owner and its
 	// already-joined waiters received encoded, but the byte budget could not
 	// retain that body. Keeping the immutable identity until TTL prevents a
@@ -84,6 +86,10 @@ type rpcResultCache struct {
 	flightLimit         rpcResultFlightLimit
 	subscriberBudget    *rpcResultSubscriberBudget
 	subscriberPerFlight int
+	// sessions is the production payload source. Completed ledger rows retain
+	// only request identity/outcome/TTL metadata; exact bytes stay solely in the
+	// logical-session unacked outbox. Nil is kept as a legacy unit-test seam.
+	sessions *SessionManager
 	// nextAdmissionSeq is the process-wide ordering authority for auth-key
 	// shared Layer defaults. Exact owners allocate once; joins/replays retain the
 	// owner's value from their flight/completed descriptor.
@@ -172,6 +178,7 @@ type rpcResultCacheCapacity struct {
 	subscriberMaxAuth      int
 	subscriberMaxSession   int
 	subscriberMaxPerFlight int
+	sessions               *SessionManager
 }
 
 func newRPCResultCacheWithFairCapacity(now func() time.Time, capacity rpcResultCacheCapacity) *rpcResultCache {
@@ -214,7 +221,7 @@ func newRPCResultCacheWithFairCapacity(now func() time.Time, capacity rpcResultC
 	if capacity.subscriberMaxPerFlight <= 0 {
 		capacity.subscriberMaxPerFlight = rpcResultSubscriberMaxPerFlight
 	}
-	c := &rpcResultCache{hashSeed: maphash.MakeSeed()}
+	c := &rpcResultCache{hashSeed: maphash.MakeSeed(), sessions: capacity.sessions}
 	c.completedBytes.max = capacity.globalMaxBytes
 	c.completedEntries.max = int64(capacity.globalMaxEntries)
 	c.flightLimit.max = int64(capacity.maxPending)
@@ -267,21 +274,62 @@ func (c *rpcResultCache) Get(authKeyID [8]byte, sessionID, reqMsgID int64) (*enc
 	now := s.now()
 
 	s.mu.Lock()
-	defer s.mu.Unlock()
 
 	elem, ok := s.byKey[key]
 	if !ok {
+		s.mu.Unlock()
 		return nil, false
 	}
 	entry := elem.Value.(*rpcResultCacheEntry)
 	if !entry.expiresAt.After(now) {
 		s.removeElement(elem)
+		s.mu.Unlock()
 		return nil, false
 	}
-	if entry.capacity || entry.encoded == nil {
+	if entry.capacity || entry.acknowledged {
+		s.mu.Unlock()
 		return nil, false
 	}
-	return entry.encoded, true
+	if c.sessions != nil {
+		s.mu.Unlock()
+		return c.sessions.rpcResult(authKeyID, sessionID, reqMsgID)
+	}
+	encoded := entry.encoded
+	s.mu.Unlock()
+	return encoded, encoded != nil
+}
+
+// Acknowledge removes a completed rpc_result receipt immediately.
+// The caller must have resolved reqMsgID from a client msgs_ack through the
+// sole outbound actor's tracked server-message mapping; an untrusted request
+// msg_id must never call this method directly.
+//
+// ACK can race the asynchronous terminal Put. A pending flight records the
+// event so Put resolves current waiters but does not retain a completed row.
+// This follows the logical-session model: once the client has acknowledged the
+// exact server message, neither its payload nor its duplicate receipt is useful.
+func (c *rpcResultCache) Acknowledge(authKeyID [8]byte, sessionID, reqMsgID int64) bool {
+	if c == nil || reqMsgID == 0 {
+		return false
+	}
+	key := rpcResultCacheKey{authKeyID: authKeyID, sessionID: sessionID, reqMsgID: reqMsgID}
+	s := c.shard(key)
+	now := s.now()
+	s.mu.Lock()
+	s.expireLocked(now)
+
+	if elem := s.byKey[key]; elem != nil {
+		s.removeElement(elem)
+		s.mu.Unlock()
+		return true
+	}
+	if flight := s.pending[key]; flight != nil {
+		flight.acknowledged = true
+		s.mu.Unlock()
+		return true
+	}
+	s.mu.Unlock()
+	return false
 }
 
 // ObserveDependency returns a waiter for an admitted in-flight dependency, a
@@ -337,7 +385,15 @@ func (c *rpcResultCache) Put(authKeyID [8]byte, sessionID, reqMsgID int64, encod
 func (c *rpcResultCache) putOnce(authKeyID [8]byte, sessionID, reqMsgID int64, encoded *encodedOutboundMessage) bool {
 	key := rpcResultCacheKey{authKeyID: authKeyID, sessionID: sessionID, reqMsgID: reqMsgID}
 	s := c.shard(key)
+	logicalOutbox := c.sessions != nil
+	logicalReplayable := false
+	if logicalOutbox {
+		_, logicalReplayable = c.sessions.rpcResult(authKeyID, sessionID, reqMsgID)
+	}
 	accountedSize := len(encoded.body)
+	if logicalOutbox {
+		accountedSize = 1
+	}
 	if accountedSize < 1 {
 		// Every owner reserves one byte at admission. Keeping zero-length results
 		// at the same minimum makes entry and byte capacity linearizable.
@@ -361,17 +417,17 @@ func (c *rpcResultCache) putOnce(authKeyID [8]byte, sessionID, reqMsgID int64, e
 		return true
 	}
 
-	identity, admissionSeq, executionKnown, executionOK := rpcResultFlightMetadataLocked(s, key)
+	identity, admissionSeq, executionKnown, executionOK, acknowledged := rpcResultFlightMetadataLocked(s, key)
 	var oldEntry *rpcResultCacheEntry
 	if old != nil {
 		oldEntry = old.Value.(*rpcResultCacheEntry)
 		if flight == nil {
-			// A defensive duplicate terminal publication must never downgrade
-			// completed dependency/identity metadata after its flight disappeared.
-			identity = oldEntry.identity
-			admissionSeq = oldEntry.admissionSeq
-			executionKnown = oldEntry.executionKnown
-			executionOK = oldEntry.executionOK
+			// The first terminal publication is immutable, whether it retained an
+			// legacy inline body, receipt or capacity tombstone. A
+			// stale callback must not replace exact bytes, extend TTL, resurrect an
+			// ACKed body or valid receipt.
+			s.mu.Unlock()
+			return true
 		}
 	}
 
@@ -396,7 +452,24 @@ func (c *rpcResultCache) putOnce(authKeyID [8]byte, sessionID, reqMsgID int64, e
 	retainedSize := accountedSize
 	retained := encoded
 	capacity := false
-	if !reservation.resizeBytes(accountedSize) {
+	if acknowledged {
+		const receiptSize = 1
+		if !reservation.resizeBytes(receiptSize) {
+			s.mu.Unlock()
+			panic("mtprotoedge: acknowledged rpc result owner lost its receipt reservation")
+		}
+		retainedSize = receiptSize
+		retained = nil
+	} else if logicalOutbox {
+		const receiptSize = 1
+		if !reservation.resizeBytes(receiptSize) {
+			s.mu.Unlock()
+			panic("mtprotoedge: logical rpc result owner lost its receipt reservation")
+		}
+		retainedSize = receiptSize
+		retained = nil
+		capacity = !logicalReplayable
+	} else if !reservation.resizeBytes(accountedSize) {
 		if flight == nil {
 			// A direct replacement cannot discard the prior replay body. Leave it
 			// untouched and let Put perform one cross-shard expiry reap before its
@@ -436,6 +509,7 @@ func (c *rpcResultCache) putOnce(authKeyID [8]byte, sessionID, reqMsgID int64, e
 		admissionSeq:   admissionSeq,
 		executionKnown: executionKnown,
 		executionOK:    executionOK,
+		acknowledged:   acknowledged,
 		capacity:       capacity,
 		reservation:    reservation,
 	}
@@ -446,6 +520,11 @@ func (c *rpcResultCache) putOnce(authKeyID [8]byte, sessionID, reqMsgID int64, e
 	// Resolve the independent in-flight entry only after either the completed
 	// result or its replay tombstone is published under the same shard lock.
 	subscribers, executionSubscribers, executionOK := c.completeRPCResultFlightLocked(s, key, encoded)
+	if acknowledged {
+		// ACK won before terminal publication. Current subscribers still receive
+		// encoded below, but no post-ACK receipt survives this critical section.
+		s.removeElement(elem)
+	}
 	s.mu.Unlock()
 	for _, subscriber := range subscribers {
 		subscriber(encoded, true)
@@ -461,11 +540,12 @@ func rpcResultFlightMetadataLocked(s *rpcResultCacheShard, key rpcResultCacheKey
 	uint64,
 	bool,
 	bool,
+	bool,
 ) {
 	if flight := s.pending[key]; flight != nil {
-		return flight.identity, flight.admissionSeq, flight.executionDone, flight.executionOK
+		return flight.identity, flight.admissionSeq, flight.executionDone, flight.executionOK, flight.acknowledged
 	}
-	return rpcResultRequestIdentity{}, 0, false, false
+	return rpcResultRequestIdentity{}, 0, false, false, false
 }
 
 // expireCompletedResults performs the cold-path cross-shard reap used only
@@ -480,6 +560,37 @@ func (c *rpcResultCache) expireCompletedResults() {
 		s := &c.shards[i]
 		s.mu.Lock()
 		s.expireLocked(s.now())
+		s.mu.Unlock()
+	}
+}
+
+func (c *rpcResultCache) Close() error {
+	return nil
+}
+
+func (c *rpcResultCache) CloseContext(context.Context) error {
+	return nil
+}
+
+// forgetCompletedSession removes every terminal receipt for a logical session.
+// SessionManager invokes it only after the session's physical producers have
+// converged, so no pending owner should remain and no later terminal callback
+// can recreate a receipt for the destroyed outbox.
+func (c *rpcResultCache) forgetCompletedSession(authKeyID [8]byte, sessionID int64) {
+	if c == nil {
+		return
+	}
+	for i := range c.shards {
+		s := &c.shards[i]
+		s.mu.Lock()
+		for elem := s.order.Front(); elem != nil; {
+			next := elem.Next()
+			entry := elem.Value.(*rpcResultCacheEntry)
+			if entry.key.authKeyID == authKeyID && entry.key.sessionID == sessionID {
+				s.removeElement(elem)
+			}
+			elem = next
+		}
 		s.mu.Unlock()
 	}
 }

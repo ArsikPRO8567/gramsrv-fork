@@ -108,6 +108,9 @@ type Conn struct {
 	outboundControlBudgetOnce    sync.Once
 	outboundScratchPool          *outboundScratchPool
 	outboundScratchOnce          sync.Once
+	// outboundState outlives this physical Conn generation. A replacement
+	// physical connection for the same auth key/session reuses it.
+	outboundState *outboundState
 	// lifecycle is the sole monotonic activation/retirement state machine.
 	// retired never transitions back to claiming/active; one atomic state avoids
 	// contradictory activation and shutdown observations.
@@ -150,7 +153,8 @@ type Conn struct {
 	rpcRootCtx     context.Context
 	rpcMaxInflight int
 
-	// sentContentMessages 只由 outbound actor 访问，用于生成 MTProto seq_no。
+	// sentContentMessages is retained only for standalone construction tests.
+	// Server connections allocate seq_no from logical-session outboundState.
 	sentContentMessages int32
 	// outboundRand 只由 outbound actor 访问：对 cipher 随机源的缓冲预读，
 	// 把每帧 padding 的 getrandom syscall 摊薄成 ~1KiB 一次。

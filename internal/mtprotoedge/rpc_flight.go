@@ -18,6 +18,7 @@ var (
 	ErrRPCResultSubscriberCapacity = errors.New("mtproto rpc result subscriber capacity exhausted")
 	ErrRPCResultFlightInvalid      = errors.New("mtproto rpc result in-flight claim is invalid")
 	ErrRPCResultIdentityMismatch   = errors.New("mtproto rpc result request identity mismatch")
+	ErrRPCResultReplayUnavailable  = errors.New("mtproto rpc result replay payload is unavailable")
 	ErrRPCAdmissionSeqExhausted    = errors.New("mtproto rpc admission sequence exhausted")
 )
 
@@ -61,6 +62,7 @@ type rpcResultAcquireState uint8
 
 const (
 	rpcResultAcquireCompleted rpcResultAcquireState = iota + 1
+	rpcResultAcquireAcknowledged
 	rpcResultAcquirePending
 	rpcResultAcquireOwner
 )
@@ -70,6 +72,8 @@ const (
 //
 // Exactly one state-specific field is non-nil:
 //   - completed: encoded contains the immutable completed rpc_result;
+//   - acknowledged: the client ACKed the completed rpc_result, so only the
+//     compact request receipt remains and the duplicate must be ACK-only;
 //   - pending: waiter joins the already-running owner;
 //   - owner: owner must eventually complete through rpcResultCache.Put or Abort.
 type rpcResultAcquire struct {
@@ -82,7 +86,7 @@ type rpcResultAcquire struct {
 	executionOK    bool
 }
 
-// rpcResultFlight is not part of the completed cache TTL lifecycle. Its
+// rpcResultFlight is not part of the completed receipt TTL lifecycle. Its
 // done channel is closed exactly once while holding the owning cache shard lock;
 // channel close publishes encoded/ok to all waiters without a waiter goroutine.
 type rpcResultFlight struct {
@@ -93,6 +97,11 @@ type rpcResultFlight struct {
 	executionDone        bool
 	executionOK          bool
 	executionSubscribers []func(bool)
+	// acknowledged is set only from the sole outbound actor's server-msg-id to
+	// request-msg-id mapping. It can win the race with the asynchronous Put;
+	// publication then keeps only the compact receipt while still resolving
+	// waiters with the immutable result that was already written on the wire.
+	acknowledged bool
 	// subscriberSlots counts callbacks retained by this pending flight. Result
 	// and execution callbacks are charged independently; a replay alias installs
 	// both atomically so a capacity failure cannot leave half an alias behind.
@@ -465,7 +474,7 @@ func (l *rpcResultFlightLimit) snapshot() int64 {
 
 // Acquire atomically returns a completed result, joins the existing in-flight
 // owner, or installs the unique owner lease. Pending entries have a separate
-// lifecycle from completed cache TTL but reserve the same global/auth/session
+// lifecycle from completed receipt TTL but reserve the same global/auth/session
 // ownership that Put later transfers to a completed result or tombstone.
 func (c *rpcResultCache) Acquire(authKeyID [8]byte, sessionID, reqMsgID int64) (rpcResultAcquire, error) {
 	return c.acquire(authKeyID, sessionID, reqMsgID, rpcResultRequestIdentity{})
@@ -544,9 +553,34 @@ func (c *rpcResultCache) acquire(
 				s.mu.Unlock()
 				return rpcResultAcquire{}, identityMismatch(entry.identity)
 			}
-			if entry.capacity || entry.encoded == nil {
+			if entry.acknowledged {
+				result := rpcResultAcquire{
+					state: rpcResultAcquireAcknowledged, admissionSeq: entry.admissionSeq,
+					executionKnown: entry.executionKnown, executionOK: entry.executionOK,
+				}
+				s.mu.Unlock()
+				return result, nil
+			}
+			if entry.capacity {
 				s.mu.Unlock()
 				return rpcResultAcquire{}, ErrRPCResultFlightCapacity
+			}
+			if c.sessions != nil {
+				result := rpcResultAcquire{
+					state: rpcResultAcquireCompleted, admissionSeq: entry.admissionSeq,
+					executionKnown: entry.executionKnown, executionOK: entry.executionOK,
+				}
+				s.mu.Unlock()
+				encoded, replayable := c.sessions.rpcResult(authKeyID, sessionID, reqMsgID)
+				if !replayable {
+					return rpcResultAcquire{}, ErrRPCResultReplayUnavailable
+				}
+				result.encoded = encoded
+				return result, nil
+			}
+			if entry.encoded == nil {
+				s.mu.Unlock()
+				return rpcResultAcquire{}, ErrRPCResultReplayUnavailable
 			}
 			result := rpcResultAcquire{
 				state: rpcResultAcquireCompleted, admissionSeq: entry.admissionSeq, encoded: entry.encoded,
@@ -559,6 +593,14 @@ func (c *rpcResultCache) acquire(
 			if !flight.identity.matches(identity) {
 				s.mu.Unlock()
 				return rpcResultAcquire{}, identityMismatch(flight.identity)
+			}
+			if flight.acknowledged {
+				result := rpcResultAcquire{
+					state: rpcResultAcquireAcknowledged, admissionSeq: flight.admissionSeq,
+					executionKnown: flight.executionDone, executionOK: flight.executionOK,
+				}
+				s.mu.Unlock()
+				return result, nil
 			}
 			result := rpcResultAcquire{
 				state:        rpcResultAcquirePending,
@@ -621,7 +663,7 @@ func (c *rpcResultCache) acquire(
 }
 
 // completeRPCResultFlightLocked publishes encoded to the current owner claim.
-// The caller must hold s.mu and must publish the completed cache entry first.
+// The caller must hold s.mu and must publish the completed receipt first.
 func (c *rpcResultCache) completeRPCResultFlightLocked(
 	s *rpcResultCacheShard,
 	key rpcResultCacheKey,

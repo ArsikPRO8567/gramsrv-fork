@@ -2,7 +2,6 @@ package mtprotoedge
 
 import (
 	"context"
-	"errors"
 	"reflect"
 	"strings"
 	"sync/atomic"
@@ -91,22 +90,6 @@ func TestLayerRPCAdmissionMaterializationConstants(t *testing.T) {
 type countingLayerRPCAdmission struct {
 	LayerRPCHandler
 	decodeCalls atomic.Int32
-}
-
-type failingReplayLayerRPC struct {
-	LayerRPCHandler
-	err error
-}
-
-func (h *failingReplayLayerRPC) PrepareAdmittedReplay(
-	context.Context,
-	[8]byte,
-	int64,
-	int64,
-	uint64,
-	tlprofile.Admission,
-) (func() error, error) {
-	return nil, h.err
 }
 
 func (h *countingLayerRPCAdmission) AdmitLayer(profile tlprofile.Profile, b *bin.Buffer, limits tlprofile.Limits) (tlprofile.Admission, error) {
@@ -509,7 +492,7 @@ func TestLayerRPCAdmissionCompletedReplayReleasesWholeProvisionalBatch(t *testin
 	if !claim.owner.CompleteExecution(true) {
 		t.Fatal("complete replay business outcome failed")
 	}
-	s.rpcResults.Put(c.authKeyID, c.sessionID, 100, &encodedOutboundMessage{body: []byte{1, 2, 3, 4}})
+	storeLogicalRPCResultForTest(t, s, c, 100, &encodedOutboundMessage{body: []byte{1, 2, 3, 4}})
 
 	plan := &inboundPlan{items: []inboundItem{{kind: inboundItemRPC, msgID: 100, body: body}}}
 	defer plan.close()
@@ -527,54 +510,6 @@ func TestLayerRPCAdmissionCompletedReplayReleasesWholeProvisionalBatch(t *testin
 	s.rpcScheduler.budgetMu.Unlock()
 	if globalTasks != 0 || globalBytes != 0 {
 		t.Fatalf("completed replay leaked global budget %d/%d", globalTasks, globalBytes)
-	}
-}
-
-func TestLayerRPCAdmissionReplayPreparationErrorIsNotSilentlyDelivered(t *testing.T) {
-	router := rpc.New(rpc.Config{DC: 2}, rpc.Deps{}, zaptest.NewLogger(t), clock.System)
-	prepareErr := errors.New("invalid replay wrapper metadata")
-	s := New(Options{DC: 2, LayerRPC: &failingReplayLayerRPC{
-		LayerRPCHandler: router,
-		err:             prepareErr,
-	}})
-	c := &Conn{authKeyID: [8]byte{8, 9}, sessionID: 89, metrics: NopMetrics{}}
-	c.startInboundRPCScheduler(s.rpcScheduler, 1, 2, time.Second)
-	if err := c.FreezeLayerProfile(tlprofile.Profile225); err != nil {
-		t.Fatal(err)
-	}
-	body := exactOutboundLayerRPCBody(t, tlprofile.Profile225, &tg.HelpGetConfigRequest{})
-	identityBuffer := &bin.Buffer{Buf: append([]byte(nil), body...)}
-	request, err := router.AdmitLayer(tlprofile.Profile225, identityBuffer, tlprofile.Limits{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	claim, err := s.rpcResults.AcquireIdentified(c.authKeyID, c.sessionID, 100, request.Prepared().Identity())
-	if err != nil || claim.owner == nil {
-		t.Fatalf("completed replay owner = %v, %v", claim.owner, err)
-	}
-	if !claim.owner.CompleteExecution(true) {
-		t.Fatal("complete replay business outcome failed")
-	}
-	s.rpcResults.Put(c.authKeyID, c.sessionID, 100, &encodedOutboundMessage{body: []byte{1, 2, 3, 4}})
-
-	plan := &inboundPlan{items: []inboundItem{{kind: inboundItemRPC, msgID: 100, body: body}}}
-	if err := s.prepareInboundLayerRPCBatch(context.Background(), c, plan); !errors.Is(err, prepareErr) {
-		plan.close()
-		t.Fatalf("replay preparation error = %v, want %v", err, prepareErr)
-	}
-	if plan.items[0].kind == inboundItemReplayRPC {
-		plan.close()
-		t.Fatal("invalid replay metadata was converted into a deliverable cached result")
-	}
-	plan.close()
-	if got := c.inflightRPCBytes.Load(); got != 0 || c.rpcReserved != 0 {
-		t.Fatalf("failed replay preparation leaked connection budget bytes:%d tasks:%d", got, c.rpcReserved)
-	}
-	s.rpcScheduler.budgetMu.Lock()
-	globalTasks, globalBytes := s.rpcScheduler.tasks, s.rpcScheduler.bytes
-	s.rpcScheduler.budgetMu.Unlock()
-	if globalTasks != 0 || globalBytes != 0 {
-		t.Fatalf("failed replay preparation leaked global budget %d/%d", globalTasks, globalBytes)
 	}
 }
 

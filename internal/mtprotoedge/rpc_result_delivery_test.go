@@ -401,8 +401,8 @@ func TestRPCResultFailureAfterIntentionalTerminalDoesNotCloseTransferLease(t *te
 
 	// Session replacement publishes terminal before transferring the physical
 	// lease. A late old-generation result sees ErrConnClosed at producer admission;
-	// it may publish cache-only, but must not upgrade that intentional fence into
-	// a physical close that makes Transfer fail.
+	// it publishes a metadata-only capacity tombstone, but must not upgrade that
+	// intentional fence into a physical close that makes Transfer fail.
 	oldConn.beginTerminalShutdown()
 	err = s.sendResult(context.Background(), oldConn, reqMsgID, exactTestRPCResult(&tg.Config{ThisDC: 2}))
 	if !errors.Is(err, ErrOutboundTrackedBudget) {
@@ -423,9 +423,8 @@ func TestRPCResultFailureAfterIntentionalTerminalDoesNotCloseTransferLease(t *te
 	if tr.closed.Load() || !newConn.isPhysicalTransportCurrentOpen() {
 		t.Fatalf("stale close after transfer: raw_closed=%v current_open=%v", tr.closed.Load(), newConn.isPhysicalTransportCurrentOpen())
 	}
-	completed, acquireErr := s.rpcResults.Acquire(key.ID, oldConn.sessionID, reqMsgID)
-	if acquireErr != nil || completed.state != rpcResultAcquireCompleted || completed.encoded == nil {
-		t.Fatalf("late result cache = %+v err=%v", completed, acquireErr)
+	if _, acquireErr := s.rpcResults.Acquire(key.ID, oldConn.sessionID, reqMsgID); !errors.Is(acquireErr, ErrRPCResultFlightCapacity) {
+		t.Fatalf("late result tombstone err=%v, want %v", acquireErr, ErrRPCResultFlightCapacity)
 	}
 	newConn.ForceClose()
 }
@@ -459,9 +458,8 @@ func TestRPCResultPublishesBeforePathologicalPhysicalCloseReturns(t *testing.T) 
 	case <-time.After(time.Second):
 		t.Fatal("pathological physical Close blocked result publication")
 	}
-	completed, acquireErr := s.rpcResults.Acquire(key.ID, c.sessionID, reqMsgID)
-	if acquireErr != nil || completed.state != rpcResultAcquireCompleted || completed.encoded == nil {
-		t.Fatalf("completed result before raw Close return = %+v err=%v", completed, acquireErr)
+	if _, acquireErr := s.rpcResults.Acquire(key.ID, c.sessionID, reqMsgID); !errors.Is(acquireErr, ErrRPCResultFlightCapacity) {
+		t.Fatalf("result tombstone before raw Close return err=%v, want %v", acquireErr, ErrRPCResultFlightCapacity)
 	}
 	close(tr.release)
 	if c.transportLease != nil {

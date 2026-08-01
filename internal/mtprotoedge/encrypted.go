@@ -716,10 +716,7 @@ func (s *Server) handleInboundRPCAdmissionError(ctx context.Context, c *Conn, ms
 			zap.String("auth_key_id", c.authKeyHex),
 			zap.Int64("session_id", c.sessionID),
 		)
-		return s.sendResult(ctx, c, msgID, &mt.RPCError{
-			ErrorCode:    420,
-			ErrorMessage: "FLOOD_WAIT_1",
-		})
+		return s.sendResult(ctx, c, msgID, rpcWorkerBusyError())
 	}
 	return err
 }
@@ -853,9 +850,9 @@ var errRPCResultRetentionHandoff = errors.New("mtproto rpc result retention hand
 type rpcResultRetentionHandoff func(*encodedOutboundMessage, error) error
 
 // publishRPCResult ends the inbound worker's ownership at bounded egress
-// admission. Physical delivery is thereafter owned either by the single
-// outbound actor or, under retained-byte saturation, by a fenced completed-cache
-// entry that the replacement connection can replay without rerunning business.
+// admission. Physical delivery is thereafter owned by the logical-session
+// outbox. Under retained-byte saturation the Conn is fenced and the receipt
+// ledger records an unavailable tombstone so business cannot rerun.
 func (s *Server) publishRPCResult(
 	c *Conn,
 	reqMsgID int64,
@@ -893,21 +890,19 @@ func (s *Server) publishRPCResult(
 		return priority, visible
 	}
 
-	// A successful business result may never leave the encode slot as an
-	// unaccounted []byte. If the primary 512MiB retained-body budget is full, make
-	// overload terminal for this physical generation and publish the exact result
-	// into the independently bounded completed cache before releasing the slot.
+	// If the sole logical-outbox body budget cannot admit a completed result,
+	// fence this physical generation and publish only an execution tombstone.
+	// There is deliberately no fallback payload cache/spool and no business
+	// re-execution hidden behind a local capacity error.
 	retainForReplay := func(encoded *encodedOutboundMessage, admissionErr error) error {
 		if s == nil || s.rpcResults == nil || c == nil || encoded == nil || reqMsgID == 0 {
-			return errors.New("rpc result completed cache is unavailable")
+			return errors.New("rpc result receipt ledger is unavailable")
 		}
-		if int64(len(encoded.body)) > s.rpcResults.completedBytes.max {
-			// Every transport-legal result fits the production completed cache by the
-			// compile-time invariant in rpc_result_cache.go. A test/custom cache that
-			// violates it cannot safely complete this flight, so fail fast while the
-			// body is still confined to the encode slot.
+		if s.rpcResults.sessions == nil && int64(len(encoded.body)) > s.rpcResults.completedBytes.max {
+			// Focused legacy-cache tests may intentionally use a byte budget smaller
+			// than one legal transport result. Production receipts never own bodies.
 			panic(fmt.Sprintf(
-				"mtprotoedge: encoded rpc result exceeds completed-cache budget: body=%d max=%d",
+				"mtprotoedge: legacy encoded rpc result exceeds inline-ledger budget: body=%d max=%d",
 				len(encoded.body), s.rpcResults.completedBytes.max,
 			))
 		}
@@ -929,7 +924,7 @@ func (s *Server) publishRPCResult(
 		if visible {
 			resultLogLevel = zap.InfoLevel
 		}
-		if checked := s.log.Check(resultLogLevel, "RPC result retained for replay after egress saturation"); checked != nil {
+		if checked := s.log.Check(resultLogLevel, "RPC result execution fenced after egress saturation"); checked != nil {
 			checked.Write(
 				zap.String("method", method), zap.Int64("req_msg_id", reqMsgID),
 				zap.Int64("delivered_req_msg_id", encoded.writtenRequestID()),
@@ -1070,7 +1065,7 @@ func (s *Server) sendResult(ctx context.Context, c *Conn, reqMsgID int64, result
 }
 
 // sendCachedRPCResult preserves the delivery half of the rpc_result invariant
-// for completed-flight replays: either the cached result reaches this physical
+// for completed-flight replays: either the logical outbox result reaches this physical
 // byte stream, or this logical Conn is fenced so a replacement may retry it.
 func (s *Server) sendCachedRPCResult(ctx context.Context, c *Conn, encoded *encodedOutboundMessage) error {
 	return s.sendCachedRPCResultWithHook(ctx, c, encoded, nil)
@@ -1251,8 +1246,9 @@ func (s *Server) encodeRPCResultReservedWithHandoffContext(
 			}
 			retained = true
 			// The handoff owns the only surviving pointer. Do not return a second
-			// producer reference after the encode slot releases; the completed cache
-			// may independently evict the entry under its bounded policy.
+			// producer reference after the encode slot releases. Production handoff
+			// either transferred the body to the logical outbox or retained only an
+			// unavailable receipt tombstone.
 			encoded = nil
 			return admissionErr
 		}
@@ -1355,6 +1351,7 @@ func (s *Server) storeRPCResult(c *Conn, reqMsgID int64, encoded *encodedOutboun
 	if s == nil || s.rpcResults == nil || c == nil {
 		return
 	}
+	s.conns.adoptLogicalSession(c)
 	s.rpcResults.Put(c.authKeyID, c.sessionID, reqMsgID, encoded)
 }
 

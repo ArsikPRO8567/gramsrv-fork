@@ -434,6 +434,10 @@ func (s *Server) prepareInboundLayerRPCBatch(ctx context.Context, c *Conn, plan 
 				}
 				switch claim.state {
 				case rpcResultAcquireCompleted:
+					// Transfer the materialization ticket to the plan before any
+					// profile-restore step can fail; plan.close is the universal abort
+					// path and sendCached releases it after outbound-budget handoff.
+					item.payload = claim.encoded
 					after, prepareErr := s.prepareAdmittedLayerRPCReplay(ctx, c, item.msgID, claim.admissionSeq, item.profileEvidenceFresh(), item.admitted)
 					if prepareErr != nil {
 						s.rpcRewrap.release(candidate)
@@ -441,10 +445,16 @@ func (s *Server) prepareInboundLayerRPCBatch(ctx context.Context, c *Conn, plan 
 					}
 					s.rpcRewrap.commit(candidate)
 					item.kind = inboundItemReplayRPC
-					item.payload = claim.encoded
 					if claim.executionKnown && claim.executionOK {
 						item.replayAfterSuccessfulDelivery = after
 					}
+				case rpcResultAcquireAcknowledged:
+					// Explicit ACK is terminal proof for this request msg_id. Keep
+					// exact admission metadata, retire the old rewrap candidate and
+					// make the duplicate ACK-only without replay side effects.
+					s.rpcRewrap.commit(candidate)
+					item.kind = inboundItemDuplicate
+					item.payload = nil
 				case rpcResultAcquirePending:
 					after, prepareErr := s.prepareAdmittedLayerRPCReplay(ctx, c, item.msgID, claim.admissionSeq, item.profileEvidenceFresh(), item.admitted)
 					if prepareErr != nil {
@@ -523,15 +533,18 @@ func (s *Server) prepareInboundLayerRPCBatch(ctx context.Context, c *Conn, plan 
 		}
 		switch claim.state {
 		case rpcResultAcquireCompleted:
+			item.payload = claim.encoded
 			after, prepareErr := s.prepareAdmittedLayerRPCReplay(ctx, c, item.msgID, claim.admissionSeq, item.profileEvidenceFresh(), item.admitted)
 			if prepareErr != nil {
 				return prepareErr
 			}
 			item.kind = inboundItemReplayRPC
-			item.payload = claim.encoded
 			if claim.executionKnown && claim.executionOK {
 				item.replayAfterSuccessfulDelivery = after
 			}
+		case rpcResultAcquireAcknowledged:
+			item.kind = inboundItemDuplicate
+			item.payload = nil
 		case rpcResultAcquirePending:
 			if ownersInPlan[item.msgID] != nil {
 				item.kind = inboundItemDuplicate

@@ -284,16 +284,13 @@ type Options struct {
 	// 等于 copied body；exact charge 是 typed decode 前的保守 materialization
 	// 上界，因此该配置不表示可并发接收 512 MiB wire body。默认 512 MiB。
 	RPCGlobalMaxBytes int64
-	// RPCResultCache* limits bound pending ownership and completed rpc_result
-	// replay state across the full 331-second duplicate horizon. Every owner is
-	// charged simultaneously at global, raw-auth and session scopes. Defaults:
-	// global 262144/64 MiB, auth 32768/32 MiB, session 16384/16 MiB.
+	// RPCResultCache*Entries bound in-flight owners and compact completed
+	// receipts. Exact payload bytes are not charged here: the logical-session
+	// outbox owns them under OutboundTrackedGlobalMaxBytes until ACK. ACK removes
+	// the receipt immediately; 331 seconds is only the no-ACK safety horizon.
 	RPCResultCacheMaxEntries        int
-	RPCResultCacheMaxBytes          int64
 	RPCResultCacheAuthMaxEntries    int
-	RPCResultCacheAuthMaxBytes      int64
 	RPCResultCacheSessionMaxEntries int
-	RPCResultCacheSessionMaxBytes   int64
 	// RPCResultPendingPerAuth is an additional active-owner bound, independent
 	// from the retained entry limits and RPCGlobalMaxTasks. Default 2048.
 	RPCResultPendingPerAuth int
@@ -395,20 +392,11 @@ func (o *Options) setDefaults() {
 	if o.RPCResultCacheMaxEntries == 0 {
 		o.RPCResultCacheMaxEntries = rpcResultCacheMaxEntries
 	}
-	if o.RPCResultCacheMaxBytes == 0 {
-		o.RPCResultCacheMaxBytes = rpcResultCacheMaxBytes
-	}
 	if o.RPCResultCacheAuthMaxEntries == 0 {
 		o.RPCResultCacheAuthMaxEntries = rpcResultCacheAuthMaxEntries
 	}
-	if o.RPCResultCacheAuthMaxBytes == 0 {
-		o.RPCResultCacheAuthMaxBytes = rpcResultCacheAuthMaxBytes
-	}
 	if o.RPCResultCacheSessionMaxEntries == 0 {
 		o.RPCResultCacheSessionMaxEntries = rpcResultCacheSessionMaxEntries
-	}
-	if o.RPCResultCacheSessionMaxBytes == 0 {
-		o.RPCResultCacheSessionMaxBytes = rpcResultCacheSessionMaxBytes
 	}
 	if o.RPCResultPendingPerAuth == 0 {
 		o.RPCResultPendingPerAuth = rpcResultFlightMaxPendingPerAuth
@@ -456,17 +444,6 @@ func validateRPCResultCacheOptions(o Options) error {
 		o.RPCResultCacheAuthMaxEntries < o.RPCResultCacheSessionMaxEntries {
 		return fmt.Errorf("rpc_result cache entry hierarchy must satisfy global >= auth >= session: %d/%d/%d",
 			o.RPCResultCacheMaxEntries, o.RPCResultCacheAuthMaxEntries, o.RPCResultCacheSessionMaxEntries)
-	}
-	if o.RPCResultCacheMaxBytes < int64(maxOutboundBodyBytes) ||
-		o.RPCResultCacheAuthMaxBytes < int64(maxOutboundBodyBytes) ||
-		o.RPCResultCacheSessionMaxBytes < int64(maxOutboundBodyBytes) {
-		return fmt.Errorf("rpc_result cache byte limits must each be at least max outbound body %d: %d/%d/%d",
-			maxOutboundBodyBytes, o.RPCResultCacheMaxBytes, o.RPCResultCacheAuthMaxBytes, o.RPCResultCacheSessionMaxBytes)
-	}
-	if o.RPCResultCacheMaxBytes < o.RPCResultCacheAuthMaxBytes ||
-		o.RPCResultCacheAuthMaxBytes < o.RPCResultCacheSessionMaxBytes {
-		return fmt.Errorf("rpc_result cache byte hierarchy must satisfy global >= auth >= session: %d/%d/%d",
-			o.RPCResultCacheMaxBytes, o.RPCResultCacheAuthMaxBytes, o.RPCResultCacheSessionMaxBytes)
 	}
 	if o.RPCResultPendingPerAuth <= 0 || o.RPCResultPendingPerAuth > o.RPCGlobalMaxTasks ||
 		o.RPCResultPendingPerAuth > o.RPCResultCacheAuthMaxEntries {
@@ -534,7 +511,7 @@ func New(opts Options) *Server {
 	if conns == nil {
 		conns = NewSessionManager(opts.Logger.Named("sessions"))
 	}
-	return &Server{
+	server := &Server{
 		log:                      opts.Logger,
 		codec:                    opts.Codec,
 		obfuscated:               opts.ObfuscatedTCP,
@@ -570,16 +547,21 @@ func New(opts Options) *Server {
 		rpcResults: newRPCResultCacheWithFairCapacity(opts.Clock.Now, rpcResultCacheCapacity{
 			maxPending:        opts.RPCGlobalMaxTasks,
 			maxPendingPerAuth: opts.RPCResultPendingPerAuth,
-			globalMaxBytes:    opts.RPCResultCacheMaxBytes,
+			globalMaxBytes:    int64(opts.RPCResultCacheMaxEntries),
 			globalMaxEntries:  opts.RPCResultCacheMaxEntries,
-			authMaxBytes:      opts.RPCResultCacheAuthMaxBytes,
+			authMaxBytes:      int64(opts.RPCResultCacheAuthMaxEntries),
 			authMaxEntries:    opts.RPCResultCacheAuthMaxEntries,
-			sessionMaxBytes:   opts.RPCResultCacheSessionMaxBytes,
+			sessionMaxBytes:   int64(opts.RPCResultCacheSessionMaxEntries),
 			sessionMaxEntries: opts.RPCResultCacheSessionMaxEntries,
+			sessions:          conns,
 		}),
 		rpcRewrap: newRPCRewrapRegistry(opts.RPCGlobalMaxTasks),
 		admission: newAdmissionController(opts.MaxConnections, opts.MaxConnectionsPerIP, opts.MaxConcurrentHandshakes),
 	}
+	conns.setLogicalSessionReleaseHook(func(key sessionKey) {
+		server.rpcResults.forgetCompletedSession(key.authKeyID, key.sessionID)
+	})
+	return server
 }
 
 // ListenAndServe binds the public MTProto socket and immediately enters Serve.
@@ -641,8 +623,16 @@ func (s *Server) buildConn(tc transport.Conn, lease *physicalTransportLease, key
 		outboundTrackedBudget:        s.outboundTrackedBudget,
 		outboundControlTrackedBudget: s.outboundControlBudget,
 		outboundScratchPool:          s.outboundScratchPool,
-		rpcResultAcked:               s.rpcRewrap.acknowledge,
+		rpcResultAcked: func(conn *Conn, reqMsgID int64) {
+			// The sole outbound actor invokes this only after resolving a client
+			// msgs_ack server msg_id through its tracked resend frame. The actor has
+			// already removed the sole outbox frame; now delete its receipt and
+			// retire any init-rewrap bookkeeping.
+			s.rpcResults.Acknowledge(conn.authKeyID, conn.sessionID, reqMsgID)
+			s.rpcRewrap.acknowledge(conn, reqMsgID)
+		},
 	}
+	s.conns.attachLogicalSession(c, s.outboundTrackedBudget)
 	c.startOutbound()
 	c.startInboundRPCScheduler(s.rpcScheduler, s.rpcInflight, s.rpcQueueSize, s.rpcTimeout)
 	return c
@@ -655,6 +645,7 @@ func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 	// serveTCP/serveMixed 返回前会等待连接 goroutine 收敛，各 Conn 已先排空/取消任务；
 	// 最后再停止全局池，避免关闭过程中留下无人消费但仍占预算的队列。
 	s.rpcScheduler.start()
+	defer s.conns.releaseAllLogicalSessions()
 	defer s.rpcScheduler.stop(rpcCloseWaitTimeout)
 	// 只在最外层 listener 包一次，确保 same-port mux 的 sniff/HTTP upgrade 也计入
 	// raw admission，而不是等连接已经分流后才计数。
