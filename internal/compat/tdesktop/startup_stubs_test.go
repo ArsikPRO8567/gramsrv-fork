@@ -43,6 +43,8 @@ func TestAppConfigIncludesStoryStealthPeriods(t *testing.T) {
 	values := make(map[string]float64)
 	strings := make(map[string]string)
 	arrays := make(map[string]*tg.JSONArray)
+	bools := make(map[string]bool)
+	boolSeen := make(map[string]bool)
 	if object, ok := got.Config.(*tg.JSONObject); ok && object != nil {
 		for _, entry := range object.Value {
 			if number, ok := entry.Value.(*tg.JSONNumber); ok {
@@ -54,12 +56,20 @@ func TestAppConfigIncludesStoryStealthPeriods(t *testing.T) {
 			if array, ok := entry.Value.(*tg.JSONArray); ok {
 				arrays[entry.Key] = array
 			}
+			if boolean, ok := entry.Value.(*tg.JSONBool); ok {
+				bools[entry.Key] = boolean.Value
+				boolSeen[entry.Key] = true
+			}
 		}
 	}
 	want := map[string]float64{
 		"stories_stealth_future_period":   1500,
 		"stories_stealth_past_period":     300,
 		"stories_stealth_cooldown_period": 10800,
+		"giveaway_boosts_per_premium":     4,
+		"giveaway_countries_max":          10,
+		"giveaway_add_peers_max":          10,
+		"giveaway_period_max":             604800,
 	}
 	for key, expected := range want {
 		if values[key] != expected {
@@ -69,6 +79,10 @@ func TestAppConfigIncludesStoryStealthPeriods(t *testing.T) {
 	if strings["rich_message_posting"] != "enabled" {
 		t.Fatalf("AppConfig[rich_message_posting] = %q, want enabled", strings["rich_message_posting"])
 	}
+	if !boolSeen["stars_purchase_blocked"] || bools["stars_purchase_blocked"] ||
+		!boolSeen["giveaway_gifts_purchase_available"] || !bools["giveaway_gifts_purchase_available"] {
+		t.Fatalf("AppConfig purchase flags = stars_blocked:%v giveaway_available:%v", bools["stars_purchase_blocked"], bools["giveaway_gifts_purchase_available"])
+	}
 	fragmentPrefixes := arrays["fragment_prefixes"]
 	if fragmentPrefixes == nil || len(fragmentPrefixes.Value) != 1 {
 		t.Fatalf("AppConfig[fragment_prefixes] = %#v, want one-element array", fragmentPrefixes)
@@ -77,12 +91,25 @@ func TestAppConfigIncludesStoryStealthPeriods(t *testing.T) {
 	if !ok || prefix.Value != "888" {
 		t.Fatalf("AppConfig[fragment_prefixes][0] = %#v, want \"888\"", fragmentPrefixes.Value[0])
 	}
+	directCurrencies := arrays["premium_playmarket_direct_currency_list"]
+	if directCurrencies == nil || !tgJSONArrayContainsString(directCurrencies, "USD") {
+		t.Fatalf("AppConfig[premium_playmarket_direct_currency_list] = %#v, want USD", directCurrencies)
+	}
 	if _, ok := AppConfig(got.Hash).(*tg.HelpAppConfigNotModified); !ok {
 		t.Fatalf("AppConfig(hash) = %#v, want notModified", AppConfig(got.Hash))
 	}
 	if _, ok := AppConfig(got.Hash - 1).(*tg.HelpAppConfig); !ok {
 		t.Fatalf("AppConfig(old hash) = %#v, want refreshed config", AppConfig(got.Hash-1))
 	}
+}
+
+func tgJSONArrayContainsString(array *tg.JSONArray, want string) bool {
+	for _, value := range array.Value {
+		if text, ok := value.(*tg.JSONString); ok && text.Value == want {
+			return true
+		}
+	}
+	return false
 }
 
 func TestFallbackAppConfigOmitsMapboxToken(t *testing.T) {

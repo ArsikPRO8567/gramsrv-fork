@@ -45,6 +45,32 @@ func newTestHandlerWithPublicPeers(
 	return h
 }
 
+func TestDevStarsCheckoutEmitsFormBoundTelegramCredentials(t *testing.T) {
+	h := newTestHandler(t, fakeResolver{}, "https://links.example.test")
+	for _, target := range []string{
+		"/payments/dev-stars",
+		"/payments/dev-stars?form_id=0",
+		"/payments/dev-stars?form_id=01",
+		"/payments/dev-stars?form_id=not-a-number",
+	} {
+		rr := httptest.NewRecorder()
+		h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, target, nil))
+		if rr.Code != http.StatusNotFound {
+			t.Fatalf("GET %s status = %d, want 404", target, rr.Code)
+		}
+	}
+
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/payments/dev-stars?form_id=-70001", nil))
+	body := rr.Body.String()
+	if rr.Code != http.StatusOK || rr.Header().Get("Cache-Control") != "no-store" ||
+		!strings.Contains(body, "payment_form_submit") ||
+		!strings.Contains(body, "type:'telesrv_dev',form_id:'-70001'") ||
+		!strings.Contains(body, "No card, Google Play, App Store, or external payment provider will be charged") {
+		t.Fatalf("dev checkout status=%d headers=%v body=%q", rr.Code, rr.Header(), body)
+	}
+}
+
 type fakeGiftWithdrawals struct {
 	value         domain.StarGiftWithdrawal
 	found         bool

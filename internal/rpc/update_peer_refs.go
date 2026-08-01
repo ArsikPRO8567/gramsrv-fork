@@ -234,6 +234,13 @@ func collectMessagePeerRefs(msg domain.Message, currentChannelID int64, userIDs,
 	if msg.Media != nil && msg.Media.Contact != nil && msg.Media.Contact.UserID != 0 {
 		userIDs[msg.Media.Contact.UserID] = struct{}{}
 	}
+	if msg.Media != nil && msg.Media.Giveaway != nil {
+		for _, id := range msg.Media.Giveaway.Channels {
+			if id != 0 && id != currentChannelID {
+				channelIDs[id] = struct{}{}
+			}
+		}
+	}
 	collectServiceActionPeerRefs(msg.Media, currentChannelID, userIDs, channelIDs)
 	collectPollMediaUserRefs(msg.Media, userIDs)
 	collectTodoMediaUserRefs(msg.Media, userIDs)

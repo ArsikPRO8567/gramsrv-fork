@@ -13,10 +13,10 @@ import (
 
 // Service 是 Stars 账本应用服务。
 type Service struct {
-	store       store.StarsStore
-	giftStore   store.StarsGiftPurchaseStore
-	grantAmount int64
-	now         func() time.Time
+	store         store.StarsStore
+	purchaseStore store.StarsPurchaseStore
+	grantAmount   int64
+	now           func() time.Time
 }
 
 // Option 配置 Service。
@@ -27,9 +27,9 @@ func WithStartingGrant(amount int64) Option {
 	return func(s *Service) { s.grantAmount = amount }
 }
 
-// WithGiftPurchaseStore enables the atomic fiat Stars-gift checkout aggregate.
-func WithGiftPurchaseStore(st store.StarsGiftPurchaseStore) Option {
-	return func(s *Service) { s.giftStore = st }
+// WithPurchaseStore enables the atomic fiat Stars checkout aggregate.
+func WithPurchaseStore(st store.StarsPurchaseStore) Option {
+	return func(s *Service) { s.purchaseStore = st }
 }
 
 // WithClock 注入时钟（测试用）。
@@ -96,24 +96,55 @@ func (s *Service) ListTransactions(ctx context.Context, userID int64, query doma
 	return s.store.ListTransactions(ctx, userID, query)
 }
 
-// IssueGiftPurchaseForm persists a short-lived, exact checkout intent.
-func (s *Service) IssueGiftPurchaseForm(ctx context.Context, form domain.StarsGiftPurchaseForm) (domain.StarsGiftPurchaseForm, error) {
-	if s.giftStore == nil || form.BuyerUserID <= 0 || form.RecipientUserID <= 0 ||
-		form.BuyerUserID == form.RecipientUserID || form.Stars <= 0 || form.Amount <= 0 ||
-		form.Currency == "" || form.IssuedAt <= 0 || form.ExpiresAt != form.IssuedAt+600 {
-		return domain.StarsGiftPurchaseForm{}, domain.ErrStarsGiftFormInvalid
+// IssuePurchaseForm persists a short-lived, exact checkout intent.
+func (s *Service) IssuePurchaseForm(ctx context.Context, form domain.StarsPurchaseForm) (domain.StarsPurchaseForm, error) {
+	if s.purchaseStore == nil || !validPurchaseForm(form) {
+		return domain.StarsPurchaseForm{}, domain.ErrStarsPurchaseFormInvalid
 	}
-	return s.giftStore.IssueStarsGiftPurchaseForm(ctx, form)
+	return s.purchaseStore.IssueStarsPurchaseForm(ctx, form)
 }
 
-// PurchaseGift settles one exact persisted form. Package validation remains at
+// Purchase settles one exact persisted form. Package validation remains at
 // the RPC boundary as well, while the store revalidates the persisted tuple
 // under lock before performing any write.
-func (s *Service) PurchaseGift(ctx context.Context, req domain.StarsGiftPurchaseRequest) (domain.StarsGiftPurchaseResult, error) {
-	if s.giftStore == nil || req.FormID == 0 || req.BuyerUserID <= 0 || req.RecipientUserID <= 0 ||
-		req.BuyerUserID == req.RecipientUserID || req.Stars <= 0 || req.Amount <= 0 ||
-		req.Currency == "" || req.Date <= 0 {
-		return domain.StarsGiftPurchaseResult{}, domain.ErrStarsGiftFormInvalid
+func (s *Service) Purchase(ctx context.Context, req domain.StarsPurchaseRequest) (domain.StarsPurchaseResult, error) {
+	if s.purchaseStore == nil || req.FormID == 0 || req.Date <= 0 || !validPurchaseCommand(req.StarsPurchaseForm) {
+		return domain.StarsPurchaseResult{}, domain.ErrStarsPurchaseFormInvalid
 	}
-	return s.giftStore.PurchaseStarsGift(ctx, req)
+	return s.purchaseStore.PurchaseStars(ctx, req)
+}
+
+// GetGiveawayInfo resolves one launch card from the same aggregate that
+// persisted it. date is supplied by the RPC clock for deterministic tests.
+func (s *Service) GetGiveawayInfo(ctx context.Context, viewerUserID, channelID int64, messageID, date int) (domain.StarsGiveawayInfo, error) {
+	reader, ok := s.purchaseStore.(store.StarsGiveawayStore)
+	if !ok || viewerUserID <= 0 || channelID <= 0 || messageID <= 0 || date <= 0 {
+		return domain.StarsGiveawayInfo{}, domain.ErrStarsPurchaseFormInvalid
+	}
+	return reader.GetStarsGiveawayInfo(ctx, viewerUserID, channelID, messageID, date)
+}
+
+func validPurchaseForm(form domain.StarsPurchaseForm) bool {
+	return validPurchaseCommand(form) && form.IssuedAt > 0 && form.ExpiresAt == form.IssuedAt+600
+}
+
+func validPurchaseCommand(form domain.StarsPurchaseForm) bool {
+	if !form.Kind.Valid() || form.BuyerUserID <= 0 || form.Stars <= 0 || form.Amount <= 0 || form.Currency == "" {
+		return false
+	}
+	switch form.Kind {
+	case domain.StarsPurchaseTopup:
+		return form.Giveaway == nil && form.RecipientUserID == 0 && ((form.SpendPurposePeer == domain.Peer{}) ||
+			((form.SpendPurposePeer.Type == domain.PeerTypeUser || form.SpendPurposePeer.Type == domain.PeerTypeChannel) && form.SpendPurposePeer.ID > 0))
+	case domain.StarsPurchaseGift:
+		return form.Giveaway == nil && form.RecipientUserID > 0 && form.BuyerUserID != form.RecipientUserID && form.SpendPurposePeer == (domain.Peer{})
+	case domain.StarsPurchaseGiveaway:
+		g := form.Giveaway
+		return form.RecipientUserID == 0 && form.SpendPurposePeer == (domain.Peer{}) && g != nil &&
+			g.BoostPeer.Type == domain.PeerTypeChannel && g.BoostPeer.ID > 0 && g.RandomID != 0 &&
+			g.UntilDate > 0 && g.Users > 0 && g.PerUserStars > 0 &&
+			int64(g.Users) <= form.Stars/g.PerUserStars && int64(g.Users)*g.PerUserStars == form.Stars
+	default:
+		return false
+	}
 }

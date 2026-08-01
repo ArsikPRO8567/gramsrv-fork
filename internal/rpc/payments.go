@@ -6,6 +6,7 @@ import (
 	"strconv"
 
 	"github.com/iamxvbaba/td/tg"
+	"github.com/iamxvbaba/td/tgerr"
 
 	"github.com/iamxvbaba/td/tlprofile"
 	"telesrv/internal/compat/tdesktop"
@@ -15,8 +16,20 @@ import (
 // registerPayments 注册 payments.* RPC：Stars 本地账本（余额/流水真实化）+ 其余
 // gift/auction/revenue 第一阶段兼容桩。
 func (r *Router) registerPayments(d *tlprofile.Dispatcher) {
+	registerRPC[*tg.PaymentsCanPurchaseStoreRequest](d, tlprofile.SemanticMethodPaymentsCanPurchaseStore, func(ctx context.Context, req *tg.PaymentsCanPurchaseStoreRequest) (any, error) {
+		return r.onPaymentsCanPurchaseStore(ctx, req)
+	})
+	registerRPC[*tg.PaymentsAssignPlayMarketTransactionRequest](d, tlprofile.SemanticMethodPaymentsAssignPlayMarketTransaction, func(ctx context.Context, req *tg.PaymentsAssignPlayMarketTransactionRequest) (any, error) {
+		return r.onPaymentsAssignPlayMarketTransaction(ctx, req)
+	})
 	registerRPC[*tg.PaymentsGetStarsGiftOptionsRequest](d, tlprofile.SemanticMethodPaymentsGetStarsGiftOptions, func(ctx context.Context, req *tg.PaymentsGetStarsGiftOptionsRequest) (any, error) {
 		return r.onPaymentsGetStarsGiftOptions(ctx, req)
+	})
+	registerRPC[*tg.PaymentsGetStarsGiveawayOptionsRequest](d, tlprofile.SemanticMethodPaymentsGetStarsGiveawayOptions, func(ctx context.Context, _ *tg.PaymentsGetStarsGiveawayOptionsRequest) (any, error) {
+		return r.onPaymentsGetStarsGiveawayOptions(ctx)
+	})
+	registerRPC[*tg.PaymentsGetGiveawayInfoRequest](d, tlprofile.SemanticMethodPaymentsGetGiveawayInfo, func(ctx context.Context, req *tg.PaymentsGetGiveawayInfoRequest) (any, error) {
+		return r.onPaymentsGetGiveawayInfo(ctx, req)
 	})
 	registerRPC[*tg.PaymentsGetStarsTopupOptionsRequest](d, tlprofile.SemanticMethodPaymentsGetStarsTopupOptions, func(ctx context.Context, layerRequest *tg.PaymentsGetStarsTopupOptionsRequest) (any,
 
@@ -32,6 +45,9 @@ func (r *Router) registerPayments(d *tlprofile.Dispatcher) {
 	})
 	registerRPC[*tg.PaymentsGetStarsStatusRequest](d, tlprofile.SemanticMethodPaymentsGetStarsStatus, func(ctx context.Context, layerRequest *tg.PaymentsGetStarsStatusRequest) (any, error) {
 		return r.onPaymentsGetStarsStatus(ctx, layerRequest)
+	})
+	registerRPC[*tg.PaymentsGetStarsSubscriptionsRequest](d, tlprofile.SemanticMethodPaymentsGetStarsSubscriptions, func(ctx context.Context, req *tg.PaymentsGetStarsSubscriptionsRequest) (any, error) {
+		return r.onPaymentsGetStarsSubscriptions(ctx, req)
 	})
 	registerRPC[*tg.PaymentsGetStarsTransactionsRequest](d, tlprofile.SemanticMethodPaymentsGetStarsTransactions, func(ctx context.Context, layerRequest *tg.PaymentsGetStarsTransactionsRequest) (any, error) {
 		return r.onPaymentsGetStarsTransactions(ctx, layerRequest)
@@ -65,6 +81,9 @@ func (r *Router) registerPayments(d *tlprofile.Dispatcher) {
 	})
 	registerRPC[*tg.PaymentsGetPaymentFormRequest](d, tlprofile.SemanticMethodPaymentsGetPaymentForm, func(ctx context.Context, layerRequest *tg.PaymentsGetPaymentFormRequest) (any, error) {
 		return r.onPaymentsGetPaymentForm(ctx, layerRequest)
+	})
+	registerRPC[*tg.PaymentsValidateRequestedInfoRequest](d, tlprofile.SemanticMethodPaymentsValidateRequestedInfo, func(ctx context.Context, req *tg.PaymentsValidateRequestedInfoRequest) (any, error) {
+		return r.onPaymentsValidateRequestedInfo(ctx, req)
 	})
 	registerRPC[*tg.PaymentsSendStarsFormRequest](d, tlprofile.SemanticMethodPaymentsSendStarsForm, func(ctx context.Context, layerRequest *tg.PaymentsSendStarsFormRequest) (any, error) {
 		return r.onPaymentsSendStarsForm(ctx, layerRequest)
@@ -155,6 +174,24 @@ func (r *Router) registerPayments(d *tlprofile.Dispatcher) {
 		return r.onPaymentsGetStarsRevenueStats(ctx, req)
 	})
 
+}
+
+func (r *Router) onPaymentsCanPurchaseStore(ctx context.Context, _ *tg.PaymentsCanPurchaseStoreRequest) (bool, error) {
+	if _, _, err := r.currentUserID(ctx); err != nil {
+		return false, internalErr()
+	}
+	// telesrv deliberately exposes no Google Play products or receipt verifier.
+	// DrKLO is steered to the invoice flow by appConfig; if a stale client still
+	// reaches this preflight, fail closed instead of authorizing an unverifiable
+	// external charge.
+	return false, nil
+}
+
+func (r *Router) onPaymentsAssignPlayMarketTransaction(ctx context.Context, _ *tg.PaymentsAssignPlayMarketTransactionRequest) (tg.UpdatesClass, error) {
+	if _, _, err := r.currentUserID(ctx); err != nil {
+		return nil, internalErr()
+	}
+	return nil, tgerr.New(400, "STORE_PAYMENT_UNAVAILABLE")
 }
 
 // onPaymentsGetStarsRevenueStats exposes real channel Star Gift proceeds from
@@ -267,6 +304,31 @@ func (r *Router) onPaymentsGetStarsStatus(ctx context.Context, req *tg.PaymentsG
 		return nil, starsErr(err)
 	}
 	return emptyStarsStatus(&tg.StarsAmount{Amount: bal.Balance}), nil
+}
+
+// onPaymentsGetStarsSubscriptions returns the authoritative current balance
+// with an empty subscription page. telesrv does not create recurring Stars
+// subscriptions yet; returning a well-shaped terminal page lets both official
+// clients finish loading the Stars screen without inventing subscription state.
+func (r *Router) onPaymentsGetStarsSubscriptions(ctx context.Context, req *tg.PaymentsGetStarsSubscriptionsRequest) (*tg.PaymentsStarsStatus, error) {
+	if req == nil || len(req.Offset) > domain.MaxStarsTransactionsOffsetBytes {
+		return nil, inputRequestInvalidErr()
+	}
+	userID, owner, err := r.starGiftLedgerOwnerForPeer(ctx, req.Peer)
+	if err != nil {
+		return nil, err
+	}
+	if owner.Type != domain.PeerTypeUser || owner.ID != userID {
+		return nil, peerIDInvalidErr()
+	}
+	if r.deps.Stars == nil {
+		return emptyStarsStatus(&tg.StarsAmount{}), nil
+	}
+	balance, err := r.deps.Stars.GetBalance(ctx, userID)
+	if err != nil {
+		return nil, starsErr(err)
+	}
+	return emptyStarsStatus(&tg.StarsAmount{Amount: balance.Balance}), nil
 }
 
 // onPaymentsGetStarsTransactions 返回 keyset 分页的 Stars 流水（同 starsStatus 信封）。

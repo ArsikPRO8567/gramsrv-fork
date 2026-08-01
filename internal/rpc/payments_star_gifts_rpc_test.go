@@ -3,7 +3,9 @@ package rpc
 import (
 	"context"
 	"fmt"
+	"reflect"
 	"testing"
+	"time"
 
 	"github.com/iamxvbaba/td/bin"
 	"github.com/iamxvbaba/td/clock"
@@ -21,6 +23,83 @@ import (
 	"telesrv/internal/domain"
 	"telesrv/internal/store/memory"
 )
+
+type starsTopupRPCStore struct {
+	*memory.StarsStore
+	nextFormID int64
+	forms      map[int64]domain.StarsPurchaseForm
+	settled    map[int64]domain.StarsPurchaseResult
+	channel    domain.Channel
+}
+
+func devStarsCredentials(formID int64) *tg.InputPaymentCredentials {
+	return &tg.InputPaymentCredentials{Data: tg.DataJSON{Data: fmt.Sprintf(`{"type":"telesrv_dev","form_id":"%d"}`, formID)}}
+}
+
+func newStarsTopupRPCStore() *starsTopupRPCStore {
+	return &starsTopupRPCStore{
+		StarsStore: memory.NewStarsStore(), nextFormID: 91000,
+		forms: make(map[int64]domain.StarsPurchaseForm), settled: make(map[int64]domain.StarsPurchaseResult),
+	}
+}
+
+func (s *starsTopupRPCStore) IssueStarsPurchaseForm(_ context.Context, form domain.StarsPurchaseForm) (domain.StarsPurchaseForm, error) {
+	s.nextFormID++
+	form.FormID = s.nextFormID
+	s.forms[form.FormID] = form
+	return form, nil
+}
+
+func (s *starsTopupRPCStore) PurchaseStars(ctx context.Context, req domain.StarsPurchaseRequest) (domain.StarsPurchaseResult, error) {
+	form, ok := s.forms[req.FormID]
+	if !ok || form.Kind != req.Kind || form.BuyerUserID != req.BuyerUserID ||
+		form.RecipientUserID != req.RecipientUserID || form.SpendPurposePeer != req.SpendPurposePeer ||
+		form.Stars != req.Stars || form.Currency != req.Currency || form.Amount != req.Amount ||
+		!reflect.DeepEqual(form.Giveaway, req.Giveaway) {
+		return domain.StarsPurchaseResult{}, domain.ErrStarsPurchaseFormInvalid
+	}
+	if result, ok := s.settled[req.FormID]; ok {
+		result.Duplicate = true
+		return result, nil
+	}
+	if req.Kind == domain.StarsPurchaseGiveaway {
+		g := req.Giveaway
+		result := domain.StarsPurchaseResult{TransactionID: fmt.Sprintf("stars-giveaway-test:%d", req.FormID)}
+		channel := s.channel
+		if channel.ID == 0 {
+			channel = domain.Channel{ID: g.BoostPeer.ID, Megagroup: true}
+		}
+		result.ChannelSend = domain.SendChannelMessageResult{
+			Channel: channel,
+			Message: domain.ChannelMessage{ChannelID: g.BoostPeer.ID, ID: 71, RandomID: g.RandomID, SenderUserID: req.BuyerUserID,
+				Date: req.Date, Pts: 9, Media: &domain.MessageMedia{Kind: domain.MessageMediaKindGiveaway, Giveaway: &domain.MessageGiveaway{
+					Channels: []int64{g.BoostPeer.ID}, Quantity: g.Users, Stars: req.Stars, UntilDate: g.UntilDate,
+				}}},
+			Event: domain.ChannelUpdateEvent{ChannelID: g.BoostPeer.ID, Type: domain.ChannelUpdateNewMessage, Pts: 9, PtsCount: 1, Date: req.Date},
+		}
+		result.ChannelSend.Event.Message = result.ChannelSend.Message
+		s.settled[req.FormID] = result
+		return result, nil
+	}
+	if req.Kind != domain.StarsPurchaseTopup {
+		return domain.StarsPurchaseResult{}, domain.ErrStarsPurchaseFormInvalid
+	}
+	balance, err := s.StarsStore.Credit(ctx, req.BuyerUserID, req.Stars, domain.StarsReasonTopup,
+		req.SpendPurposePeer, req.Date, "Stars top-up", "test purchase")
+	if err != nil {
+		return domain.StarsPurchaseResult{}, err
+	}
+	result := domain.StarsPurchaseResult{Balance: balance, TransactionID: fmt.Sprintf("stars-topup-test:%d", req.FormID)}
+	s.settled[req.FormID] = result
+	return result, nil
+}
+
+func (s *starsTopupRPCStore) GetStarsGiveawayInfo(_ context.Context, viewerUserID, channelID int64, messageID, _ int) (domain.StarsGiveawayInfo, error) {
+	if viewerUserID <= 0 || channelID != s.channel.ID || messageID != 71 {
+		return domain.StarsGiveawayInfo{}, domain.ErrMessageIDInvalid
+	}
+	return domain.StarsGiveawayInfo{StartDate: 1_700_000_200, Participating: true}, nil
+}
 
 func starGiftTestRouter(t *testing.T) (*Router, domain.User, domain.User, domain.StarGift) {
 	return starGiftTestRouterWithPremium(t, false)
@@ -48,11 +127,12 @@ func starGiftTestRouterWithPremium(t *testing.T, requirePremium bool) (*Router, 
 	giftStore := memory.NewStarGiftStore()
 	giftStore.SeedCatalog([]domain.StarGift{gift})
 	gifts := appstargifts.NewService(giftStore, nil, 2)
-	r := New(Config{DC: 2, IP: "127.0.0.1", Port: 2398}, Deps{
+	starsStore := newStarsTopupRPCStore()
+	r := New(Config{DC: 2, IP: "127.0.0.1", Port: 2398, PublicBaseURL: "https://links.example.test"}, Deps{
 		Users:    appusers.NewService(users),
 		Messages: appmessages.NewService(msgStore, dialogs),
 		Channels: appchannels.NewService(channelStore),
-		Stars:    appstars.NewService(memory.NewStarsStore(), appstars.WithStartingGrant(1000)),
+		Stars:    appstars.NewService(starsStore, appstars.WithStartingGrant(1000), appstars.WithPurchaseStore(starsStore)),
 		Gifts:    gifts,
 	}, zaptest.NewLogger(t), clock.System)
 	return r, sender, recipient, gift
@@ -82,6 +162,115 @@ func TestStarGiftPurchaseRequiresActivePremium(t *testing.T) {
 	}
 	if _, err := r.onPaymentsSendStarsForm(ctx, &tg.PaymentsSendStarsFormRequest{FormID: form.FormID, Invoice: inv}); err != nil {
 		t.Fatalf("premium gift purchase: %v", err)
+	}
+}
+
+func TestStarsGiveawayCatalogFormSettlementReplayAndInfo(t *testing.T) {
+	ctx := context.Background()
+	now := 1_700_000_100
+	users := memory.NewUserStore()
+	owner, err := users.Create(ctx, domain.User{AccessHash: 7201, Phone: "15550007201", FirstName: "GiveawayOwner"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	member, err := users.Create(ctx, domain.User{AccessHash: 7202, Phone: "15550007202", FirstName: "GiveawayMember"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	channelStore := memory.NewChannelStore()
+	created, err := channelStore.CreateChannel(ctx, domain.CreateChannelRequest{
+		CreatorUserID: owner.ID, Title: "Giveaway Group", Megagroup: true,
+		MemberUserIDs: []int64{member.ID}, Date: now - 10,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	starsStore := newStarsTopupRPCStore()
+	starsStore.channel = created.Channel
+	r := New(Config{DC: 2, PublicBaseURL: "https://links.example.test"}, Deps{
+		Users: appusers.NewService(users), Channels: appchannels.NewService(channelStore),
+		Stars: appstars.NewService(starsStore, appstars.WithStartingGrant(0), appstars.WithPurchaseStore(starsStore)),
+	}, zaptest.NewLogger(t), fixedClock{now: time.Unix(int64(now), 0)})
+	ownerCtx := WithUserID(ctx, owner.ID)
+	options, err := r.onPaymentsGetStarsGiveawayOptions(ownerCtx)
+	if err != nil || len(options) != 3 || len(options[0].Winners) < 2 || options[0].StoreProduct != "" {
+		t.Fatalf("giveaway options=%+v err=%v", options, err)
+	}
+	peer := &tg.InputPeerChannel{ChannelID: created.Channel.ID, AccessHash: created.Channel.AccessHash}
+	purpose := &tg.InputStorePaymentStarsGiveaway{
+		WinnersAreVisible: true, Stars: options[0].Stars, BoostPeer: peer,
+		RandomID: 7201001, UntilDate: now + 3600, Currency: options[0].Currency,
+		Amount: options[0].Amount, Users: options[0].Winners[1].Users,
+	}
+	invoice := &tg.InputInvoiceStars{Purpose: purpose}
+	validated, err := r.onPaymentsValidateRequestedInfo(ownerCtx, &tg.PaymentsValidateRequestedInfoRequest{Invoice: invoice})
+	if err != nil || validated == nil || !validated.Zero() {
+		t.Fatalf("validate giveaway requested info=%+v err=%v", validated, err)
+	}
+	if len(starsStore.forms) != 0 || len(starsStore.settled) != 0 {
+		t.Fatalf("giveaway validation mutated store: forms=%d settled=%d", len(starsStore.forms), len(starsStore.settled))
+	}
+	formClass, err := r.onPaymentsGetPaymentForm(ownerCtx, &tg.PaymentsGetPaymentFormRequest{Invoice: invoice})
+	if err != nil {
+		t.Fatalf("get giveaway payment form: %v", err)
+	}
+	form, ok := formClass.(*tg.PaymentsPaymentForm)
+	if !ok || form.FormID == 0 || !form.Invoice.Test || form.Invoice.Currency != purpose.Currency ||
+		len(form.Invoice.Prices) != 1 || form.Invoice.Prices[0].Amount != purpose.Amount {
+		t.Fatalf("giveaway payment form=%T %+v", formClass, formClass)
+	}
+	if _, err := r.onPaymentsSendStarsForm(ownerCtx, &tg.PaymentsSendStarsFormRequest{FormID: form.FormID, Invoice: invoice}); !tgerr.Is(err, "PAYMENT_CREDENTIALS_INVALID") {
+		t.Fatalf("sendStarsForm fiat giveaway err=%v", err)
+	}
+	resultClass, err := r.onPaymentsSendPaymentForm(ownerCtx, &tg.PaymentsSendPaymentFormRequest{
+		FormID: form.FormID, Invoice: invoice, Credentials: devStarsCredentials(form.FormID),
+	})
+	if err != nil {
+		t.Fatalf("send giveaway form: %v", err)
+	}
+	result, ok := resultClass.(*tg.PaymentsPaymentResult)
+	if !ok {
+		t.Fatalf("giveaway result=%T", resultClass)
+	}
+	updates, ok := result.Updates.(*tg.Updates)
+	if !ok || len(updates.Updates) == 0 {
+		t.Fatalf("giveaway updates=%T %+v", result.Updates, result.Updates)
+	}
+	launchID := 0
+	for _, update := range updates.Updates {
+		newChannel, ok := update.(*tg.UpdateNewChannelMessage)
+		if !ok || newChannel.PtsCount != 1 {
+			continue
+		}
+		message, ok := newChannel.Message.(*tg.Message)
+		if !ok {
+			t.Fatalf("giveaway launch message=%T", newChannel.Message)
+		}
+		media, ok := message.Media.(*tg.MessageMediaGiveaway)
+		if !ok || media.Stars != purpose.Stars || media.Quantity != purpose.Users || media.UntilDate != purpose.UntilDate {
+			t.Fatalf("giveaway launch media=%T %+v", message.Media, message.Media)
+		}
+		launchID = message.ID
+	}
+	if launchID == 0 {
+		t.Fatalf("giveaway updates missing updateNewChannelMessage: %+v", updates.Updates)
+	}
+	if _, err := r.onPaymentsSendPaymentForm(ownerCtx, &tg.PaymentsSendPaymentFormRequest{
+		FormID: form.FormID, Invoice: invoice, Credentials: devStarsCredentials(form.FormID),
+	}); err != nil {
+		t.Fatalf("Android sendPaymentForm replay: %v", err)
+	}
+	infoClass, err := r.onPaymentsGetGiveawayInfo(ownerCtx, &tg.PaymentsGetGiveawayInfoRequest{Peer: peer, MsgID: launchID})
+	info, ok := infoClass.(*tg.PaymentsGiveawayInfo)
+	if err != nil || !ok || !info.Participating || info.StartDate == 0 {
+		t.Fatalf("get giveaway info=%T %+v err=%v", infoClass, infoClass, err)
+	}
+	memberPurpose := *purpose
+	memberPurpose.RandomID++
+	if _, err := r.onPaymentsGetPaymentForm(WithUserID(ctx, member.ID), &tg.PaymentsGetPaymentFormRequest{
+		Invoice: &tg.InputInvoiceStars{Purpose: &memberPurpose},
+	}); !tgerr.Is(err, "CHAT_ADMIN_REQUIRED") {
+		t.Fatalf("member giveaway form err=%v, want CHAT_ADMIN_REQUIRED", err)
 	}
 }
 
@@ -1456,7 +1645,7 @@ func TestStarGiftInsufficientBalance(t *testing.T) {
 		Sticker: domain.Document{ID: 701, AccessHash: 7, DCID: 2, MimeType: "application/x-tgsticker", Attributes: []domain.DocumentAttribute{{Kind: domain.DocAttrSticker}}}}
 	giftStore := memory.NewStarGiftStore()
 	giftStore.SeedCatalog([]domain.StarGift{gift})
-	r := New(Config{DC: 2, IP: "127.0.0.1", Port: 2398}, Deps{
+	r := New(Config{DC: 2, IP: "127.0.0.1", Port: 2398, PublicBaseURL: "https://links.example.test"}, Deps{
 		Users:    appusers.NewService(users),
 		Messages: appmessages.NewService(msgStore, dialogs),
 		Stars:    appstars.NewService(memory.NewStarsStore(), appstars.WithStartingGrant(1000)), // < 5000
@@ -1550,30 +1739,63 @@ func TestStarsTopupInvoiceFallbackCreditsBalance(t *testing.T) {
 	if err != nil {
 		t.Fatalf("getPaymentForm topup: %v", err)
 	}
-	form, ok := formRes.(*tg.PaymentsPaymentFormStars)
+	form, ok := formRes.(*tg.PaymentsPaymentForm)
 	if !ok {
-		t.Fatalf("form = %T, want *tg.PaymentsPaymentFormStars", formRes)
+		t.Fatalf("form = %T, want *tg.PaymentsPaymentForm", formRes)
 	}
-	if form.FormID != starsTopupFormID(sender.ID, opt.Stars, opt.Currency, opt.Amount) {
-		t.Fatalf("form id = %d, want deterministic topup id", form.FormID)
+	if form.FormID == 0 {
+		t.Fatal("form id = 0, want persisted random checkout id")
 	}
 	if form.BotID != domain.OfficialSystemUserID || len(form.Users) != 1 {
 		t.Fatalf("form bot/users = %d/%d, want official system user", form.BotID, len(form.Users))
 	}
-	if form.Invoice.Currency != "XTR" || len(form.Invoice.Prices) != 1 || form.Invoice.Prices[0].Amount != opt.Stars {
-		t.Fatalf("form invoice = %+v, want XTR + 1 price %d", form.Invoice, opt.Stars)
+	if !form.Invoice.Test || form.Invoice.Currency != opt.Currency || len(form.Invoice.Prices) != 1 || form.Invoice.Prices[0].Amount != opt.Amount {
+		t.Fatalf("form invoice = %+v, want test %s + 1 price %d", form.Invoice, opt.Currency, opt.Amount)
 	}
 
-	if _, err := r.onPaymentsSendStarsForm(senderCtx, &tg.PaymentsSendStarsFormRequest{FormID: form.FormID + 1, Invoice: inv}); !tgerr.Is(err, "STARS_FORM_AMOUNT_MISMATCH") {
-		t.Fatalf("sendStarsForm bad form err = %v, want STARS_FORM_AMOUNT_MISMATCH", err)
+	if _, err := r.onPaymentsSendStarsForm(senderCtx, &tg.PaymentsSendStarsFormRequest{FormID: form.FormID, Invoice: inv}); !tgerr.Is(err, "PAYMENT_CREDENTIALS_INVALID") {
+		t.Fatalf("sendStarsForm fiat topup err = %v, want PAYMENT_CREDENTIALS_INVALID", err)
+	}
+	if _, err := r.onPaymentsSendPaymentForm(senderCtx, &tg.PaymentsSendPaymentFormRequest{
+		FormID: form.FormID + 1, Invoice: inv, Credentials: devStarsCredentials(form.FormID + 1),
+	}); !tgerr.Is(err, "STARS_FORM_AMOUNT_MISMATCH") {
+		t.Fatalf("sendPaymentForm bad form err = %v, want STARS_FORM_AMOUNT_MISMATCH", err)
 	}
 	if bal, _ := r.deps.Stars.GetBalance(ctx, sender.ID); bal.Balance != 1000 {
 		t.Fatalf("balance after bad form = %d, want 1000 unchanged", bal.Balance)
 	}
+	for name, request := range map[string]*tg.PaymentsSendPaymentFormRequest{
+		"missing":           {FormID: form.FormID, Invoice: inv},
+		"wrong form marker": {FormID: form.FormID, Invoice: inv, Credentials: devStarsCredentials(form.FormID + 1)},
+		"saved credentials": {FormID: form.FormID, Invoice: inv, Credentials: &tg.InputPaymentCredentials{
+			Save: true, Data: devStarsCredentials(form.FormID).Data,
+		}},
+	} {
+		if _, err := r.onPaymentsSendPaymentForm(senderCtx, request); !tgerr.Is(err, "PAYMENT_CREDENTIALS_INVALID") {
+			t.Fatalf("%s credentials err = %v, want PAYMENT_CREDENTIALS_INVALID", name, err)
+		}
+	}
+	withInfo := &tg.PaymentsSendPaymentFormRequest{FormID: form.FormID, Invoice: inv, Credentials: devStarsCredentials(form.FormID)}
+	withInfo.SetRequestedInfoID("unexpected")
+	if _, err := r.onPaymentsSendPaymentForm(senderCtx, withInfo); !tgerr.Is(err, "REQUESTED_INFO_ID_INVALID") {
+		t.Fatalf("requested info err = %v", err)
+	}
+	withShipping := &tg.PaymentsSendPaymentFormRequest{FormID: form.FormID, Invoice: inv, Credentials: devStarsCredentials(form.FormID)}
+	withShipping.SetShippingOptionID("unexpected")
+	if _, err := r.onPaymentsSendPaymentForm(senderCtx, withShipping); !tgerr.Is(err, "SHIPPING_OPTION_INVALID") {
+		t.Fatalf("shipping option err = %v", err)
+	}
+	withTip := &tg.PaymentsSendPaymentFormRequest{FormID: form.FormID, Invoice: inv, Credentials: devStarsCredentials(form.FormID)}
+	withTip.SetTipAmount(1)
+	if _, err := r.onPaymentsSendPaymentForm(senderCtx, withTip); !tgerr.Is(err, "TIP_AMOUNT_INVALID") {
+		t.Fatalf("tip err = %v", err)
+	}
 
-	payRes, err := r.onPaymentsSendStarsForm(senderCtx, &tg.PaymentsSendStarsFormRequest{FormID: form.FormID, Invoice: inv})
+	payRes, err := r.onPaymentsSendPaymentForm(senderCtx, &tg.PaymentsSendPaymentFormRequest{
+		FormID: form.FormID, Invoice: inv, Credentials: devStarsCredentials(form.FormID),
+	})
 	if err != nil {
-		t.Fatalf("sendStarsForm topup: %v", err)
+		t.Fatalf("sendPaymentForm topup: %v", err)
 	}
 	pay, ok := payRes.(*tg.PaymentsPaymentResult)
 	if !ok {
@@ -1597,6 +1819,14 @@ func TestStarsTopupInvoiceFallbackCreditsBalance(t *testing.T) {
 	}
 	if bal, _ := r.deps.Stars.GetBalance(ctx, sender.ID); bal.Balance != 3500 {
 		t.Fatalf("balance after topup = %d, want 3500", bal.Balance)
+	}
+	if _, err := r.onPaymentsSendPaymentForm(senderCtx, &tg.PaymentsSendPaymentFormRequest{
+		FormID: form.FormID, Invoice: inv, Credentials: devStarsCredentials(form.FormID),
+	}); err != nil {
+		t.Fatalf("sendPaymentForm exact replay: %v", err)
+	}
+	if bal, _ := r.deps.Stars.GetBalance(ctx, sender.ID); bal.Balance != 3500 {
+		t.Fatalf("balance after exact replay = %d, want 3500", bal.Balance)
 	}
 	page, err := r.deps.Stars.ListTransactions(ctx, sender.ID, domain.StarsTransactionQuery{Limit: 10})
 	if err != nil {

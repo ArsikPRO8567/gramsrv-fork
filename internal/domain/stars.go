@@ -17,36 +17,84 @@ type StarsBalance struct {
 	Granted bool  // 起始授予是否已应用（惰性首读授予的幂等守卫）
 }
 
-// StarsGiftPurchaseForm binds one short-lived fiat Stars-gift checkout to its
-// authenticated buyer, recipient and exact server-advertised package. The
-// client may echo these values but cannot use a form for a different intent.
-type StarsGiftPurchaseForm struct {
-	FormID          int64
-	BuyerUserID     int64
-	RecipientUserID int64
-	Stars           int64
-	Currency        string
-	Amount          int64
-	IssuedAt        int
-	ExpiresAt       int
+// StarsPurchaseKind identifies the balance owner affected by a fiat Stars
+// checkout. It is persisted with the form so a client cannot reinterpret a
+// self top-up as a friend gift (or vice versa) when submitting the form.
+type StarsPurchaseKind string
+
+const (
+	StarsPurchaseTopup    StarsPurchaseKind = "topup"
+	StarsPurchaseGift     StarsPurchaseKind = "gift"
+	StarsPurchaseGiveaway StarsPurchaseKind = "giveaway"
+)
+
+func (k StarsPurchaseKind) Valid() bool {
+	return k == StarsPurchaseTopup || k == StarsPurchaseGift || k == StarsPurchaseGiveaway
 }
 
-// StarsGiftPurchaseRequest is the immutable settlement command carried by
-// inputInvoiceStars(inputStorePaymentStarsGift).
-type StarsGiftPurchaseRequest struct {
-	StarsGiftPurchaseForm
+// StarsGiveawayPurchase is the complete immutable purpose behind one direct
+// fiat Stars giveaway checkout. The launch purchase persists this shape; the
+// eventual winner draw is a separate lifecycle transition.
+type StarsGiveawayPurchase struct {
+	BoostPeer          Peer     `json:"boost_peer"`
+	AdditionalPeers    []Peer   `json:"additional_peers,omitempty"`
+	CountriesISO2      []string `json:"countries_iso2,omitempty"`
+	PrizeDescription   string   `json:"prize_description,omitempty"`
+	RandomID           int64    `json:"random_id"`
+	UntilDate          int      `json:"until_date"`
+	Users              int      `json:"users"`
+	PerUserStars       int64    `json:"per_user_stars"`
+	YearlyBoosts       int      `json:"yearly_boosts"`
+	OnlyNewSubscribers bool     `json:"only_new_subscribers,omitempty"`
+	WinnersAreVisible  bool     `json:"winners_are_visible,omitempty"`
+}
+
+// StarsPurchaseForm binds one short-lived fiat Stars checkout to its
+// authenticated buyer, purpose and exact server-advertised package. Recipient
+// is zero for a self top-up and mandatory for a friend gift.
+type StarsPurchaseForm struct {
+	FormID           int64
+	Kind             StarsPurchaseKind
+	BuyerUserID      int64
+	RecipientUserID  int64
+	SpendPurposePeer Peer
+	Giveaway         *StarsGiveawayPurchase
+	Stars            int64
+	Currency         string
+	Amount           int64
+	IssuedAt         int
+	ExpiresAt        int
+}
+
+// StarsPurchaseRequest is the immutable settlement command carried by
+// inputInvoiceStars. Android and TDesktop sendPaymentForm both resolve to this
+// command after the ordinary fiat checkout has produced provider credentials.
+type StarsPurchaseRequest struct {
+	StarsPurchaseForm
 	Date            int
 	OriginAuthKeyID [8]byte
 	OriginSessionID int64
 }
 
-// StarsGiftPurchaseResult is the atomically committed recipient credit and
-// bilateral service-message receipt. Duplicate means an exact form replay.
-type StarsGiftPurchaseResult struct {
-	RecipientBalance StarsBalance
-	Send             SendPrivateTextResult
-	TransactionID    string
-	Duplicate        bool
+// StarsPurchaseResult is the atomically committed credit and, for a friend
+// gift, bilateral service-message receipt. Duplicate means an exact form replay.
+type StarsPurchaseResult struct {
+	Balance       StarsBalance
+	Send          SendPrivateTextResult
+	ChannelSend   SendChannelMessageResult
+	TransactionID string
+	Duplicate     bool
+}
+
+// StarsGiveawayInfo is the viewer-specific state of one durable launch card.
+// Winner selection/results are intentionally outside the purchase aggregate.
+type StarsGiveawayInfo struct {
+	StartDate             int
+	Participating         bool
+	PreparingResults      bool
+	JoinedTooEarlyDate    int
+	AdminDisallowedChatID int64
+	DisallowedCountry     string
 }
 
 // StarsTransactionReason 标记一条流水的语义（投影到 tg.StarsTransaction 的标志位/标题）。
@@ -184,10 +232,10 @@ var (
 	ErrStarsInvalidAmount = errors.New("stars: invalid amount")
 	// ErrStarsTransactionQueryInvalid 表示内部构造了不可能的流水方向。
 	ErrStarsTransactionQueryInvalid = errors.New("stars: invalid transaction query")
-	// ErrStarsGiftFormInvalid covers a missing/cross-account/mutated form.
-	ErrStarsGiftFormInvalid = errors.New("stars: gift form invalid")
-	// ErrStarsGiftFormExpired is returned before any settlement write.
-	ErrStarsGiftFormExpired = errors.New("stars: gift form expired")
+	// ErrStarsPurchaseFormInvalid covers a missing/cross-account/mutated form.
+	ErrStarsPurchaseFormInvalid = errors.New("stars: purchase form invalid")
+	// ErrStarsPurchaseFormExpired is returned before any settlement write.
+	ErrStarsPurchaseFormExpired = errors.New("stars: purchase form expired")
 	// ErrStarsGiftUnavailable covers a recipient that cannot receive the gift.
 	ErrStarsGiftUnavailable = errors.New("stars: gift unavailable")
 )

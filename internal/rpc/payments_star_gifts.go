@@ -4,8 +4,11 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
+	"strconv"
 	"strings"
 
 	"github.com/iamxvbaba/td/tg"
@@ -40,9 +43,114 @@ func devStarsGiftOptions() []tg.StarsGiftOption {
 	}
 }
 
-type starsGiftPurchaseService interface {
-	IssueGiftPurchaseForm(context.Context, domain.StarsGiftPurchaseForm) (domain.StarsGiftPurchaseForm, error)
-	PurchaseGift(context.Context, domain.StarsGiftPurchaseRequest) (domain.StarsGiftPurchaseResult, error)
+func devStarsGiveawayOptions() []tg.StarsGiveawayOption {
+	return []tg.StarsGiveawayOption{
+		{Default: true, Stars: 1000, YearlyBoosts: 4, Currency: "USD", Amount: 99, Winners: []tg.StarsGiveawayWinnersOption{
+			{Default: true, Users: 1, PerUserStars: 1000}, {Users: 2, PerUserStars: 500},
+			{Users: 5, PerUserStars: 200}, {Users: 10, PerUserStars: 100},
+		}},
+		{Stars: 2500, YearlyBoosts: 10, Currency: "USD", Amount: 199, Winners: []tg.StarsGiveawayWinnersOption{
+			{Default: true, Users: 1, PerUserStars: 2500}, {Users: 5, PerUserStars: 500}, {Users: 10, PerUserStars: 250},
+		}},
+		{Stars: 5000, YearlyBoosts: 20, Currency: "USD", Amount: 399, Winners: []tg.StarsGiveawayWinnersOption{
+			{Default: true, Users: 1, PerUserStars: 5000}, {Users: 5, PerUserStars: 1000}, {Users: 10, PerUserStars: 500},
+		}},
+	}
+}
+
+func (r *Router) devStarsFiatPaymentForm(
+	buyerUserID int64,
+	form domain.StarsPurchaseForm,
+	title, description string,
+	users []domain.User,
+) *tg.PaymentsPaymentForm {
+	return &tg.PaymentsPaymentForm{
+		FormID: form.FormID,
+		BotID:  domain.OfficialSystemUserID,
+		Title:  title, Description: description,
+		Invoice: tg.Invoice{
+			Test: true, Currency: form.Currency,
+			Prices: []tg.LabeledPrice{{Label: branding.StarsName, Amount: form.Amount}},
+		},
+		ProviderID: domain.OfficialSystemUserID,
+		URL: r.publicLinkQuery("payments/dev-stars", url.Values{
+			"form_id": []string{strconv.FormatInt(form.FormID, 10)},
+		}),
+		Users: tgUsersForViewer(buyerUserID, users),
+	}
+}
+
+func validDevStarsPaymentCredentials(credentials tg.InputPaymentCredentialsClass, formID int64) bool {
+	value, ok := credentials.(*tg.InputPaymentCredentials)
+	if !ok || value == nil || value.Save || formID == 0 {
+		return false
+	}
+	var payload map[string]string
+	if err := json.Unmarshal([]byte(value.Data.Data), &payload); err != nil || len(payload) != 2 {
+		return false
+	}
+	return payload["type"] == "telesrv_dev" && payload["form_id"] == strconv.FormatInt(formID, 10)
+}
+
+func (r *Router) onPaymentsGetStarsGiveawayOptions(ctx context.Context) ([]tg.StarsGiveawayOption, error) {
+	if _, _, err := r.currentUserID(ctx); err != nil {
+		return nil, internalErr()
+	}
+	return devStarsGiveawayOptions(), nil
+}
+
+func (r *Router) onPaymentsGetGiveawayInfo(ctx context.Context, req *tg.PaymentsGetGiveawayInfoRequest) (tg.PaymentsGiveawayInfoClass, error) {
+	if req == nil || req.MsgID <= 0 {
+		return nil, messageIDInvalidErr()
+	}
+	userID, _, err := r.currentUserID(ctx)
+	if err != nil {
+		return nil, internalErr()
+	}
+	peer, err := r.checkedDomainPeerFromInputPeer(ctx, userID, req.Peer)
+	if err != nil {
+		return nil, err
+	}
+	if peer.Type != domain.PeerTypeChannel || peer.ID <= 0 {
+		return nil, peerIDInvalidErr()
+	}
+	service, ok := r.deps.Stars.(starsGiveawayInfoService)
+	if !ok {
+		return nil, notImplementedErr()
+	}
+	info, err := service.GetGiveawayInfo(ctx, userID, peer.ID, req.MsgID, int(r.clock.Now().Unix()))
+	if err != nil {
+		if errors.Is(err, domain.ErrMessageIDInvalid) {
+			return nil, messageIDInvalidErr()
+		}
+		return nil, starsPurchaseErr(err)
+	}
+	out := &tg.PaymentsGiveawayInfo{StartDate: info.StartDate}
+	if info.Participating {
+		out.SetParticipating(true)
+	}
+	if info.PreparingResults {
+		out.SetPreparingResults(true)
+	}
+	if info.JoinedTooEarlyDate > 0 {
+		out.SetJoinedTooEarlyDate(info.JoinedTooEarlyDate)
+	}
+	if info.AdminDisallowedChatID > 0 {
+		out.SetAdminDisallowedChatID(info.AdminDisallowedChatID)
+	}
+	if info.DisallowedCountry != "" {
+		out.SetDisallowedCountry(info.DisallowedCountry)
+	}
+	return out, nil
+}
+
+type starsPurchaseService interface {
+	IssuePurchaseForm(context.Context, domain.StarsPurchaseForm) (domain.StarsPurchaseForm, error)
+	Purchase(context.Context, domain.StarsPurchaseRequest) (domain.StarsPurchaseResult, error)
+}
+
+type starsGiveawayInfoService interface {
+	GetGiveawayInfo(context.Context, int64, int64, int, int) (domain.StarsGiveawayInfo, error)
 }
 
 func userGiftUnavailableErr() error { return tgerr.New(400, "USER_GIFT_UNAVAILABLE") }
@@ -106,6 +214,125 @@ func starsGiftPurpose(inv *tg.InputInvoiceStars) (*tg.InputStorePaymentStarsGift
 	return purpose, ok && purpose != nil
 }
 
+func starsGiveawayPurpose(inv *tg.InputInvoiceStars) (*tg.InputStorePaymentStarsGiveaway, bool) {
+	if inv == nil {
+		return nil, false
+	}
+	purpose, ok := inv.Purpose.(*tg.InputStorePaymentStarsGiveaway)
+	return purpose, ok && purpose != nil
+}
+
+func (r *Router) validateStarsGiveawayPurpose(ctx context.Context, userID int64, purpose *tg.InputStorePaymentStarsGiveaway) (tg.StarsGiveawayOption, *domain.StarsGiveawayPurchase, error) {
+	if purpose == nil || purpose.Stars <= 0 || purpose.Amount <= 0 || purpose.Currency == "" ||
+		purpose.RandomID == 0 || purpose.Users <= 0 || purpose.UntilDate <= 0 || purpose.BoostPeer == nil {
+		return tg.StarsGiveawayOption{}, nil, purposeInvalidErr()
+	}
+	var matched tg.StarsGiveawayOption
+	var perUserStars int64
+	found := false
+	for _, option := range devStarsGiveawayOptions() {
+		if option.Stars != purpose.Stars || option.Currency != purpose.Currency || option.Amount != purpose.Amount {
+			continue
+		}
+		for _, winners := range option.Winners {
+			if winners.Users == purpose.Users {
+				matched, perUserStars, found = option, winners.PerUserStars, true
+				break
+			}
+		}
+		if found {
+			break
+		}
+	}
+	if !found {
+		return tg.StarsGiveawayOption{}, nil, starsFormAmountMismatchErr()
+	}
+	now := int(r.clock.Now().Unix())
+	if purpose.UntilDate <= now || purpose.UntilDate > now+7*24*60*60 || len(purpose.AdditionalPeers) > 10 ||
+		len(purpose.CountriesISO2) > 10 || len([]rune(purpose.PrizeDescription)) > 128 {
+		return tg.StarsGiveawayOption{}, nil, purposeInvalidErr()
+	}
+	boostPeer, err := r.starsGiveawayAdminChannel(ctx, userID, purpose.BoostPeer)
+	if err != nil {
+		return tg.StarsGiveawayOption{}, nil, err
+	}
+	additional := make([]domain.Peer, 0, len(purpose.AdditionalPeers))
+	seenChannels := map[int64]struct{}{boostPeer.ID: struct{}{}}
+	for _, input := range purpose.AdditionalPeers {
+		peer, err := r.starsGiveawayAdminChannel(ctx, userID, input)
+		if err != nil {
+			return tg.StarsGiveawayOption{}, nil, err
+		}
+		if _, exists := seenChannels[peer.ID]; exists {
+			return tg.StarsGiveawayOption{}, nil, purposeInvalidErr()
+		}
+		seenChannels[peer.ID] = struct{}{}
+		additional = append(additional, peer)
+	}
+	countries := append([]string(nil), purpose.CountriesISO2...)
+	seenCountries := make(map[string]struct{}, len(countries))
+	for _, country := range countries {
+		if len(country) != 2 || country != strings.ToUpper(country) || country[0] < 'A' || country[0] > 'Z' || country[1] < 'A' || country[1] > 'Z' {
+			return tg.StarsGiveawayOption{}, nil, purposeInvalidErr()
+		}
+		if _, exists := seenCountries[country]; exists {
+			return tg.StarsGiveawayOption{}, nil, purposeInvalidErr()
+		}
+		seenCountries[country] = struct{}{}
+	}
+	return matched, &domain.StarsGiveawayPurchase{
+		BoostPeer: boostPeer, AdditionalPeers: additional, CountriesISO2: countries,
+		PrizeDescription: purpose.PrizeDescription, RandomID: purpose.RandomID, UntilDate: purpose.UntilDate,
+		Users: purpose.Users, PerUserStars: perUserStars, YearlyBoosts: matched.YearlyBoosts,
+		OnlyNewSubscribers: purpose.OnlyNewSubscribers, WinnersAreVisible: purpose.WinnersAreVisible,
+	}, nil
+}
+
+func (r *Router) starsGiveawayAdminChannel(ctx context.Context, userID int64, input tg.InputPeerClass) (domain.Peer, error) {
+	if r.deps.Channels == nil {
+		return domain.Peer{}, notImplementedErr()
+	}
+	peer, err := r.checkedDomainPeerFromInputPeer(ctx, userID, input)
+	if err != nil {
+		return domain.Peer{}, err
+	}
+	if peer.Type != domain.PeerTypeChannel || peer.ID <= 0 {
+		return domain.Peer{}, peerIDInvalidErr()
+	}
+	view, err := r.deps.Channels.GetChannel(ctx, userID, peer.ID)
+	if err != nil {
+		return domain.Peer{}, channelInvalidErr(err)
+	}
+	if view.Self.Status != domain.ChannelMemberActive || !channelMemberIsAdmin(view.Self) ||
+		(view.Channel.Broadcast && !view.Self.CanPostChannelMessages()) {
+		return domain.Peer{}, tgerr400("CHAT_ADMIN_REQUIRED")
+	}
+	return peer, nil
+}
+
+func (r *Router) starsGiveawayPaymentForm(ctx context.Context, buyerUserID int64, purpose *tg.InputStorePaymentStarsGiveaway) (tg.PaymentsPaymentFormClass, error) {
+	_, giveaway, err := r.validateStarsGiveawayPurpose(ctx, buyerUserID, purpose)
+	if err != nil {
+		return nil, err
+	}
+	service, ok := r.deps.Stars.(starsPurchaseService)
+	if !ok {
+		return nil, notImplementedErr()
+	}
+	now := int(r.clock.Now().Unix())
+	form, err := service.IssuePurchaseForm(ctx, domain.StarsPurchaseForm{
+		Kind: domain.StarsPurchaseGiveaway, BuyerUserID: buyerUserID, Giveaway: giveaway,
+		Stars: purpose.Stars, Currency: purpose.Currency, Amount: purpose.Amount,
+		IssuedAt: now, ExpiresAt: now + 600,
+	})
+	if err != nil {
+		return nil, starsPurchaseErr(err)
+	}
+	return r.devStarsFiatPaymentForm(buyerUserID, form,
+		"Stars giveaway", "Launch a Stars giveaway",
+		[]domain.User{domain.OfficialSystemUser()}), nil
+}
+
 // onPaymentsGetStarGifts 返回可购买礼物目录（hash 命中返回 NotModified）。
 func (r *Router) onPaymentsGetStarGifts(ctx context.Context, hash int) (tg.PaymentsStarGiftsClass, error) {
 	if r.deps.Gifts == nil {
@@ -133,10 +360,12 @@ func (r *Router) onPaymentsGetStarGifts(ctx context.Context, hash int) (tg.Payme
 
 // onPaymentsGetPaymentForm 处理 Stars 专用 invoice：
 //   - inputInvoiceStarGift 返回 paymentFormStarGift。
-//   - inputInvoiceStars(inputStorePaymentStarsTopup) 返回 paymentFormStars。
+//   - inputInvoiceStars(top-up/gift/giveaway) 返回普通 test paymentForm，由本地 dev
+//     provider WebView 生成 form-bound credentials 后走 sendPaymentForm。
 //
 // 崩溃约束：star gift invoice 必须返 paymentFormStarGift#b425cfe1（TDesktop 单分支 match），
-// Stars 表单 Invoice.Prices 必须非空且 Currency=XTR（DrKLO/TDesktop 读 prices.front()）。
+// Stars 法币购买表单 Invoice.Prices 必须非空且保持套餐 currency/amount；不能返回
+// paymentFormStars，否则 TDesktop 会把它解释为花现有 XTR，Android 会打开空 URL WebView。
 func (r *Router) onPaymentsGetPaymentForm(ctx context.Context, req *tg.PaymentsGetPaymentFormRequest) (tg.PaymentsPaymentFormClass, error) {
 	if req == nil {
 		return nil, inputRequestInvalidErr()
@@ -150,6 +379,9 @@ func (r *Router) onPaymentsGetPaymentForm(ctx context.Context, req *tg.PaymentsG
 		if purpose, gift := starsGiftPurpose(inv); gift {
 			return r.starsGiftPaymentForm(ctx, userID, purpose)
 		}
+		if purpose, giveaway := starsGiveawayPurpose(inv); giveaway {
+			return r.starsGiveawayPaymentForm(ctx, userID, purpose)
+		}
 		purpose, ok := starsTopupPurpose(inv)
 		if !ok {
 			return nil, notImplementedErr()
@@ -160,7 +392,7 @@ func (r *Router) onPaymentsGetPaymentForm(ctx context.Context, req *tg.PaymentsG
 		if _, _, err := r.validateStarsTopupPurpose(ctx, userID, purpose); err != nil {
 			return nil, err
 		}
-		return r.starsTopupPaymentForm(userID, purpose), nil
+		return r.starsTopupPaymentForm(ctx, userID, purpose)
 	}
 	if inv, ok := req.Invoice.(*tg.InputInvoiceStarGiftUpgrade); ok {
 		return r.starGiftUpgradePaymentForm(ctx, userID, inv)
@@ -228,6 +460,57 @@ func (r *Router) onPaymentsGetPaymentForm(ctx context.Context, req *tg.PaymentsG
 	}, nil
 }
 
+// onPaymentsValidateRequestedInfo is the read-only pre-submit gate used by
+// TDesktop's ordinary payment-form checkout. Direct Stars purchase invoices
+// advertise no requested information or flexible shipping, so a valid result
+// deliberately carries neither an ID nor shipping options. Package, recipient
+// and giveaway permissions are revalidated without issuing a form or writing
+// ledger/message/update state. Other invoice families remain unsupported here
+// rather than being accepted as an empty generic bot invoice.
+func (r *Router) onPaymentsValidateRequestedInfo(ctx context.Context, req *tg.PaymentsValidateRequestedInfoRequest) (*tg.PaymentsValidatedRequestedInfo, error) {
+	if req == nil || req.Invoice == nil {
+		return nil, inputRequestInvalidErr()
+	}
+	// The forms returned by devStarsFiatPaymentForm request no personal data.
+	// Reject even present-but-empty flags so a caller cannot make data appear
+	// validated when this module neither stores nor forwards it. Save is safe as
+	// a no-op only while the information object is exactly empty.
+	if !req.Info.Zero() {
+		return nil, tgerr.New(400, "REQUESTED_INFO_INVALID")
+	}
+	userID, _, err := r.currentUserID(ctx)
+	if err != nil {
+		return nil, internalErr()
+	}
+	inv, ok := req.Invoice.(*tg.InputInvoiceStars)
+	if !ok || inv == nil {
+		return nil, notImplementedErr()
+	}
+	if purpose, ok := starsGiftPurpose(inv); ok {
+		if _, err := validateStarsGiftOption(purpose); err != nil {
+			return nil, err
+		}
+		if _, err := r.starsGiftRecipient(ctx, userID, purpose.UserID); err != nil {
+			return nil, err
+		}
+		return &tg.PaymentsValidatedRequestedInfo{}, nil
+	}
+	if purpose, ok := starsGiveawayPurpose(inv); ok {
+		if _, _, err := r.validateStarsGiveawayPurpose(ctx, userID, purpose); err != nil {
+			return nil, err
+		}
+		return &tg.PaymentsValidatedRequestedInfo{}, nil
+	}
+	purpose, ok := starsTopupPurpose(inv)
+	if !ok {
+		return nil, notImplementedErr()
+	}
+	if _, _, err := r.validateStarsTopupPurpose(ctx, userID, purpose); err != nil {
+		return nil, err
+	}
+	return &tg.PaymentsValidatedRequestedInfo{}, nil
+}
+
 func (r *Router) starsGiftPaymentForm(ctx context.Context, buyerUserID int64, purpose *tg.InputStorePaymentStarsGift) (tg.PaymentsPaymentFormClass, error) {
 	if _, err := validateStarsGiftOption(purpose); err != nil {
 		return nil, err
@@ -236,31 +519,27 @@ func (r *Router) starsGiftPaymentForm(ctx context.Context, buyerUserID int64, pu
 	if err != nil {
 		return nil, err
 	}
-	service, ok := r.deps.Stars.(starsGiftPurchaseService)
+	service, ok := r.deps.Stars.(starsPurchaseService)
 	if !ok {
 		return nil, notImplementedErr()
 	}
 	now := int(r.clock.Now().Unix())
-	form, err := service.IssueGiftPurchaseForm(ctx, domain.StarsGiftPurchaseForm{
-		BuyerUserID: buyerUserID, RecipientUserID: recipient.ID,
+	form, err := service.IssuePurchaseForm(ctx, domain.StarsPurchaseForm{
+		Kind: domain.StarsPurchaseGift, BuyerUserID: buyerUserID, RecipientUserID: recipient.ID,
 		Stars: purpose.Stars, Currency: purpose.Currency, Amount: purpose.Amount,
 		IssuedAt: now, ExpiresAt: now + 600,
 	})
 	if err != nil {
-		return nil, starsGiftPurchaseErr(err)
+		return nil, starsPurchaseErr(err)
 	}
 	users := []domain.User{domain.OfficialSystemUser(), recipient}
-	return &tg.PaymentsPaymentFormStars{
-		FormID: form.FormID, BotID: domain.OfficialSystemUserID,
-		Title: "Gift Stars", Description: "Gift Stars to a friend",
-		Invoice: tg.Invoice{Currency: "XTR", Prices: []tg.LabeledPrice{{Label: branding.StarsName, Amount: purpose.Stars}}},
-		Users:   tgUsersForViewer(buyerUserID, users),
-	}, nil
+	return r.devStarsFiatPaymentForm(buyerUserID, form,
+		"Gift Stars", "Gift Stars to a friend", users), nil
 }
 
-// onPaymentsSendStarsForm 处理 star gift 与 Stars topup：
-//   - star gift: Debit→投递/记账，失败补偿退款。
-//   - topup: 校验测试包白名单→Credit 本地账本。
+// onPaymentsSendStarsForm 只处理真正以 XTR/TON 付款的 Star Gift invoice。
+// 直接购买 Stars 是法币 test paymentForm，必须携带 dev provider credentials 走
+// sendPaymentForm；禁止把它伪装为 sendStarsForm 后无凭证铸币。
 //
 // 返回 paymentResult{updates}（含 updateStarsBalance；用户礼物还含私聊服务消息）。
 // 崩溃约束：必须返回合法 paymentResult{非空 Updates}（DrKLO 强转）。
@@ -273,11 +552,8 @@ func (r *Router) onPaymentsSendStarsForm(ctx context.Context, req *tg.PaymentsSe
 		return nil, internalErr()
 	}
 
-	if inv, ok := req.Invoice.(*tg.InputInvoiceStars); ok {
-		if purpose, gift := starsGiftPurpose(inv); gift {
-			return r.sendStarsGiftPurchase(ctx, userID, req.FormID, purpose)
-		}
-		return r.sendStarsTopupForm(ctx, userID, req.FormID, inv)
+	if _, ok := req.Invoice.(*tg.InputInvoiceStars); ok {
+		return nil, tgerr.New(400, "PAYMENT_CREDENTIALS_INVALID")
 	}
 	if inv, ok := req.Invoice.(*tg.InputInvoiceStarGiftUpgrade); ok {
 		return r.sendStarGiftUpgradeForm(ctx, userID, req.FormID, inv)
@@ -378,10 +654,10 @@ func (r *Router) onPaymentsSendStarsForm(ctx context.Context, req *tg.PaymentsSe
 	return &tg.PaymentsPaymentResult{Updates: updates}, nil
 }
 
-// onPaymentsSendPaymentForm is the Android invoice-billing completion path.
-// The local development provider does not charge an external card, but it
-// accepts only a persisted Stars-gift form and runs the same atomic settlement
-// as TDesktop's paymentFormStars/sendStarsForm compatibility path.
+// onPaymentsSendPaymentForm is the common Android/TDesktop fiat checkout path.
+// The local dev provider does not charge an external card; its WebView emits a
+// form-bound marker, and the persisted form/purpose remains the authoritative
+// package and idempotency boundary.
 func (r *Router) onPaymentsSendPaymentForm(ctx context.Context, req *tg.PaymentsSendPaymentFormRequest) (tg.PaymentsPaymentResultClass, error) {
 	if req == nil {
 		return nil, inputRequestInvalidErr()
@@ -394,17 +670,25 @@ func (r *Router) onPaymentsSendPaymentForm(ctx context.Context, req *tg.Payments
 	if !ok {
 		return nil, notImplementedErr()
 	}
-	purpose, ok := starsGiftPurpose(inv)
-	if !ok {
-		return nil, notImplementedErr()
-	}
-	if req.Credentials == nil {
+	if !validDevStarsPaymentCredentials(req.Credentials, req.FormID) {
 		return nil, tgerr.New(400, "PAYMENT_CREDENTIALS_INVALID")
 	}
-	if req.TipAmount != 0 {
+	if _, present := req.GetRequestedInfoID(); present || req.RequestedInfoID != "" {
+		return nil, tgerr.New(400, "REQUESTED_INFO_ID_INVALID")
+	}
+	if _, present := req.GetShippingOptionID(); present || req.ShippingOptionID != "" {
+		return nil, tgerr.New(400, "SHIPPING_OPTION_INVALID")
+	}
+	if _, present := req.GetTipAmount(); present || req.TipAmount != 0 {
 		return nil, tgerr.New(400, "TIP_AMOUNT_INVALID")
 	}
-	return r.sendStarsGiftPurchase(ctx, userID, req.FormID, purpose)
+	if purpose, ok := starsGiftPurpose(inv); ok {
+		return r.sendStarsGiftPurchase(ctx, userID, req.FormID, purpose)
+	}
+	if purpose, ok := starsGiveawayPurpose(inv); ok {
+		return r.sendStarsGiveawayPurchase(ctx, userID, req.FormID, purpose)
+	}
+	return r.sendStarsTopupForm(ctx, userID, req.FormID, inv)
 }
 
 func (r *Router) sendStarsGiftPurchase(ctx context.Context, buyerUserID, formID int64, purpose *tg.InputStorePaymentStarsGift) (tg.PaymentsPaymentResultClass, error) {
@@ -418,30 +702,69 @@ func (r *Router) sendStarsGiftPurchase(ctx context.Context, buyerUserID, formID 
 	if err != nil {
 		return nil, err
 	}
-	service, ok := r.deps.Stars.(starsGiftPurchaseService)
+	service, ok := r.deps.Stars.(starsPurchaseService)
 	if !ok {
 		return nil, notImplementedErr()
 	}
-	result, err := service.PurchaseGift(ctx, domain.StarsGiftPurchaseRequest{
-		StarsGiftPurchaseForm: domain.StarsGiftPurchaseForm{
-			FormID: formID, BuyerUserID: buyerUserID, RecipientUserID: recipient.ID,
+	result, err := service.Purchase(ctx, domain.StarsPurchaseRequest{
+		StarsPurchaseForm: domain.StarsPurchaseForm{
+			FormID: formID, Kind: domain.StarsPurchaseGift, BuyerUserID: buyerUserID, RecipientUserID: recipient.ID,
 			Stars: purpose.Stars, Currency: purpose.Currency, Amount: purpose.Amount,
 		},
 		Date: int(r.clock.Now().Unix()), OriginAuthKeyID: rawAuthKeyIDForOrigin(ctx),
 		OriginSessionID: sessionIDOrZero(ctx),
 	})
 	if err != nil {
-		return nil, starsGiftPurchaseErr(err)
+		return nil, starsPurchaseErr(err)
 	}
 	updates := r.starGiftSendUpdates(ctx, buyerUserID, result.Send)
 	return &tg.PaymentsPaymentResult{Updates: updates}, nil
 }
 
-func starsGiftPurchaseErr(err error) error {
+func (r *Router) sendStarsGiveawayPurchase(ctx context.Context, buyerUserID, formID int64, purpose *tg.InputStorePaymentStarsGiveaway) (tg.PaymentsPaymentResultClass, error) {
+	if formID == 0 {
+		return nil, formIDEmptyErr()
+	}
+	_, giveaway, err := r.validateStarsGiveawayPurpose(ctx, buyerUserID, purpose)
+	if err != nil {
+		return nil, err
+	}
+	service, ok := r.deps.Stars.(starsPurchaseService)
+	if !ok {
+		return nil, notImplementedErr()
+	}
+	result, err := service.Purchase(ctx, domain.StarsPurchaseRequest{
+		StarsPurchaseForm: domain.StarsPurchaseForm{
+			FormID: formID, Kind: domain.StarsPurchaseGiveaway, BuyerUserID: buyerUserID, Giveaway: giveaway,
+			Stars: purpose.Stars, Currency: purpose.Currency, Amount: purpose.Amount,
+		},
+		Date: int(r.clock.Now().Unix()), OriginAuthKeyID: rawAuthKeyIDForOrigin(ctx),
+		OriginSessionID: sessionIDOrZero(ctx),
+	})
+	if err != nil {
+		if errors.Is(err, domain.ErrChannelInvalid) || errors.Is(err, domain.ErrChannelPrivate) ||
+			errors.Is(err, domain.ErrChannelWriteForbidden) || errors.Is(err, domain.ErrChannelAdminRequired) ||
+			errors.Is(err, domain.ErrMessageRandomIDDuplicate) {
+			return nil, channelInvalidErr(err)
+		}
+		return nil, starsPurchaseErr(err)
+	}
+	updates := r.channelMessageUpdatesWithPeerCache(ctx, buyerUserID, result.ChannelSend, 0, newViewerPeerCache(r))
+	if updates == nil {
+		updates = &tg.Updates{Date: int(r.clock.Now().Unix())}
+	}
+	if !result.Duplicate {
+		r.enqueueChannelMessageFanout(ctx, buyerUserID, result.ChannelSend, nil)
+		r.pushChannelDiscussionUpdate(ctx, buyerUserID, result.ChannelSend.Discussion)
+	}
+	return &tg.PaymentsPaymentResult{Updates: updates}, nil
+}
+
+func starsPurchaseErr(err error) error {
 	switch {
-	case errors.Is(err, domain.ErrStarsGiftFormExpired):
+	case errors.Is(err, domain.ErrStarsPurchaseFormExpired):
 		return tgerr.New(400, "FORM_EXPIRED")
-	case errors.Is(err, domain.ErrStarsGiftFormInvalid):
+	case errors.Is(err, domain.ErrStarsPurchaseFormInvalid):
 		return starsFormAmountMismatchErr()
 	case errors.Is(err, domain.ErrStarsGiftUnavailable):
 		return userGiftUnavailableErr()
@@ -512,18 +835,28 @@ func (r *Router) validateStarsTopupPurpose(ctx context.Context, userID int64, pu
 	return matched, peer, nil
 }
 
-func (r *Router) starsTopupPaymentForm(userID int64, purpose *tg.InputStorePaymentStarsTopup) *tg.PaymentsPaymentFormStars {
-	return &tg.PaymentsPaymentFormStars{
-		FormID:      starsTopupFormID(userID, purpose.Stars, purpose.Currency, purpose.Amount),
-		BotID:       domain.OfficialSystemUserID,
-		Title:       branding.StarsName,
-		Description: "telesrv dev Stars top-up",
-		Invoice: tg.Invoice{
-			Currency: "XTR",
-			Prices:   []tg.LabeledPrice{{Label: branding.StarsName, Amount: purpose.Stars}},
-		},
-		Users: tgUsersForViewer(userID, []domain.User{domain.OfficialSystemUser()}),
+func (r *Router) starsTopupPaymentForm(ctx context.Context, userID int64, purpose *tg.InputStorePaymentStarsTopup) (tg.PaymentsPaymentFormClass, error) {
+	service, ok := r.deps.Stars.(starsPurchaseService)
+	if !ok {
+		return nil, notImplementedErr()
 	}
+	_, peer, err := r.validateStarsTopupPurpose(ctx, userID, purpose)
+	if err != nil {
+		return nil, err
+	}
+	now := int(r.clock.Now().Unix())
+	form, err := service.IssuePurchaseForm(ctx, domain.StarsPurchaseForm{
+		Kind: domain.StarsPurchaseTopup, BuyerUserID: userID,
+		SpendPurposePeer: peer,
+		Stars:            purpose.Stars, Currency: purpose.Currency, Amount: purpose.Amount,
+		IssuedAt: now, ExpiresAt: now + 600,
+	})
+	if err != nil {
+		return nil, starsPurchaseErr(err)
+	}
+	return r.devStarsFiatPaymentForm(userID, form,
+		branding.StarsName, "telesrv dev Stars top-up",
+		[]domain.User{domain.OfficialSystemUser()}), nil
 }
 
 func (r *Router) sendStarsTopupForm(ctx context.Context, userID, formID int64, inv *tg.InputInvoiceStars) (tg.PaymentsPaymentResultClass, error) {
@@ -534,24 +867,27 @@ func (r *Router) sendStarsTopupForm(ctx context.Context, userID, formID int64, i
 	if formID == 0 {
 		return nil, formIDEmptyErr()
 	}
-	if r.deps.Stars == nil {
+	service, ok := r.deps.Stars.(starsPurchaseService)
+	if !ok {
 		return nil, notImplementedErr()
 	}
 	_, peer, err := r.validateStarsTopupPurpose(ctx, userID, purpose)
 	if err != nil {
 		return nil, err
 	}
-	if formID != starsTopupFormID(userID, purpose.Stars, purpose.Currency, purpose.Amount) {
-		return nil, starsFormAmountMismatchErr()
-	}
-	if _, err := r.deps.Stars.GetBalance(ctx, userID); err != nil {
-		return nil, starsErr(err)
-	}
-	balance, err := r.deps.Stars.Credit(ctx, userID, purpose.Stars, domain.StarsReasonTopup, peer, "Stars top-up", "telesrv dev purchase")
+	result, err := service.Purchase(ctx, domain.StarsPurchaseRequest{
+		StarsPurchaseForm: domain.StarsPurchaseForm{
+			FormID: formID, Kind: domain.StarsPurchaseTopup, BuyerUserID: userID,
+			SpendPurposePeer: peer,
+			Stars:            purpose.Stars, Currency: purpose.Currency, Amount: purpose.Amount,
+		},
+		Date: int(r.clock.Now().Unix()), OriginAuthKeyID: rawAuthKeyIDForOrigin(ctx),
+		OriginSessionID: sessionIDOrZero(ctx),
+	})
 	if err != nil {
-		return nil, starsErr(err)
+		return nil, starsPurchaseErr(err)
 	}
-	return &tg.PaymentsPaymentResult{Updates: starsBalanceUpdates(balance.Balance, r.clock.Now().Unix())}, nil
+	return &tg.PaymentsPaymentResult{Updates: starsBalanceUpdates(result.Balance.Balance, r.clock.Now().Unix())}, nil
 }
 
 func (r *Router) sendStarGiftToUser(ctx context.Context, senderID, recipientID int64, gift domain.StarGift, hideName bool, message string, prepaidUpgradeStars int64) (domain.SavedStarGiftRef, *tg.Updates, error) {
@@ -1417,20 +1753,6 @@ func savedStarGiftUserIDs(gifts []domain.SavedStarGift) []int64 {
 		ids = append(ids, g.FromUserID)
 	}
 	return ids
-}
-
-func starsTopupFormID(userID, stars int64, currency string, amount int64) int64 {
-	id := userID*0x9e3779b1 ^ (stars << 7) ^ (amount << 13) ^ 0x5354415253
-	for _, ch := range currency {
-		id = id*131 + int64(ch)
-	}
-	if id < 0 {
-		id = ^id
-	}
-	if id == 0 {
-		id = 0x5354
-	}
-	return id
 }
 
 func starsBalanceUpdates(balance int64, unixDate int64) *tg.Updates {

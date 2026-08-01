@@ -23,10 +23,16 @@ type StarsStore interface {
 	ListTransactions(ctx context.Context, userID int64, query domain.StarsTransactionQuery) (domain.StarsTransactionPage, error)
 }
 
-// StarsGiftPurchaseStore owns the fiat gift aggregate. A successful purchase
-// must commit the recipient balance/ledger and both account message-box events
-// in the same transaction; exact form retries return the original receipt.
-type StarsGiftPurchaseStore interface {
-	IssueStarsGiftPurchaseForm(context.Context, domain.StarsGiftPurchaseForm) (domain.StarsGiftPurchaseForm, error)
-	PurchaseStarsGift(context.Context, domain.StarsGiftPurchaseRequest) (domain.StarsGiftPurchaseResult, error)
+// StarsPurchaseStore owns fiat self-topup, friend-gift and giveaway-launch
+// aggregates. Successful settlement commits the affected ledger/message box
+// atomically; exact form retries return the original receipt.
+type StarsPurchaseStore interface {
+	IssueStarsPurchaseForm(context.Context, domain.StarsPurchaseForm) (domain.StarsPurchaseForm, error)
+	PurchaseStars(context.Context, domain.StarsPurchaseRequest) (domain.StarsPurchaseResult, error)
+}
+
+// StarsGiveawayStore exposes the viewer-specific state of launch cards without
+// forcing lightweight purchase-store fakes to implement the read model.
+type StarsGiveawayStore interface {
+	GetStarsGiveawayInfo(context.Context, int64, int64, int, int) (domain.StarsGiveawayInfo, error)
 }

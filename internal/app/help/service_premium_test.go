@@ -42,6 +42,13 @@ func TestAppConfigPremiumKeys(t *testing.T) {
 	if blocked, ok := decoded["stargifts_blocked"].(bool); !ok || blocked {
 		t.Fatalf("stargifts_blocked = %v, want false (DrKLO GiftSheet 据此隐藏礼物网格)", decoded["stargifts_blocked"])
 	}
+	if available, ok := decoded["giveaway_gifts_purchase_available"].(bool); !ok || !available {
+		t.Fatalf("giveaway_gifts_purchase_available = %v, want true", decoded["giveaway_gifts_purchase_available"])
+	}
+	directCurrencies, ok := decoded["premium_playmarket_direct_currency_list"].([]any)
+	if !ok || len(directCurrencies) == 0 || !containsJSONCurrency(directCurrencies, "USD") {
+		t.Fatalf("premium_playmarket_direct_currency_list = %#v, want non-empty list containing USD", decoded["premium_playmarket_direct_currency_list"])
+	}
 	if posting, ok := decoded["rich_message_posting"].(string); !ok || posting != "enabled" {
 		t.Fatalf("rich_message_posting = %v, want enabled (TDesktop 富文本编辑入口默认打开)", decoded["rich_message_posting"])
 	}
@@ -50,6 +57,10 @@ func TestAppConfigPremiumKeys(t *testing.T) {
 		t.Fatalf("fragment_prefixes = %#v, want [\"888\"]", decoded["fragment_prefixes"])
 	}
 	wantNumbers := map[string]float64{
+		"giveaway_boosts_per_premium":               4,
+		"giveaway_countries_max":                    10,
+		"giveaway_add_peers_max":                    10,
+		"giveaway_period_max":                       604800,
 		"reactions_user_max_default":                1,
 		"reactions_user_max_premium":                3,
 		"boosts_channel_level_max":                  100,
@@ -97,6 +108,15 @@ func TestAppConfigPremiumKeys(t *testing.T) {
 			t.Errorf("appConfig 不应包含 %q", forbidden)
 		}
 	}
+}
+
+func containsJSONCurrency(values []any, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
 }
 
 func TestAppConfigOmitsMapboxTokenByDefault(t *testing.T) {

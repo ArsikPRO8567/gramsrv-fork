@@ -418,7 +418,22 @@ const (
 	MessageMediaKindTodo     MessageMediaKind = "todo"
 	MessageMediaKindStory    MessageMediaKind = "story"
 	MessageMediaKindWebPage  MessageMediaKind = "web_page"
+	MessageMediaKindGiveaway MessageMediaKind = "giveaway"
 )
+
+// MessageGiveaway is the immutable launch-card snapshot shown in the boost
+// peer. Channels contains the boost peer first followed by any additional
+// channels users must join. A results card is a separate lifecycle message.
+type MessageGiveaway struct {
+	OnlyNewSubscribers bool     `json:"only_new_subscribers,omitempty"`
+	WinnersAreVisible  bool     `json:"winners_are_visible,omitempty"`
+	Channels           []int64  `json:"channels"`
+	CountriesISO2      []string `json:"countries_iso2,omitempty"`
+	PrizeDescription   string   `json:"prize_description,omitempty"`
+	Quantity           int      `json:"quantity"`
+	Stars              int64    `json:"stars"`
+	UntilDate          int      `json:"until_date"`
+}
 
 // MessageTodoItem 是清单中的一项（id 为列表内唯一正整数，客户端分配）。
 type MessageTodoItem struct {
@@ -765,6 +780,7 @@ type MessageMedia struct {
 	Todo           *MessageTodo          `json:"todo,omitempty"`
 	Story          *MessageStory         `json:"story,omitempty"`
 	WebPage        *MessageWebPage       `json:"web_page,omitempty"`
+	Giveaway       *MessageGiveaway      `json:"giveaway,omitempty"`
 	Spoiler        bool                  `json:"spoiler,omitempty"`
 	TTLSeconds     int                   `json:"ttl_seconds,omitempty"`
 	Nopremium      bool                  `json:"nopremium,omitempty"`
