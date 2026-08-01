@@ -104,7 +104,7 @@ func TestStarGiftLifecycleAggregatePostgres(t *testing.T) {
 		replayedPurchase.Send.RecipientMessage.ID != purchased.Send.RecipientMessage.ID {
 		t.Fatalf("purchase replay = %+v err %v", replayedPurchase, err)
 	}
-	verifyPrepaidViewerProjectionMigration(t, ctx, pool, purchased.Saved.ID, owner.ID, buyer.ID,
+	verifyPrepaidViewerProjectionMigrationNoop(t, ctx, pool, purchased.Saved.ID, owner.ID, buyer.ID,
 		purchased.Send.RecipientMessage.ID, purchased.Send.SenderMessage.ID)
 
 	target, price, err := lifecycle.PrepaidUpgradeTarget(ctx, ownerPeer, purchased.Saved.PrepaidUpgradeHash)
@@ -1534,7 +1534,7 @@ WHERE target_user_id=$1 AND pts=$2 AND event_type='edit_message'`, userID, pts).
 	assertMigratedAction(payerUserID, payerPrepayMessageID, 0)
 }
 
-func verifyPrepaidViewerProjectionMigration(
+func verifyPrepaidViewerProjectionMigrationNoop(
 	t *testing.T,
 	ctx context.Context,
 	pool *pgxpool.Pool,
@@ -1582,6 +1582,28 @@ SET media=jsonb_set(jsonb_set(media,'{service_action,star_gift,can_upgrade}','tr
 WHERE sender_user_id=$1 AND id=$2`, messageSenderID, privateMessageID, hash); err != nil {
 		t.Fatalf("restore stale prepaid shared message: %v", err)
 	}
+	var ownerMediaBefore, senderMediaBefore, sharedMediaBefore string
+	if err := tx.QueryRow(ctx, `SELECT media::text FROM message_boxes WHERE owner_user_id=$1 AND box_id=$2`,
+		ownerUserID, ownerMessageID).Scan(&ownerMediaBefore); err != nil {
+		t.Fatalf("load owner media before retired migration: %v", err)
+	}
+	if err := tx.QueryRow(ctx, `SELECT media::text FROM message_boxes WHERE owner_user_id=$1 AND box_id=$2`,
+		senderUserID, senderMessageID).Scan(&senderMediaBefore); err != nil {
+		t.Fatalf("load sender media before retired migration: %v", err)
+	}
+	if err := tx.QueryRow(ctx, `SELECT media::text FROM private_messages WHERE sender_user_id=$1 AND id=$2`,
+		messageSenderID, privateMessageID).Scan(&sharedMediaBefore); err != nil {
+		t.Fatalf("load shared media before retired migration: %v", err)
+	}
+	var eventsBefore, outboxBefore int
+	if err := tx.QueryRow(ctx, `SELECT COUNT(*) FROM user_update_events WHERE user_id IN ($1,$2)`,
+		ownerUserID, senderUserID).Scan(&eventsBefore); err != nil {
+		t.Fatalf("count events before retired migration: %v", err)
+	}
+	if err := tx.QueryRow(ctx, `SELECT COUNT(*) FROM dispatch_outbox WHERE target_user_id IN ($1,$2)`,
+		ownerUserID, senderUserID).Scan(&outboxBefore); err != nil {
+		t.Fatalf("count outbox before retired migration: %v", err)
+	}
 
 	migrationSQL, err := deploy.Migrations.ReadFile("migrations/0163_star_gift_prepaid_viewer_projection.up.sql")
 	if err != nil {
@@ -1591,50 +1613,54 @@ WHERE sender_user_id=$1 AND id=$2`, messageSenderID, privateMessageID, hash); er
 		t.Fatalf("apply prepaid viewer migration probe: %v", err)
 	}
 
-	assertProjection := func(userID int64, messageID int, wantCanUpgrade bool, wantHash string, ptsBefore int) {
-		t.Helper()
-		var mediaJSON string
-		var pts int
-		if err := tx.QueryRow(ctx, `SELECT media::text,pts FROM message_boxes
-WHERE owner_user_id=$1 AND box_id=$2 AND NOT deleted`, userID, messageID).Scan(&mediaJSON, &pts); err != nil {
-			t.Fatalf("load migrated viewer box %d/%d: %v", userID, messageID, err)
-		}
-		media, err := decodeMessageMedia(mediaJSON)
-		action := privateStarGiftAction(media)
-		if err != nil || action == nil || action.CanUpgrade != wantCanUpgrade || action.PrepaidUpgradeHash != wantHash {
-			t.Fatalf("migrated viewer box %d/%d = %+v err=%v", userID, messageID, action, err)
-		}
-		if pts != ptsBefore+1 {
-			t.Fatalf("migrated viewer box %d/%d pts=%d want=%d", userID, messageID, pts, ptsBefore+1)
-		}
-		var eventCount, outboxCount int
-		if err := tx.QueryRow(ctx, `SELECT COUNT(*) FROM user_update_events
-WHERE user_id=$1 AND pts=$2 AND event_type='edit_message' AND message_box_id=$3`, userID, pts, messageID).Scan(&eventCount); err != nil {
-			t.Fatalf("load migrated viewer event: %v", err)
-		}
-		if err := tx.QueryRow(ctx, `SELECT COUNT(*) FROM dispatch_outbox
-WHERE target_user_id=$1 AND pts=$2 AND event_type='edit_message'`, userID, pts).Scan(&outboxCount); err != nil {
-			t.Fatalf("load migrated viewer outbox: %v", err)
-		}
-		if eventCount != 1 || outboxCount != 1 {
-			t.Fatalf("migrated viewer event/outbox counts=%d/%d", eventCount, outboxCount)
-		}
+	var ownerMediaAfter, senderMediaAfter, sharedMediaAfter string
+	var ownerPtsAfter, senderPtsAfter int
+	if err := tx.QueryRow(ctx, `SELECT media::text,pts FROM message_boxes WHERE owner_user_id=$1 AND box_id=$2`,
+		ownerUserID, ownerMessageID).Scan(&ownerMediaAfter, &ownerPtsAfter); err != nil {
+		t.Fatalf("load owner box after retired migration: %v", err)
 	}
-	assertProjection(ownerUserID, ownerMessageID, true, "", ownerPtsBefore)
-	assertProjection(senderUserID, senderMessageID, false, hash, senderPtsBefore)
-
-	var sharedHash, sharedCanUpgrade *string
-	if err := tx.QueryRow(ctx, `SELECT media #>> '{service_action,star_gift,prepaid_upgrade_hash}',
-media #>> '{service_action,star_gift,can_upgrade}' FROM private_messages WHERE sender_user_id=$1 AND id=$2`,
-		messageSenderID, privateMessageID).Scan(&sharedHash, &sharedCanUpgrade); err != nil {
-		t.Fatalf("load migrated shared viewer projection: %v", err)
+	if err := tx.QueryRow(ctx, `SELECT media::text,pts FROM message_boxes WHERE owner_user_id=$1 AND box_id=$2`,
+		senderUserID, senderMessageID).Scan(&senderMediaAfter, &senderPtsAfter); err != nil {
+		t.Fatalf("load sender box after retired migration: %v", err)
 	}
-	if sharedHash != nil || sharedCanUpgrade != nil {
-		t.Fatalf("shared viewer projection retained hash/can_upgrade: hash=%v can=%v", sharedHash, sharedCanUpgrade)
+	if err := tx.QueryRow(ctx, `SELECT media::text FROM private_messages WHERE sender_user_id=$1 AND id=$2`,
+		messageSenderID, privateMessageID).Scan(&sharedMediaAfter); err != nil {
+		t.Fatalf("load shared media after retired migration: %v", err)
+	}
+	if ownerMediaAfter != ownerMediaBefore || senderMediaAfter != senderMediaBefore || sharedMediaAfter != sharedMediaBefore {
+		t.Fatalf("retired migration changed message media")
+	}
+	if ownerPtsAfter != ownerPtsBefore || senderPtsAfter != senderPtsBefore {
+		t.Fatalf("retired migration changed PTS: owner=%d/%d sender=%d/%d",
+			ownerPtsBefore, ownerPtsAfter, senderPtsBefore, senderPtsAfter)
+	}
+	var eventsAfter, outboxAfter int
+	if err := tx.QueryRow(ctx, `SELECT COUNT(*) FROM user_update_events WHERE user_id IN ($1,$2)`,
+		ownerUserID, senderUserID).Scan(&eventsAfter); err != nil {
+		t.Fatalf("count events after retired migration: %v", err)
+	}
+	if err := tx.QueryRow(ctx, `SELECT COUNT(*) FROM dispatch_outbox WHERE target_user_id IN ($1,$2)`,
+		ownerUserID, senderUserID).Scan(&outboxAfter); err != nil {
+		t.Fatalf("count outbox after retired migration: %v", err)
+	}
+	if eventsAfter != eventsBefore || outboxAfter != outboxBefore {
+		t.Fatalf("retired migration changed event/outbox counts: events=%d/%d outbox=%d/%d",
+			eventsBefore, eventsAfter, outboxBefore, outboxAfter)
 	}
 	var storedHash string
 	if err := tx.QueryRow(ctx, `SELECT prepaid_upgrade_hash FROM peer_star_gifts WHERE id=$1`, savedGiftID).Scan(&storedHash); err != nil || storedHash != hash {
-		t.Fatalf("viewer migration changed aggregate hash=%q want=%q err=%v", storedHash, hash, err)
+		t.Fatalf("retired migration changed aggregate hash=%q want=%q err=%v", storedHash, hash, err)
+	}
+
+	// Reproduce the deployment shape that made the original 0163 abort. A
+	// retired version slot must advance even when an aggregate has no live owner
+	// box; it has no authority to classify or repair historical message state.
+	if _, err := tx.Exec(ctx, `DELETE FROM message_boxes WHERE owner_user_id=$1 AND box_id=$2`,
+		ownerUserID, ownerMessageID); err != nil {
+		t.Fatalf("remove owner box for retired migration probe: %v", err)
+	}
+	if _, err := tx.Exec(ctx, string(migrationSQL)); err != nil {
+		t.Fatalf("retired migration rejected missing owner box: %v", err)
 	}
 }
 

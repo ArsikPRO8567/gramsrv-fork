@@ -1,4 +1,3 @@
--- Data-only viewer projection and durable PTS repair. Reintroducing the leaked
--- owner hash or receiver-only capability into the sender box would be unsafe,
--- and emitted updateEditMessage events cannot be retracted.
+-- Paired no-op for the retired 0163 version slot. Runtime write boundaries,
+-- not migration history, enforce viewer-specific Star Gift capabilities.
 SELECT 1;
