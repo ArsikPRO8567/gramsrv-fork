@@ -85,6 +85,77 @@ func TestOnPaymentsGetStarsTransactions(t *testing.T) {
 	}
 }
 
+func TestOnPaymentsGetStarsTransactionsDirections(t *testing.T) {
+	const userID int64 = 1000000001
+	svc := appstars.NewService(memory.NewStarsStore(), appstars.WithStartingGrant(0))
+	ctx := WithUserID(context.Background(), userID)
+	if _, err := svc.Credit(ctx, userID, 100, domain.StarsReasonTopup, domain.Peer{}, "", ""); err != nil {
+		t.Fatalf("credit 100: %v", err)
+	}
+	if _, err := svc.Debit(ctx, userID, 40, domain.StarsReasonGift, domain.Peer{}, "", ""); err != nil {
+		t.Fatalf("debit 40: %v", err)
+	}
+	if _, err := svc.Credit(ctx, userID, 20, domain.StarsReasonGift, domain.Peer{}, "", ""); err != nil {
+		t.Fatalf("credit 20: %v", err)
+	}
+	if _, err := svc.Debit(ctx, userID, 10, domain.StarsReasonReaction, domain.Peer{}, "", ""); err != nil {
+		t.Fatalf("debit 10: %v", err)
+	}
+	r := New(Config{}, Deps{Stars: svc}, zaptest.NewLogger(t), clock.System)
+
+	all := &tg.PaymentsGetStarsTransactionsRequest{Peer: &tg.InputPeerSelf{}, Limit: 50}
+	assertRPCStarsAmounts(t, r, ctx, all, []int64{-10, 20, -40, 100})
+
+	incoming := &tg.PaymentsGetStarsTransactionsRequest{Peer: &tg.InputPeerSelf{}, Limit: 50}
+	incoming.SetInbound(true)
+	assertRPCStarsAmounts(t, r, ctx, incoming, []int64{20, 100})
+
+	outgoing := &tg.PaymentsGetStarsTransactionsRequest{Peer: &tg.InputPeerSelf{}, Limit: 50}
+	outgoing.SetOutbound(true)
+	assertRPCStarsAmounts(t, r, ctx, outgoing, []int64{-10, -40})
+
+	ascending := &tg.PaymentsGetStarsTransactionsRequest{Peer: &tg.InputPeerSelf{}, Limit: 50}
+	ascending.SetInbound(true)
+	ascending.SetAscending(true)
+	assertRPCStarsAmounts(t, r, ctx, ascending, []int64{100, 20})
+}
+
+func TestOnPaymentsGetStarsTransactionsRejectsInvalidFilters(t *testing.T) {
+	r := starsRouter(t, 1000)
+	ctx := WithUserID(context.Background(), 1000000001)
+
+	both := &tg.PaymentsGetStarsTransactionsRequest{Peer: &tg.InputPeerSelf{}}
+	both.SetInbound(true)
+	both.SetOutbound(true)
+	if _, err := r.onPaymentsGetStarsTransactions(ctx, both); err == nil {
+		t.Fatal("mutually exclusive inbound/outbound unexpectedly succeeded")
+	}
+
+	subscription := &tg.PaymentsGetStarsTransactionsRequest{Peer: &tg.InputPeerSelf{}}
+	subscription.SetSubscriptionID("subscription-1")
+	if _, err := r.onPaymentsGetStarsTransactions(ctx, subscription); err == nil {
+		t.Fatal("unsupported subscription filter unexpectedly returned the unfiltered ledger")
+	}
+}
+
+func assertRPCStarsAmounts(t *testing.T, r *Router, ctx context.Context, req *tg.PaymentsGetStarsTransactionsRequest, want []int64) {
+	t.Helper()
+	status, err := r.onPaymentsGetStarsTransactions(ctx, req)
+	if err != nil {
+		t.Fatalf("getStarsTransactions: %v", err)
+	}
+	history, _ := status.GetHistory()
+	if len(history) != len(want) {
+		t.Fatalf("history count = %d, want %d: %+v", len(history), len(want), history)
+	}
+	for i, amount := range want {
+		stars, ok := history[i].Amount.(*tg.StarsAmount)
+		if !ok || stars.Amount != amount {
+			t.Fatalf("history[%d].amount = %#v, want %d", i, history[i].Amount, amount)
+		}
+	}
+}
+
 func TestTGStarsTransactionsPaidMessage(t *testing.T) {
 	out := tgStarsTransactions([]domain.StarsTransaction{{
 		ID: 1, UserID: 42, Peer: domain.Peer{Type: domain.PeerTypeChannel, ID: 50},
@@ -127,7 +198,7 @@ func (s *channelLedgerGifts) ChannelStarsBalance(context.Context, int64) (int64,
 	return s.starsBalance, nil
 }
 
-func (s *channelLedgerGifts) ChannelStarsTransactions(context.Context, int64, string, int) (domain.StarsTransactionPage, error) {
+func (s *channelLedgerGifts) ChannelStarsTransactions(context.Context, int64, domain.StarsTransactionQuery) (domain.StarsTransactionPage, error) {
 	return s.starsPage, nil
 }
 
@@ -135,7 +206,7 @@ func (s *channelLedgerGifts) ChannelTonBalance(context.Context, int64) (int64, e
 	return s.tonBalance, nil
 }
 
-func (s *channelLedgerGifts) ChannelTonTransactions(context.Context, int64, string, int) (domain.TonTransactionPage, error) {
+func (s *channelLedgerGifts) ChannelTonTransactions(context.Context, int64, domain.StarsTransactionQuery) (domain.TonTransactionPage, error) {
 	return s.tonPage, nil
 }
 

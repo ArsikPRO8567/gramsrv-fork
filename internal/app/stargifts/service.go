@@ -825,17 +825,15 @@ func (s *Service) TonBalance(ctx context.Context, userID int64) (int64, error) {
 	return s.lifecycle.TonBalance(ctx, userID)
 }
 
-func (s *Service) TonTransactions(ctx context.Context, userID int64, offset string, limit int) (domain.TonTransactionPage, error) {
+func (s *Service) TonTransactions(ctx context.Context, userID int64, query domain.StarsTransactionQuery) (domain.TonTransactionPage, error) {
 	if s == nil || s.lifecycle == nil {
 		return domain.TonTransactionPage{}, nil
 	}
-	if len(offset) > domain.MaxStarsTransactionsOffsetBytes {
-		offset = ""
+	query, err := domain.NormalizeStarsTransactionQuery(query)
+	if err != nil {
+		return domain.TonTransactionPage{}, err
 	}
-	if limit <= 0 || limit > domain.MaxStarsTransactionsLimit {
-		limit = domain.MaxStarsTransactionsLimit
-	}
-	return s.lifecycle.TonTransactions(ctx, userID, offset, limit)
+	return s.lifecycle.TonTransactions(ctx, userID, query)
 }
 
 func (s *Service) ChannelStarsBalance(ctx context.Context, channelID int64) (int64, error) {
@@ -845,17 +843,15 @@ func (s *Service) ChannelStarsBalance(ctx context.Context, channelID int64) (int
 	return s.lifecycle.ChannelStarsBalance(ctx, channelID)
 }
 
-func (s *Service) ChannelStarsTransactions(ctx context.Context, channelID int64, offset string, limit int) (domain.StarsTransactionPage, error) {
+func (s *Service) ChannelStarsTransactions(ctx context.Context, channelID int64, query domain.StarsTransactionQuery) (domain.StarsTransactionPage, error) {
 	if s == nil || s.lifecycle == nil {
 		return domain.StarsTransactionPage{}, nil
 	}
-	if len(offset) > domain.MaxStarsTransactionsOffsetBytes {
-		offset = ""
+	query, err := domain.NormalizeStarsTransactionQuery(query)
+	if err != nil {
+		return domain.StarsTransactionPage{}, err
 	}
-	if limit <= 0 || limit > domain.MaxStarsTransactionsLimit {
-		limit = domain.MaxStarsTransactionsLimit
-	}
-	return s.lifecycle.ChannelStarsTransactions(ctx, channelID, offset, limit)
+	return s.lifecycle.ChannelStarsTransactions(ctx, channelID, query)
 }
 
 func (s *Service) ChannelTonBalance(ctx context.Context, channelID int64) (int64, error) {
@@ -865,17 +861,15 @@ func (s *Service) ChannelTonBalance(ctx context.Context, channelID int64) (int64
 	return s.lifecycle.ChannelTonBalance(ctx, channelID)
 }
 
-func (s *Service) ChannelTonTransactions(ctx context.Context, channelID int64, offset string, limit int) (domain.TonTransactionPage, error) {
+func (s *Service) ChannelTonTransactions(ctx context.Context, channelID int64, query domain.StarsTransactionQuery) (domain.TonTransactionPage, error) {
 	if s == nil || s.lifecycle == nil {
 		return domain.TonTransactionPage{}, nil
 	}
-	if len(offset) > domain.MaxStarsTransactionsOffsetBytes {
-		offset = ""
+	query, err := domain.NormalizeStarsTransactionQuery(query)
+	if err != nil {
+		return domain.TonTransactionPage{}, err
 	}
-	if limit <= 0 || limit > domain.MaxStarsTransactionsLimit {
-		limit = domain.MaxStarsTransactionsLimit
-	}
-	return s.lifecycle.ChannelTonTransactions(ctx, channelID, offset, limit)
+	return s.lifecycle.ChannelTonTransactions(ctx, channelID, query)
 }
 
 func (s *Service) SweepLifecycle(ctx context.Context, now, limit int) error {

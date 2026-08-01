@@ -78,16 +78,14 @@ func (s *Service) Debit(ctx context.Context, userID, amount int64, reason domain
 	return s.store.Debit(ctx, userID, amount, reason, peer, int(s.now().Unix()), title, desc)
 }
 
-// ListTransactions 按 keyset 分页返回流水 + 当前余额，首读时惰性授予。
-func (s *Service) ListTransactions(ctx context.Context, userID int64, offset string, limit int) (domain.StarsTransactionPage, error) {
-	if len(offset) > domain.MaxStarsTransactionsOffsetBytes {
-		offset = ""
-	}
-	if limit <= 0 || limit > domain.MaxStarsTransactionsLimit {
-		limit = domain.MaxStarsTransactionsLimit
+// ListTransactions 按方向与顺序做 keyset 分页，首读时惰性授予。
+func (s *Service) ListTransactions(ctx context.Context, userID int64, query domain.StarsTransactionQuery) (domain.StarsTransactionPage, error) {
+	query, err := domain.NormalizeStarsTransactionQuery(query)
+	if err != nil {
+		return domain.StarsTransactionPage{}, err
 	}
 	if _, err := s.ensureGranted(ctx, userID); err != nil {
 		return domain.StarsTransactionPage{}, err
 	}
-	return s.store.ListTransactions(ctx, userID, offset, limit)
+	return s.store.ListTransactions(ctx, userID, query)
 }

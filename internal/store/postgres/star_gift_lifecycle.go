@@ -1611,27 +1611,25 @@ VALUES($1,$2,$3,$4)`, userID, s.tonStartingGrant, string(domain.StarsReasonGrant
 	return balance, nil
 }
 
-func (s *StarGiftLifecycleStore) TonTransactions(ctx context.Context, userID int64, offset string, limit int) (domain.TonTransactionPage, error) {
-	if userID <= 0 || limit <= 0 || limit > domain.MaxStarsTransactionsLimit || len(offset) > domain.MaxStarsTransactionsOffsetBytes {
+func (s *StarGiftLifecycleStore) TonTransactions(ctx context.Context, userID int64, query domain.StarsTransactionQuery) (domain.TonTransactionPage, error) {
+	if userID <= 0 {
 		return domain.TonTransactionPage{}, domain.ErrStarGiftOwnerInvalid
+	}
+	query, err := domain.NormalizeStarsTransactionQuery(query)
+	if err != nil {
+		return domain.TonTransactionPage{}, err
 	}
 	if _, err := s.TonBalance(ctx, userID); err != nil {
 		return domain.TonTransactionPage{}, err
 	}
-	cursor, hasCursor := domain.DecodeStarsCursor(offset)
-	args := []any{userID, limit + 1}
-	where := "user_id=$1"
-	if hasCursor {
-		where += " AND id<$3"
-		args = append(args, cursor)
-	}
+	where, order, args := starsTransactionQueryParts("user_id", "amount_nanoton", userID, query)
 	rows, err := s.db.Query(ctx, `SELECT id,user_id,COALESCE(peer_type,''),COALESCE(peer_id,0),COALESCE(gift_id,0),
-amount_nanoton,date,reason FROM ton_transactions WHERE `+where+` ORDER BY id DESC LIMIT $2`, args...)
+amount_nanoton,date,reason FROM ton_transactions WHERE `+where+` ORDER BY id `+order+` LIMIT $2`, args...)
 	if err != nil {
 		return domain.TonTransactionPage{}, err
 	}
 	defer rows.Close()
-	items := make([]domain.TonTransaction, 0, limit+1)
+	items := make([]domain.TonTransaction, 0, query.Limit+1)
 	for rows.Next() {
 		var item domain.TonTransaction
 		var peerType string
@@ -1645,8 +1643,8 @@ amount_nanoton,date,reason FROM ton_transactions WHERE `+where+` ORDER BY id DES
 		return domain.TonTransactionPage{}, err
 	}
 	page := domain.TonTransactionPage{}
-	if len(items) > limit {
-		items = items[:limit]
+	if len(items) > query.Limit {
+		items = items[:query.Limit]
 		page.NextOffset = domain.EncodeStarsCursor(items[len(items)-1].ID)
 	}
 	page.Transactions = items
@@ -1668,24 +1666,22 @@ func (s *StarGiftLifecycleStore) ChannelStarsBalance(ctx context.Context, channe
 	return balance, err
 }
 
-func (s *StarGiftLifecycleStore) ChannelStarsTransactions(ctx context.Context, channelID int64, offset string, limit int) (domain.StarsTransactionPage, error) {
-	if channelID <= 0 || limit <= 0 || limit > domain.MaxStarsTransactionsLimit || len(offset) > domain.MaxStarsTransactionsOffsetBytes {
+func (s *StarGiftLifecycleStore) ChannelStarsTransactions(ctx context.Context, channelID int64, query domain.StarsTransactionQuery) (domain.StarsTransactionPage, error) {
+	if channelID <= 0 {
 		return domain.StarsTransactionPage{}, domain.ErrStarGiftOwnerInvalid
 	}
-	cursor, hasCursor := domain.DecodeStarsCursor(offset)
-	args := []any{channelID, limit + 1}
-	where := "channel_id=$1"
-	if hasCursor {
-		where += " AND id<$3"
-		args = append(args, cursor)
+	query, err := domain.NormalizeStarsTransactionQuery(query)
+	if err != nil {
+		return domain.StarsTransactionPage{}, err
 	}
+	where, order, args := starsTransactionQueryParts("channel_id", "amount", channelID, query)
 	rows, err := s.db.Query(ctx, `SELECT id,COALESCE(peer_type,''),COALESCE(peer_id,0),amount,date,reason
-FROM channel_stars_transactions WHERE `+where+` ORDER BY id DESC LIMIT $2`, args...)
+FROM channel_stars_transactions WHERE `+where+` ORDER BY id `+order+` LIMIT $2`, args...)
 	if err != nil {
 		return domain.StarsTransactionPage{}, err
 	}
 	defer rows.Close()
-	items := make([]domain.StarsTransaction, 0, limit+1)
+	items := make([]domain.StarsTransaction, 0, query.Limit+1)
 	for rows.Next() {
 		var item domain.StarsTransaction
 		var peerType string
@@ -1699,8 +1695,8 @@ FROM channel_stars_transactions WHERE `+where+` ORDER BY id DESC LIMIT $2`, args
 		return domain.StarsTransactionPage{}, err
 	}
 	page := domain.StarsTransactionPage{}
-	if len(items) > limit {
-		items = items[:limit]
+	if len(items) > query.Limit {
+		items = items[:query.Limit]
 		page.NextOffset = domain.EncodeStarsCursor(items[len(items)-1].ID)
 	}
 	page.Transactions = items
@@ -1717,24 +1713,22 @@ func (s *StarGiftLifecycleStore) ChannelTonBalance(ctx context.Context, channelI
 	return balance, err
 }
 
-func (s *StarGiftLifecycleStore) ChannelTonTransactions(ctx context.Context, channelID int64, offset string, limit int) (domain.TonTransactionPage, error) {
-	if channelID <= 0 || limit <= 0 || limit > domain.MaxStarsTransactionsLimit || len(offset) > domain.MaxStarsTransactionsOffsetBytes {
+func (s *StarGiftLifecycleStore) ChannelTonTransactions(ctx context.Context, channelID int64, query domain.StarsTransactionQuery) (domain.TonTransactionPage, error) {
+	if channelID <= 0 {
 		return domain.TonTransactionPage{}, domain.ErrStarGiftOwnerInvalid
 	}
-	cursor, hasCursor := domain.DecodeStarsCursor(offset)
-	args := []any{channelID, limit + 1}
-	where := "channel_id=$1"
-	if hasCursor {
-		where += " AND id<$3"
-		args = append(args, cursor)
+	query, err := domain.NormalizeStarsTransactionQuery(query)
+	if err != nil {
+		return domain.TonTransactionPage{}, err
 	}
+	where, order, args := starsTransactionQueryParts("channel_id", "amount_nanoton", channelID, query)
 	rows, err := s.db.Query(ctx, `SELECT id,COALESCE(peer_type,''),COALESCE(peer_id,0),COALESCE(gift_id,0),amount_nanoton,date,reason
-FROM channel_ton_transactions WHERE `+where+` ORDER BY id DESC LIMIT $2`, args...)
+FROM channel_ton_transactions WHERE `+where+` ORDER BY id `+order+` LIMIT $2`, args...)
 	if err != nil {
 		return domain.TonTransactionPage{}, err
 	}
 	defer rows.Close()
-	items := make([]domain.TonTransaction, 0, limit+1)
+	items := make([]domain.TonTransaction, 0, query.Limit+1)
 	for rows.Next() {
 		var item domain.TonTransaction
 		var peerType string
@@ -1748,8 +1742,8 @@ FROM channel_ton_transactions WHERE `+where+` ORDER BY id DESC LIMIT $2`, args..
 		return domain.TonTransactionPage{}, err
 	}
 	page := domain.TonTransactionPage{}
-	if len(items) > limit {
-		items = items[:limit]
+	if len(items) > query.Limit {
+		items = items[:query.Limit]
 		page.NextOffset = domain.EncodeStarsCursor(items[len(items)-1].ID)
 	}
 	page.Transactions = items

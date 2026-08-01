@@ -53,6 +53,57 @@ type StarsTransaction struct {
 // IsCredit 报告该流水是否为入账（贷记），投影到 tg.StarsTransaction.Refund。
 func (t StarsTransaction) IsCredit() bool { return t.Amount > 0 }
 
+// StarsTransactionDirection scopes one payments.getStarsTransactions view.
+// The zero value intentionally means the combined inbound/outbound history.
+type StarsTransactionDirection uint8
+
+const (
+	StarsTransactionDirectionAll StarsTransactionDirection = iota
+	StarsTransactionDirectionIncoming
+	StarsTransactionDirectionOutgoing
+)
+
+func (d StarsTransactionDirection) Valid() bool {
+	return d <= StarsTransactionDirectionOutgoing
+}
+
+func (d StarsTransactionDirection) IncludesAmount(amount int64) bool {
+	switch d {
+	case StarsTransactionDirectionAll:
+		return true
+	case StarsTransactionDirectionIncoming:
+		return amount > 0
+	case StarsTransactionDirectionOutgoing:
+		return amount < 0
+	default:
+		return false
+	}
+}
+
+// StarsTransactionQuery keeps direction, ordering and the opaque keyset cursor
+// together so filtering is applied before LIMIT in every ledger backend.
+type StarsTransactionQuery struct {
+	Offset    string
+	Limit     int
+	Direction StarsTransactionDirection
+	Ascending bool
+}
+
+// NormalizeStarsTransactionQuery preserves the existing bounded limit/offset
+// behavior while rejecting impossible internal direction values.
+func NormalizeStarsTransactionQuery(query StarsTransactionQuery) (StarsTransactionQuery, error) {
+	if !query.Direction.Valid() {
+		return StarsTransactionQuery{}, ErrStarsTransactionQueryInvalid
+	}
+	if len(query.Offset) > MaxStarsTransactionsOffsetBytes {
+		query.Offset = ""
+	}
+	if query.Limit <= 0 || query.Limit > MaxStarsTransactionsLimit {
+		query.Limit = MaxStarsTransactionsLimit
+	}
+	return query, nil
+}
+
 // StarsTransactionPage 是一页账本流水 + 当前余额 + 分页游标 + 对手方用户富化集合。
 type StarsTransactionPage struct {
 	Balance      int64
@@ -99,6 +150,8 @@ var (
 	ErrStarsInsufficient = errors.New("stars: insufficient balance")
 	// ErrStarsInvalidAmount 表示金额非法（<=0）。
 	ErrStarsInvalidAmount = errors.New("stars: invalid amount")
+	// ErrStarsTransactionQueryInvalid 表示内部构造了不可能的流水方向。
+	ErrStarsTransactionQueryInvalid = errors.New("stars: invalid transaction query")
 )
 
 // StarsPaymentRequiredError reports the minimum paid-message authorization the

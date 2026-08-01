@@ -203,9 +203,9 @@ func (r *Router) onPaymentsGetStarsRevenueStats(ctx context.Context, req *tg.Pay
 
 type channelGiftLedgerReader interface {
 	ChannelStarsBalance(ctx context.Context, channelID int64) (int64, error)
-	ChannelStarsTransactions(ctx context.Context, channelID int64, offset string, limit int) (domain.StarsTransactionPage, error)
+	ChannelStarsTransactions(ctx context.Context, channelID int64, query domain.StarsTransactionQuery) (domain.StarsTransactionPage, error)
 	ChannelTonBalance(ctx context.Context, channelID int64) (int64, error)
-	ChannelTonTransactions(ctx context.Context, channelID int64, offset string, limit int) (domain.TonTransactionPage, error)
+	ChannelTonTransactions(ctx context.Context, channelID int64, query domain.StarsTransactionQuery) (domain.TonTransactionPage, error)
 }
 
 // onPaymentsGetStarsStatus 返回请求 peer 的 Stars/本地 TON 余额。个人与频道账本
@@ -270,12 +270,9 @@ func (r *Router) onPaymentsGetStarsTransactions(ctx context.Context, req *tg.Pay
 	if err != nil {
 		return nil, err
 	}
-	offset, limit := "", domain.MaxStarsTransactionsLimit
-	if req != nil {
-		offset = req.Offset
-		if req.Limit > 0 {
-			limit = req.Limit
-		}
+	query, err := starsTransactionQuery(req)
+	if err != nil {
+		return nil, err
 	}
 	ton := req != nil && req.GetTon()
 	if owner.Type == domain.PeerTypeChannel {
@@ -287,7 +284,7 @@ func (r *Router) onPaymentsGetStarsTransactions(ctx context.Context, req *tg.Pay
 			return emptyStarsStatus(&tg.StarsAmount{}), nil
 		}
 		if ton {
-			page, err := ledger.ChannelTonTransactions(ctx, owner.ID, offset, limit)
+			page, err := ledger.ChannelTonTransactions(ctx, owner.ID, query)
 			if err != nil {
 				return nil, internalErr()
 			}
@@ -301,7 +298,7 @@ func (r *Router) onPaymentsGetStarsTransactions(ctx context.Context, req *tg.Pay
 			r.enrichChannelTonLedgerStatus(ctx, userID, owner.ID, page.Transactions, out)
 			return out, nil
 		}
-		page, err := ledger.ChannelStarsTransactions(ctx, owner.ID, offset, limit)
+		page, err := ledger.ChannelStarsTransactions(ctx, owner.ID, query)
 		if err != nil {
 			return nil, internalErr()
 		}
@@ -319,7 +316,7 @@ func (r *Router) onPaymentsGetStarsTransactions(ctx context.Context, req *tg.Pay
 		if r.deps.Gifts == nil {
 			return emptyStarsStatus(&tg.StarsTonAmount{}), nil
 		}
-		page, err := r.deps.Gifts.TonTransactions(ctx, userID, offset, limit)
+		page, err := r.deps.Gifts.TonTransactions(ctx, userID, query)
 		if err != nil {
 			return nil, internalErr()
 		}
@@ -342,7 +339,7 @@ func (r *Router) onPaymentsGetStarsTransactions(ctx context.Context, req *tg.Pay
 	if r.deps.Stars == nil {
 		return emptyStarsStatus(&tg.StarsAmount{}), nil
 	}
-	page, err := r.deps.Stars.ListTransactions(ctx, userID, offset, limit)
+	page, err := r.deps.Stars.ListTransactions(ctx, userID, query)
 	if err != nil {
 		return nil, starsErr(err)
 	}
@@ -358,6 +355,37 @@ func (r *Router) onPaymentsGetStarsTransactions(ctx context.Context, req *tg.Pay
 		out.Users = tgUsersForViewer(userID, r.domainUsersForIDs(ctx, userID, ids))
 	}
 	return out, nil
+}
+
+func starsTransactionQuery(req *tg.PaymentsGetStarsTransactionsRequest) (domain.StarsTransactionQuery, error) {
+	if req == nil {
+		return domain.StarsTransactionQuery{}, inputRequestInvalidErr()
+	}
+	inbound, outbound := req.GetInbound(), req.GetOutbound()
+	if inbound && outbound {
+		return domain.StarsTransactionQuery{}, inputRequestInvalidErr()
+	}
+	if _, ok := req.GetSubscriptionID(); ok {
+		// Stars subscriptions are not part of the current business model. Do not
+		// silently return the unfiltered ledger for a requested subscription.
+		return domain.StarsTransactionQuery{}, subscriptionIDInvalidErr()
+	}
+	direction := domain.StarsTransactionDirectionAll
+	if inbound {
+		direction = domain.StarsTransactionDirectionIncoming
+	} else if outbound {
+		direction = domain.StarsTransactionDirectionOutgoing
+	}
+	limit := req.Limit
+	if limit <= 0 || limit > domain.MaxStarsTransactionsLimit {
+		limit = domain.MaxStarsTransactionsLimit
+	}
+	return domain.StarsTransactionQuery{
+		Offset:    req.Offset,
+		Limit:     limit,
+		Direction: direction,
+		Ascending: req.GetAscending(),
+	}, nil
 }
 
 func (r *Router) starGiftLedgerOwner(ctx context.Context, req *tg.PaymentsGetStarsStatusRequest) (int64, domain.Peer, error) {

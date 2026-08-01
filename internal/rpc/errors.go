@@ -152,6 +152,8 @@ func balanceTooLowErr() error { return tgerr.New(400, "BALANCE_TOO_LOW") }
 
 func starsAmountInvalidErr() error { return tgerr.New(400, "STARS_AMOUNT_INVALID") }
 
+func subscriptionIDInvalidErr() error { return tgerr.New(400, "SUBSCRIPTION_ID_INVALID") }
+
 func starsFormAmountMismatchErr() error { return tgerr.New(406, "STARS_FORM_AMOUNT_MISMATCH") }
 
 func formIDEmptyErr() error { return tgerr.New(400, "FORM_ID_EMPTY") }

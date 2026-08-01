@@ -1598,7 +1598,7 @@ func TestStarsTopupInvoiceFallbackCreditsBalance(t *testing.T) {
 	if bal, _ := r.deps.Stars.GetBalance(ctx, sender.ID); bal.Balance != 3500 {
 		t.Fatalf("balance after topup = %d, want 3500", bal.Balance)
 	}
-	page, err := r.deps.Stars.ListTransactions(ctx, sender.ID, "", 10)
+	page, err := r.deps.Stars.ListTransactions(ctx, sender.ID, domain.StarsTransactionQuery{Limit: 10})
 	if err != nil {
 		t.Fatalf("list transactions: %v", err)
 	}

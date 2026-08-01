@@ -1159,7 +1159,7 @@ type GiftsService interface {
 	SetNotifications(ctx context.Context, userID, channelID int64, enabled bool) error
 	Withdraw(ctx context.Context, req domain.StarGiftWithdrawalRequest) (domain.StarGiftWithdrawal, error)
 	TonBalance(ctx context.Context, userID int64) (int64, error)
-	TonTransactions(ctx context.Context, userID int64, offset string, limit int) (domain.TonTransactionPage, error)
+	TonTransactions(ctx context.Context, userID int64, query domain.StarsTransactionQuery) (domain.TonTransactionPage, error)
 	IssuePurchaseForm(ctx context.Context, form domain.StarGiftPurchaseForm) (domain.StarGiftPurchaseForm, error)
 	ValidatePurchaseForm(ctx context.Context, req domain.StarGiftPurchaseRequest) error
 	Purchase(ctx context.Context, req domain.StarGiftPurchaseRequest) (domain.StarGiftPurchaseResult, error)
@@ -1172,7 +1172,7 @@ type StarsService interface {
 	GetBalance(ctx context.Context, userID int64) (domain.StarsBalance, error)
 	Credit(ctx context.Context, userID, amount int64, reason domain.StarsTransactionReason, peer domain.Peer, title, desc string) (domain.StarsBalance, error)
 	Debit(ctx context.Context, userID, amount int64, reason domain.StarsTransactionReason, peer domain.Peer, title, desc string) (domain.StarsBalance, error)
-	ListTransactions(ctx context.Context, userID int64, offset string, limit int) (domain.StarsTransactionPage, error)
+	ListTransactions(ctx context.Context, userID int64, query domain.StarsTransactionQuery) (domain.StarsTransactionPage, error)
 }
 
 // SecretChatService 抽象私聊端对端加密（Secret Chat）握手状态机（app/secretchat）。

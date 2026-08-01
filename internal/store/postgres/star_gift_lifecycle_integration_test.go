@@ -426,7 +426,7 @@ WHERE b.owner_user_id=$1 AND b.box_id=$2`, owner.ID, upgraded.Send.RecipientMess
 		Scan(&resaleCommission); err != nil || resaleCommission != 100 {
 		t.Fatalf("TON resale commission = %d err %v", resaleCommission, err)
 	}
-	tonPage, err := lifecycle.TonTransactions(ctx, resaleBuyer.ID, "", 20)
+	tonPage, err := lifecycle.TonTransactions(ctx, resaleBuyer.ID, domain.StarsTransactionQuery{Limit: 20})
 	if err != nil || tonPage.Balance != 999000 || len(tonPage.Transactions) < 2 {
 		t.Fatalf("TON ledger page = %+v err %v", tonPage, err)
 	}
@@ -1050,7 +1050,7 @@ WHERE channel_id=$1 AND event_type='send_message' AND message::text LIKE '%star_
 	if balance, err := lifecycle.ChannelStarsBalance(ctx, created.Channel.ID); err != nil || balance != 20 {
 		t.Fatalf("channel stars balance projection = %d err %v", balance, err)
 	}
-	starsPage, err := lifecycle.ChannelStarsTransactions(ctx, created.Channel.ID, "", 20)
+	starsPage, err := lifecycle.ChannelStarsTransactions(ctx, created.Channel.ID, domain.StarsTransactionQuery{Limit: 20})
 	if err != nil || starsPage.Balance != 20 || len(starsPage.Transactions) != 1 ||
 		starsPage.Transactions[0].Amount != 20 || starsPage.Transactions[0].Reason != domain.StarsReasonGift {
 		t.Fatalf("channel stars transaction projection = %+v err %v", starsPage, err)
@@ -1188,7 +1188,7 @@ WHERE channel_id=$1 AND message::text LIKE '%star_gift_unique%'`, created.Channe
 	if balance, err := lifecycle.ChannelTonBalance(ctx, created.Channel.ID); err != nil || balance != 900 {
 		t.Fatalf("channel ton balance projection = %d err %v", balance, err)
 	}
-	tonPage, err := lifecycle.ChannelTonTransactions(ctx, created.Channel.ID, "", 20)
+	tonPage, err := lifecycle.ChannelTonTransactions(ctx, created.Channel.ID, domain.StarsTransactionQuery{Limit: 20})
 	if err != nil || tonPage.Balance != 900 || len(tonPage.Transactions) != 1 ||
 		tonPage.Transactions[0].Amount != 900 || tonPage.Transactions[0].Reason != domain.StarsReasonGiftResale {
 		t.Fatalf("channel ton transaction projection = %+v err %v", tonPage, err)
