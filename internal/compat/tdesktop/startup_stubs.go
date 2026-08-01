@@ -57,7 +57,7 @@ func GlobalPrivacySettings() *tg.GlobalPrivacySettings {
 	return &tg.GlobalPrivacySettings{}
 }
 
-const chatThemesHash int64 = 2026062501
+const chatThemesHash int64 = 2026080101
 const uniqueGiftChatThemesHash int64 = 2026061201
 const wallPapersHash int64 = 2026062502
 const peerColorsHash = 2026061202
@@ -233,9 +233,14 @@ func WallPapers(hash int64) tg.AccountWallPapersClass {
 }
 
 // chatThemeBaseThemes enumerates the base themes every emoji chat theme ships
-// settings for. The client matches a chat theme's settings to whichever base
-// theme the user currently runs, and DrKLO's theme picker only surfaces a chat
-// theme whose settings cover at least four base themes
+// settings for. The order is part of the DrKLO client contract: the basic Chat
+// Settings picker selects index 0 for day and index 2 for night, matching its
+// built-in Blue, Day, Night, Dark Blue ordering. Arctic is an additional base
+// and therefore follows those four stable slots.
+//
+// The client matches a chat theme's settings to whichever base theme the user
+// currently runs, and DrKLO's theme picker only surfaces a chat theme whose
+// settings cover at least four base themes
 // (MediaDataController.generateEmojiPreviewThemes drops anything whose
 // items.size() < 4, one item per ThemeSettings). dark selects the bubble/accent
 // palette used for that base theme.
@@ -245,9 +250,9 @@ var chatThemeBaseThemes = []struct {
 }{
 	{func() tg.BaseThemeClass { return &tg.BaseThemeClassic{} }, false},
 	{func() tg.BaseThemeClass { return &tg.BaseThemeDay{} }, false},
-	{func() tg.BaseThemeClass { return &tg.BaseThemeArctic{} }, false},
-	{func() tg.BaseThemeClass { return &tg.BaseThemeTinted{} }, true},
 	{func() tg.BaseThemeClass { return &tg.BaseThemeNight{} }, true},
+	{func() tg.BaseThemeClass { return &tg.BaseThemeTinted{} }, true},
+	{func() tg.BaseThemeClass { return &tg.BaseThemeArctic{} }, false},
 }
 
 func AutoDownloadSettings() *tg.AccountAutoDownloadSettings {

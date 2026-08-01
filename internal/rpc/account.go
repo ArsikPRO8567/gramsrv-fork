@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/iamxvbaba/td/tg"
+	"go.uber.org/zap"
 
 	"github.com/iamxvbaba/td/tlprofile"
 	"telesrv/internal/branding"
@@ -289,6 +290,7 @@ func (r *Router) registerAccount(d *tlprofile.Dispatcher) {
 			return false, tgerr400("WALLPAPER_INVALID")
 		}
 		if _, ok := tdesktop.LookupWallPaper(req.Wallpaper); !ok {
+			r.log.Info("wallpaper reference rejected", wallpaperReferenceLogFields("account.installWallPaper", req.Wallpaper)...)
 			return false, tgerr400("WALLPAPER_INVALID")
 		}
 		return true, nil
@@ -461,6 +463,20 @@ func (r *Router) registerAccount(d *tlprofile.Dispatcher) {
 			Offline)
 	})
 
+}
+
+func wallpaperReferenceLogFields(method string, input tg.InputWallPaperClass) []zap.Field {
+	fields := []zap.Field{zap.String("method", method)}
+	switch wallpaper := input.(type) {
+	case *tg.InputWallPaperSlug:
+		return append(fields, zap.String("input_type", "inputWallPaperSlug"), zap.String("slug", wallpaper.Slug))
+	case *tg.InputWallPaper:
+		return append(fields, zap.String("input_type", "inputWallPaper"), zap.Int64("wallpaper_id", wallpaper.ID))
+	case *tg.InputWallPaperNoFile:
+		return append(fields, zap.String("input_type", "inputWallPaperNoFile"), zap.Int64("wallpaper_id", wallpaper.ID))
+	default:
+		return append(fields, zap.String("input_type", "unknown"))
+	}
 }
 
 func (r *Router) onAccountGetPassword(ctx context.Context) (*tg.AccountPassword, error) {

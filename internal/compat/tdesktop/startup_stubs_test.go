@@ -5,6 +5,8 @@ import (
 	"testing"
 
 	"github.com/iamxvbaba/td/tg"
+
+	"telesrv/internal/seed/appearance"
 )
 
 func TestNotifySettingsDefaultIsAudible(t *testing.T) {
@@ -216,6 +218,39 @@ func TestDefaultThemesAreDefaultFlaggedForPicker(t *testing.T) {
 	}
 }
 
+func TestDefaultThemeSettingsFollowDrKLOPickerIndices(t *testing.T) {
+	for _, theme := range DefaultThemeList() {
+		settings, ok := theme.GetSettings()
+		if !ok || len(settings) < 5 {
+			t.Fatalf("theme %d settings len=%d ok=%v, want five stable base slots", theme.ID, len(settings), ok)
+		}
+		if _, ok := settings[0].BaseTheme.(*tg.BaseThemeClassic); !ok {
+			t.Fatalf("theme %d settings[0] base = %T, want classic", theme.ID, settings[0].BaseTheme)
+		}
+		if _, ok := settings[1].BaseTheme.(*tg.BaseThemeDay); !ok {
+			t.Fatalf("theme %d settings[1] base = %T, want day", theme.ID, settings[1].BaseTheme)
+		}
+		if _, ok := settings[2].BaseTheme.(*tg.BaseThemeNight); !ok {
+			t.Fatalf("theme %d settings[2] base = %T, want night", theme.ID, settings[2].BaseTheme)
+		}
+		if _, ok := settings[3].BaseTheme.(*tg.BaseThemeTinted); !ok {
+			t.Fatalf("theme %d settings[3] base = %T, want tinted", theme.ID, settings[3].BaseTheme)
+		}
+		if _, ok := settings[4].BaseTheme.(*tg.BaseThemeArctic); !ok {
+			t.Fatalf("theme %d settings[4] base = %T, want arctic", theme.ID, settings[4].BaseTheme)
+		}
+		wallpaperClass, ok := settings[2].GetWallpaper()
+		wallpaper, fileWallpaper := wallpaperClass.(*tg.WallPaper)
+		if !ok || !fileWallpaper || !wallpaper.GetDark() {
+			t.Fatalf("theme %d night slot wallpaper = %#v ok=%v, want dark file wallpaper", theme.ID, wallpaperClass, ok)
+		}
+	}
+
+	if _, ok := ChatThemes(2026062501).(*tg.AccountThemesNotModified); ok {
+		t.Fatal("pre-fix chat theme hash was not invalidated after settings reorder")
+	}
+}
+
 func TestLookupDefaultThemeValidatesIdentity(t *testing.T) {
 	themes := DefaultThemeList()
 	if len(themes) == 0 {
@@ -366,9 +401,35 @@ func TestDefaultThemeWallpaperReferencesResolve(t *testing.T) {
 				t.Fatalf("theme %d settings[%d] wallpaper slug lookup = %#v", theme.ID, i, bySlug)
 			}
 		}
+		byThemeSlug, ok := LookupWallPaper(&tg.InputWallPaperSlug{Slug: theme.Slug})
+		if !ok {
+			t.Fatalf("theme %d fallback wallpaper alias %q was not resolvable", theme.ID, theme.Slug)
+		}
+		aliasWallpaper, ok := byThemeSlug.(*tg.WallPaper)
+		firstWallpaperClass, firstOK := settings[0].GetWallpaper()
+		firstWallpaper, firstFile := firstWallpaperClass.(*tg.WallPaper)
+		if !ok || !firstOK || !firstFile || aliasWallpaper.ID != firstWallpaper.ID || aliasWallpaper.Slug != firstWallpaper.Slug {
+			t.Fatalf("theme %d fallback alias = %#v, want settings[0] wallpaper %#v", theme.ID, byThemeSlug, firstWallpaperClass)
+		}
 	}
 	if checked == 0 {
 		t.Fatal("default themes exposed no file wallpapers")
+	}
+}
+
+func TestChatThemeWallpaperAliasRejectsAmbiguousSettings(t *testing.T) {
+	themes := []appearance.ChatTheme{{
+		Slug: "theme-alias",
+		Settings: []appearance.ThemeSettings{
+			{Wallpaper: appearance.Wallpaper{ID: 1, AccessHash: 11, Slug: "wallpaper-one"}},
+			{Wallpaper: appearance.Wallpaper{ID: 2, AccessHash: 22, Slug: "wallpaper-two"}},
+		},
+	}}
+	if _, ok := lookupChatThemeWallpaperAlias(themes, "theme-alias"); ok {
+		t.Fatal("ambiguous theme wallpaper alias was accepted")
+	}
+	if _, ok := lookupChatThemeWallpaperAlias(themes, "unknown"); ok {
+		t.Fatal("unknown theme wallpaper alias was accepted")
 	}
 }
 
