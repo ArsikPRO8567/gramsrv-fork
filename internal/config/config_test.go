@@ -70,6 +70,32 @@ func TestLoadUsesExplicitAdvertiseIP(t *testing.T) {
 	}
 }
 
+func TestLoadCanonicalizesAdvertiseIP(t *testing.T) {
+	disableDefaultConfigFile(t)
+	t.Setenv("TELESRV_ADVERTISE_IP", " 2001:0db8::1 ")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.AdvertiseIP != "2001:db8::1" {
+		t.Fatalf("AdvertiseIP = %q, want canonical IPv6", cfg.AdvertiseIP)
+	}
+}
+
+func TestLoadRejectsUnusableAdvertiseIP(t *testing.T) {
+	for _, value := range []string{"example.com", "0.0.0.0", "::", "224.0.0.1", "fe80::1%eth0"} {
+		t.Run(value, func(t *testing.T) {
+			disableDefaultConfigFile(t)
+			t.Setenv("TELESRV_ADVERTISE_IP", value)
+
+			if _, err := Load(); err == nil {
+				t.Fatalf("Load accepted TELESRV_ADVERTISE_IP=%q", value)
+			}
+		})
+	}
+}
+
 func TestLoadDefaultCountryCode(t *testing.T) {
 	t.Run("default", func(t *testing.T) {
 		disableDefaultConfigFile(t)

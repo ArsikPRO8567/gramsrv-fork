@@ -66,6 +66,7 @@ import (
 	"telesrv/internal/config"
 	"telesrv/internal/domain"
 	"telesrv/internal/mtprotoedge"
+	obsmetrics "telesrv/internal/observability/metrics"
 	"telesrv/internal/officialgifts"
 	"telesrv/internal/otpdelivery"
 	otpsmtp "telesrv/internal/otpdelivery/smtp"
@@ -234,7 +235,7 @@ func newTranslationOptions(cfg config.Config, limiter translationapp.RateLimiter
 //   - /debug/pprof/allocs   累计分配（带宽/序列化热点常与之相关）
 //
 // mutex/block 采样在低流量测试环境开销可忽略；高流量生产如担心扰动，置空 DebugAddr 关闭整端点。
-func startDebugServer(ctx context.Context, addr string, logger *zap.Logger) {
+func startDebugServer(ctx context.Context, addr string, metricsHandler http.Handler, logger *zap.Logger) {
 	if addr == "" {
 		return
 	}
@@ -247,6 +248,9 @@ func startDebugServer(ctx context.Context, addr string, logger *zap.Logger) {
 	mux.HandleFunc("/debug/pprof/profile", pprof.Profile)
 	mux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
 	mux.HandleFunc("/debug/pprof/trace", pprof.Trace)
+	if metricsHandler != nil {
+		mux.Handle("/metrics", metricsHandler)
+	}
 
 	srv := &http.Server{Addr: addr, Handler: mux}
 	go func() {
@@ -262,6 +266,54 @@ func startDebugServer(ctx context.Context, addr string, logger *zap.Logger) {
 		defer cancel()
 		_ = srv.Shutdown(shutdownCtx)
 	}()
+}
+
+func goRuntimeGaugeSamples() []obsmetrics.GaugeSample {
+	var mem runtime.MemStats
+	runtime.ReadMemStats(&mem)
+	return []obsmetrics.GaugeSample{
+		{Name: "telesrv_go_goroutines", Value: float64(runtime.NumGoroutine())},
+		{Name: "telesrv_go_heap_alloc_bytes", Value: float64(mem.HeapAlloc)},
+		{Name: "telesrv_go_heap_inuse_bytes", Value: float64(mem.HeapInuse)},
+		{Name: "telesrv_go_heap_objects", Value: float64(mem.HeapObjects)},
+		{Name: "telesrv_go_stack_inuse_bytes", Value: float64(mem.StackInuse)},
+		{Name: "telesrv_go_sys_bytes", Value: float64(mem.Sys)},
+		{Name: "telesrv_go_gc_cycles", Value: float64(mem.NumGC)},
+		{Name: "telesrv_go_gc_pause_seconds", Value: time.Duration(mem.PauseTotalNs).Seconds()},
+	}
+}
+
+func mtprotoRuntimeGaugeSamples(snapshot mtprotoedge.RuntimeSnapshot) []obsmetrics.GaugeSample {
+	return []obsmetrics.GaugeSample{
+		{Name: "telesrv_mtproto_raw_connections", Value: float64(snapshot.RawConnections)},
+		{Name: "telesrv_mtproto_raw_connection_limit", Value: float64(snapshot.RawConnectionLimit)},
+		{Name: "telesrv_mtproto_handshakes_active", Value: float64(snapshot.Handshakes)},
+		{Name: "telesrv_mtproto_handshake_limit", Value: float64(snapshot.HandshakeLimit)},
+		{Name: "telesrv_mtproto_sessions", Labels: []obsmetrics.Label{{Name: "state", Value: "active"}}, Value: float64(snapshot.ActiveSessions)},
+		{Name: "telesrv_mtproto_sessions", Labels: []obsmetrics.Label{{Name: "state", Value: "provisional"}}, Value: float64(snapshot.ProvisionalSessions)},
+		{Name: "telesrv_mtproto_logical_sessions", Labels: []obsmetrics.Label{{Name: "state", Value: "retained"}}, Value: float64(snapshot.LogicalSessions)},
+		{Name: "telesrv_mtproto_logical_sessions", Labels: []obsmetrics.Label{{Name: "state", Value: "offline"}}, Value: float64(snapshot.OfflineLogicalSessions)},
+		{Name: "telesrv_mtproto_logical_outbox_frames", Value: float64(snapshot.LogicalOutboxFrames)},
+		{Name: "telesrv_mtproto_logical_outbox_bytes", Value: float64(snapshot.LogicalOutboxBytes)},
+		{Name: "telesrv_mtproto_pending_push_bytes", Value: float64(snapshot.PendingPushBytes)},
+		{Name: "telesrv_mtproto_inbound_rpc_tasks", Value: float64(snapshot.InboundRPCTasks)},
+		{Name: "telesrv_mtproto_inbound_rpc_bytes", Value: float64(snapshot.InboundRPCBytes)},
+		{Name: "telesrv_mtproto_inbound_rpc_ready_connections", Value: float64(snapshot.InboundRPCReadyConnections)},
+		{Name: "telesrv_mtproto_inbound_rpc_task_limit", Value: float64(snapshot.InboundRPCMaxTasks)},
+		{Name: "telesrv_mtproto_inbound_rpc_byte_limit", Value: float64(snapshot.InboundRPCMaxBytes)},
+		{Name: "telesrv_mtproto_inbound_frame_bytes", Value: float64(snapshot.InboundFrameBytes)},
+		{Name: "telesrv_mtproto_inbound_frame_byte_limit", Value: float64(snapshot.InboundFrameMaxBytes)},
+		{Name: "telesrv_mtproto_outbound_tracked_bytes", Labels: []obsmetrics.Label{{Name: "kind", Value: "body"}}, Value: float64(snapshot.OutboundTrackedBytes)},
+		{Name: "telesrv_mtproto_outbound_tracked_bytes", Labels: []obsmetrics.Label{{Name: "kind", Value: "control"}}, Value: float64(snapshot.OutboundControlBytes)},
+		{Name: "telesrv_mtproto_outbound_tracked_byte_limit", Labels: []obsmetrics.Label{{Name: "kind", Value: "body"}}, Value: float64(snapshot.OutboundTrackedMaxBytes)},
+		{Name: "telesrv_mtproto_outbound_tracked_byte_limit", Labels: []obsmetrics.Label{{Name: "kind", Value: "control"}}, Value: float64(snapshot.OutboundControlMaxBytes)},
+		{Name: "telesrv_mtproto_outbound_write_bytes", Value: float64(snapshot.OutboundWriteBytes)},
+		{Name: "telesrv_mtproto_outbound_write_byte_limit", Value: float64(snapshot.OutboundWriteMaxBytes)},
+		{Name: "telesrv_mtproto_rpc_result_owners", Value: float64(snapshot.RPCResultOwners)},
+		{Name: "telesrv_mtproto_rpc_result_receipts", Value: float64(snapshot.RPCResultReceipts)},
+		{Name: "telesrv_mtproto_rpc_result_receipt_bytes", Value: float64(snapshot.RPCResultReceiptBytes)},
+		{Name: "telesrv_mtproto_rpc_result_subscribers", Value: float64(snapshot.RPCResultSubscribers)},
+	}
 }
 
 // externalMediaOption 按配置启用外链媒体抓取；禁用时返回 nil（NewService 跳过 nil option）。
@@ -496,10 +548,12 @@ func run(logger *zap.Logger) error {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	metricRegistry := obsmetrics.New()
+	metricRegistry.AddGaugeProvider(goRuntimeGaugeSamples)
 
 	// pprof 调试端点：telesrv 是宿主进程（不在 docker 内，docker stats 看不到它），CPU/内存/
 	// goroutine/锁竞争的定位全靠此端点。早于重负载初始化启动，连 seed/预热阶段也可剖析。
-	startDebugServer(ctx, cfg.DebugAddr, logger)
+	startDebugServer(ctx, cfg.DebugAddr, metricRegistry, logger)
 
 	// 持久化依赖：先迁移 schema，再建立连接。auth key 与业务事实落 PostgreSQL，
 	// Redis 只承载可重建的短 TTL 状态、缓存、计数器和限流。
@@ -521,6 +575,20 @@ func run(logger *zap.Logger) error {
 		return fmt.Errorf("connect postgres: %w", err)
 	}
 	defer pool.Close()
+	metricRegistry.AddGaugeProvider(func() []obsmetrics.GaugeSample {
+		stat := pool.Stat()
+		return []obsmetrics.GaugeSample{
+			{Name: "telesrv_postgres_pool_connections", Labels: []obsmetrics.Label{{Name: "state", Value: "total"}}, Value: float64(stat.TotalConns())},
+			{Name: "telesrv_postgres_pool_connections", Labels: []obsmetrics.Label{{Name: "state", Value: "acquired"}}, Value: float64(stat.AcquiredConns())},
+			{Name: "telesrv_postgres_pool_connections", Labels: []obsmetrics.Label{{Name: "state", Value: "idle"}}, Value: float64(stat.IdleConns())},
+			{Name: "telesrv_postgres_pool_connections", Labels: []obsmetrics.Label{{Name: "state", Value: "constructing"}}, Value: float64(stat.ConstructingConns())},
+			{Name: "telesrv_postgres_pool_max_connections", Value: float64(stat.MaxConns())},
+			{Name: "telesrv_postgres_pool_acquire_count", Value: float64(stat.AcquireCount())},
+			{Name: "telesrv_postgres_pool_acquire_wait_seconds", Value: stat.AcquireDuration().Seconds()},
+			{Name: "telesrv_postgres_pool_empty_acquire_count", Value: float64(stat.EmptyAcquireCount())},
+			{Name: "telesrv_postgres_pool_canceled_acquire_count", Value: float64(stat.CanceledAcquireCount())},
+		}
+	})
 
 	var telegramLoginService *telegramloginapp.Service
 	var telegramLoginIDTokens *telegramloginapp.IDTokenIssuer
@@ -561,6 +629,19 @@ func run(logger *zap.Logger) error {
 		return fmt.Errorf("connect redis: %w", err)
 	}
 	defer func() { _ = rdb.Close() }()
+	metricRegistry.AddGaugeProvider(func() []obsmetrics.GaugeSample {
+		stat := rdb.PoolStats()
+		return []obsmetrics.GaugeSample{
+			{Name: "telesrv_redis_pool_connections", Labels: []obsmetrics.Label{{Name: "state", Value: "total"}}, Value: float64(stat.TotalConns)},
+			{Name: "telesrv_redis_pool_connections", Labels: []obsmetrics.Label{{Name: "state", Value: "idle"}}, Value: float64(stat.IdleConns)},
+			{Name: "telesrv_redis_pool_pending_requests", Value: float64(stat.PendingRequests)},
+			{Name: "telesrv_redis_pool_hits", Value: float64(stat.Hits)},
+			{Name: "telesrv_redis_pool_misses", Value: float64(stat.Misses)},
+			{Name: "telesrv_redis_pool_timeouts", Value: float64(stat.Timeouts)},
+			{Name: "telesrv_redis_pool_wait_count", Value: float64(stat.WaitCount)},
+			{Name: "telesrv_redis_pool_wait_seconds", Value: time.Duration(stat.WaitDurationNs).Seconds()},
+		}
+	})
 	logger.Info("持久化依赖就绪", zap.String("redis", cfg.RedisAddr))
 	if cfg.TelegramLoginEnabled {
 		telegramLoginHTTPHandler, err = telegramloginhttp.NewHandler(telegramloginhttp.Config{
@@ -1178,6 +1259,7 @@ func run(logger *zap.Logger) error {
 		TURN:                 turnService,
 		LangPack:             langPackService,
 		Sessions:             activeSessions,
+		Metrics:              metricRegistry,
 		Inline:               inlineRegistryStore,
 		Limiter:              rateLimiter,
 	}, logger.Named("rpc"), clock.System)
@@ -1309,6 +1391,7 @@ func run(logger *zap.Logger) error {
 		rpc.WithOutboxBatch(cfg.OutboxBatch),
 		rpc.WithOutboxInterval(cfg.OutboxInterval),
 		rpc.WithOutboxPushTimeout(cfg.OutboundPushTimeout),
+		rpc.WithOutboxMetrics(metricRegistry),
 		rpc.WithOutboxUpdateBuilder(router.BuildOutboxUpdates),
 	).Run(ctx)
 	go rpc.NewBootstrapUpdateDispatcher(router, logger.Named("rpc").Named("bootstrap")).Run(ctx)
@@ -1404,6 +1487,7 @@ func run(logger *zap.Logger) error {
 		LayerRPC:                        router,
 		AuthKeys:                        authKeyStore,
 		ActiveSessions:                  activeSessions,
+		Metrics:                         metricRegistry,
 		ObfuscatedTCP:                   true,
 		WebSocket:                       cfg.WebSocketEnable,
 		WebSocketAllowedOrigins:         cfg.WebSocketAllowedOrigins,
@@ -1435,6 +1519,9 @@ func run(logger *zap.Logger) error {
 				zap.String("blob_backend", "localfs"),
 			)
 		},
+	})
+	metricRegistry.AddGaugeProvider(func() []obsmetrics.GaugeSample {
+		return mtprotoRuntimeGaugeSamples(srv.RuntimeSnapshot())
 	})
 	// This is intentionally the final startup operation. ListenAndServe owns the
 	// public listener so no seed/prewarm work can run after port 2398 is exposed.

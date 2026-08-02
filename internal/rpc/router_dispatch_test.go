@@ -66,8 +66,12 @@ func TestDispatchUnwrapsWrappers(t *testing.T) {
 	if cfg.ThisDC != dc {
 		t.Fatalf("ThisDC = %d, want %d", cfg.ThisDC, dc)
 	}
-	if len(cfg.DCOptions) != 0 {
-		t.Fatalf("DCOptions = %+v, want empty (client uses pinned static address)", cfg.DCOptions)
+	if len(cfg.DCOptions) != 1 {
+		t.Fatalf("DCOptions = %+v, want one reconnect route", cfg.DCOptions)
+	}
+	option := cfg.DCOptions[0]
+	if option.ID != dc || option.IPAddress != ip || option.Port != port || option.Ipv6 || option.MediaOnly || option.CDN {
+		t.Fatalf("DCOptions[0] = %+v, want primary dc=%d at %s:%d", option, dc, ip, port)
 	}
 }
 

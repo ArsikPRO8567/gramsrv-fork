@@ -1834,13 +1834,13 @@ func (c *Conn) handleOutboundOp(state *outboundState, op outboundOp) {
 	state.mu.Lock()
 	var (
 		result outboundResult
-		acked  []int64
+		acked  []outboundAcknowledgement
 	)
 	switch op.kind {
 	case outboundSend:
 		result.err = c.handleOutboundSend(state, op)
 	case outboundAck:
-		acked = state.ack(op.ids)
+		acked = state.ackWithDetails(op.ids)
 	case outboundQueryState:
 		result.info = state.stateInfo(op.ids)
 	case outboundResend:
@@ -1851,9 +1851,16 @@ func (c *Conn) handleOutboundOp(state *outboundState, op outboundOp) {
 		result.err = fmt.Errorf("unknown outbound op %d", op.kind)
 	}
 	state.mu.Unlock()
-	for _, reqMsgID := range acked {
-		if c.rpcResultAcked != nil {
-			c.rpcResultAcked(c, reqMsgID)
+	for _, ack := range acked {
+		if metrics, ok := c.metrics.(LogicalOutboxMetrics); ok {
+			retainedFor := time.Duration(0)
+			if !ack.sentAt.IsZero() {
+				retainedFor = time.Since(ack.sentAt)
+			}
+			metrics.LogicalOutboxAcknowledged(ack.bytes, retainedFor, ack.reqMsgID != 0)
+		}
+		if ack.reqMsgID != 0 && c.rpcResultAcked != nil {
+			c.rpcResultAcked(c, ack.reqMsgID)
 		}
 	}
 	op.finish(result)
@@ -2663,25 +2670,45 @@ func (s *outboundState) addReserved(frame *outboundFrame) int {
 	return s.shrinkPending()
 }
 
+type outboundAcknowledgement struct {
+	reqMsgID int64
+	bytes    int
+	sentAt   time.Time
+}
+
 func (s *outboundState) ack(ids []int64) []int64 {
-	var requestIDs []int64
+	details := s.ackWithDetails(ids)
+	requestIDs := make([]int64, 0, len(details))
+	for _, detail := range details {
+		if detail.reqMsgID != 0 {
+			requestIDs = append(requestIDs, detail.reqMsgID)
+		}
+	}
+	return requestIDs
+}
+
+func (s *outboundState) ackWithDetails(ids []int64) []outboundAcknowledgement {
+	var acknowledged []outboundAcknowledgement
 	for _, id := range ids {
 		frame, ok := s.pending[id]
 		if !ok {
 			continue
 		}
-		if frame.reqMsgID != 0 {
-			requestIDs = append(requestIDs, frame.reqMsgID)
+		detail := outboundAcknowledgement{
+			reqMsgID: frame.reqMsgID,
+			bytes:    len(frame.body),
+			sentAt:   frame.sentAt,
 		}
 		if !s.removePending(id) {
 			continue
 		}
 		s.markAcked(id)
+		acknowledged = append(acknowledged, detail)
 	}
 	if len(s.order) > s.maxMessages*2 {
 		s.compactOrder()
 	}
-	return requestIDs
+	return acknowledged
 }
 
 func (s *outboundState) stateInfo(ids []int64) []byte {

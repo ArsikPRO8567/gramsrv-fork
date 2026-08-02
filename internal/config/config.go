@@ -597,6 +597,10 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, fmt.Errorf("TELESRV_DEFAULT_COUNTRY_CODE: %w", err)
 	}
+	advertiseIP, err := normalizeAdvertiseIP(envOr("TELESRV_ADVERTISE_IP", "127.0.0.1"))
+	if err != nil {
+		return Config{}, fmt.Errorf("TELESRV_ADVERTISE_IP: %w", err)
+	}
 	// The composite rating weight defaults are the domain formula's own defaults;
 	// see RatingWeight* below.
 	defaultRatingWeights := domain.DefaultAccountRatingWeights()
@@ -612,10 +616,9 @@ func Load() (Config, error) {
 			"http://localhost:1234",
 			"http://127.0.0.1:1234",
 		}),
-		// AdvertiseIP 当前不影响 help.getConfig——getConfig 返回空 DCOptions，
-		// 客户端使用其写死的 static DC 地址（见 compat/tdesktop/config.go）。
-		// 字段与默认值保留，供未来需要显式下发 DC 地址时使用。
-		AdvertiseIP:                         envOr("TELESRV_ADVERTISE_IP", "127.0.0.1"),
+		// help.getConfig 必须下发至少一个可重连的主 DC 地址；远端部署不能
+		// 沿用 loopback 默认值，需显式设置客户端实际可达的 IP。
+		AdvertiseIP:                         advertiseIP,
 		RSAKeyPath:                          envOr("TELESRV_RSA_KEY", "data/server_rsa.pem"),
 		DC:                                  envIntOr("TELESRV_DC", 2),
 		DefaultCountryCode:                  countryCode,
@@ -894,6 +897,18 @@ func normalizeDefaultCountryCode(raw string) (string, error) {
 		return "", fmt.Errorf("must identify a country or autonomous area")
 	}
 	return region.String(), nil
+}
+
+func normalizeAdvertiseIP(raw string) (string, error) {
+	addr, err := netip.ParseAddr(strings.TrimSpace(raw))
+	if err != nil {
+		return "", fmt.Errorf("must be an IPv4 or IPv6 address: %w", err)
+	}
+	addr = addr.Unmap()
+	if addr.IsUnspecified() || addr.IsMulticast() || addr.Zone() != "" {
+		return "", fmt.Errorf("must be a unicast address usable by clients")
+	}
+	return addr.String(), nil
 }
 
 func validateTelegramLoginConfig(cfg Config) error {
