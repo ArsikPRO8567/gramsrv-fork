@@ -202,7 +202,8 @@ func (r *Router) registerUpdatesDeliveryPlan(ctx context.Context, plan *updatesD
 //  1. commit the exact account cursor carried by the delivered result;
 //  2. the just-delivered difference may retire its projected secret-chat events;
 //  3. membership routing is rebuilt before SetReceivesUpdates starts FIFO flush;
-//  4. bootstrap jobs are published last, so they queue behind older pending updates.
+//  4. the current session receives one complete self profile after becoming ready;
+//  5. bootstrap jobs are published last, so they queue behind older pending updates.
 //
 // Each phase gets an independent timeout so one failed side effect cannot starve
 // the remaining delivery-safe transitions.
@@ -237,6 +238,10 @@ func (r *Router) runUpdatesDeliveryPlan(plan updatesDeliveryPlan) {
 	if plan.markSessionReady {
 		ctx, cancel := context.WithTimeout(baseCtx, updatesDeliveryPhaseTimeout)
 		r.markSessionReceivesUpdatesNow(ctx, plan.readyUserID)
+		cancel()
+
+		ctx, cancel = context.WithTimeout(baseCtx, updatesDeliveryPhaseTimeout)
+		r.pushUpdatesReadySelfProfile(ctx, plan.readyUserID)
 		cancel()
 	}
 	if plan.publishBootstrap {

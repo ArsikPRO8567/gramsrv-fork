@@ -10,6 +10,7 @@ import (
 	"github.com/iamxvbaba/td/bin"
 	"github.com/iamxvbaba/td/clock"
 	"github.com/iamxvbaba/td/tg"
+	"github.com/iamxvbaba/td/tlprofile"
 	"go.uber.org/zap/zaptest"
 
 	appchannels "telesrv/internal/app/channels"
@@ -61,6 +62,145 @@ func TestDispatchMarksSessionReceivesUpdates(t *testing.T) {
 	}
 	if sessions.sessionID != 42 {
 		t.Fatalf("marked session_id = %d, want 42", sessions.sessionID)
+	}
+}
+
+type updatesStateCaptureSessions struct {
+	*captureSessions
+}
+
+func (s *updatesStateCaptureSessions) ReceivesUpdatesForAuthKey([8]byte, int64) bool {
+	return s.snapshot().receives
+}
+
+func TestDispatchPushesCompleteSelfProfileOnceWhenSessionBecomesReady(t *testing.T) {
+	const (
+		userID    = int64(1000000311)
+		sessionID = int64(311)
+	)
+	rawAuthKeyID := [8]byte{31}
+	self := domain.User{
+		ID:         userID,
+		AccessHash: 3111,
+		FirstName:  "Alice",
+		Username:   "Alice",
+	}
+	peer := domain.Peer{Type: domain.PeerTypeUser, ID: userID}
+	registry := newFakeUsernameRegistry()
+	registry.byPeer[peer] = []domain.Username{
+		{Username: "Alice", Active: true, Editable: true, SortOrder: 0},
+		{Username: "aliceCollect0728b", Active: true, SortOrder: 1, CollectibleID: 2},
+		{Username: "aliceCollect0728a", Active: true, SortOrder: 2, CollectibleID: 1},
+	}
+	sessions := &updatesStateCaptureSessions{captureSessions: &captureSessions{}}
+	r := New(Config{DC: 2, IP: "127.0.0.1", Port: 2398}, Deps{
+		Sessions:  sessions,
+		Users:     staticUsersService{user: self},
+		Usernames: registry,
+	}, zaptest.NewLogger(t), clock.System)
+
+	dispatch := func() context.Context {
+		t.Helper()
+		var in bin.Buffer
+		if err := (&tg.HelpGetConfigRequest{}).Encode(&in); err != nil {
+			t.Fatalf("encode help.getConfig: %v", err)
+		}
+		ctx := postresponse.WithCallbacks(WithUserID(context.Background(), userID))
+		if _, err := r.Dispatch(ctx, rawAuthKeyID, sessionID, &in); err != nil {
+			t.Fatalf("dispatch help.getConfig: %v", err)
+		}
+		return ctx
+	}
+
+	ctx := dispatch()
+	if got := sessions.snapshot(); got.receives || got.sessionPushCalls != 0 {
+		t.Fatalf("pre-delivery readiness = receives:%v pushes:%d, want false/0", got.receives, got.sessionPushCalls)
+	}
+	postresponse.Run(ctx)
+
+	got := sessions.snapshot()
+	if !got.receives || got.receivesCalls != 1 || got.sessionPushCalls != 1 {
+		t.Fatalf("post-delivery readiness = receives:%v ready_calls:%d pushes:%d, want true/1/1",
+			got.receives, got.receivesCalls, got.sessionPushCalls)
+	}
+	updates, ok := got.message.(*tg.Updates)
+	if !ok || len(updates.Updates) != 1 || len(updates.Users) != 1 {
+		t.Fatalf("self refresh = %T %+v, want one update and one user", got.message, got.message)
+	}
+	refresh, ok := updates.Updates[0].(*tg.UpdateUser)
+	if !ok || refresh.UserID != userID {
+		t.Fatalf("self refresh update = %T %+v, want updateUser(%d)", updates.Updates[0], updates.Updates[0], userID)
+	}
+	projected, ok := updates.Users[0].(*tg.User)
+	if !ok {
+		t.Fatalf("self refresh user = %T, want *tg.User", updates.Users[0])
+	}
+	vector, set := projected.GetUsernames()
+	wantUsernames := []string{"Alice", "aliceCollect0728b", "aliceCollect0728a"}
+	if !set || !reflect.DeepEqual(usernameStrings(vector), wantUsernames) {
+		t.Fatalf("self refresh usernames = %v (set %v), want %v", usernameStrings(vector), set, wantUsernames)
+	}
+	if scalar, set := projected.GetUsername(); !set || scalar != "Alice" {
+		t.Fatalf("self refresh scalar username = %q (set %v), want Alice", scalar, set)
+	}
+	if updates.Seq != 0 {
+		t.Fatalf("self refresh seq = %d, want 0", updates.Seq)
+	}
+
+	var wire bin.Buffer
+	if err := tlprofile.EncodeObject(tlprofile.Profile228, updates, &wire); err != nil {
+		t.Fatalf("encode Layer 228 self refresh: %v", err)
+	}
+	decoded, err := tlprofile.DecodeObject(tlprofile.Profile228, &bin.Buffer{Buf: wire.Copy()}, tlprofile.Limits{})
+	if err != nil {
+		t.Fatalf("decode Layer 228 self refresh: %v", err)
+	}
+	decodedUpdates, ok := decoded.(*tg.Updates)
+	if !ok || len(decodedUpdates.Users) != 1 {
+		t.Fatalf("decoded Layer 228 self refresh = %T %+v", decoded, decoded)
+	}
+	decodedUser := decodedUpdates.Users[0].(*tg.User)
+	decodedVector, decodedSet := decodedUser.GetUsernames()
+	if !decodedSet || !reflect.DeepEqual(usernameStrings(decodedVector), wantUsernames) {
+		t.Fatalf("decoded Layer 228 usernames = %v (set %v), want %v",
+			usernameStrings(decodedVector), decodedSet, wantUsernames)
+	}
+
+	// A session that is already fully ready must not receive the bootstrap again
+	// on every ordinary RPC.
+	postresponse.Run(dispatch())
+	got = sessions.snapshot()
+	if got.receivesCalls != 1 || got.sessionPushCalls != 1 || registry.peerCalls != 1 {
+		t.Fatalf("repeat dispatch effects = ready_calls:%d pushes:%d registry_reads:%d, want 1/1/1",
+			got.receivesCalls, got.sessionPushCalls, registry.peerCalls)
+	}
+}
+
+func TestDispatchSuppressesSelfProfileWhenUsernameRegistryFails(t *testing.T) {
+	const userID = int64(1000000312)
+	registry := newFakeUsernameRegistry()
+	registry.err = errors.New("registry unavailable")
+	sessions := &updatesStateCaptureSessions{captureSessions: &captureSessions{}}
+	r := New(Config{DC: 2, IP: "127.0.0.1", Port: 2398}, Deps{
+		Sessions: sessions,
+		Users: staticUsersService{user: domain.User{
+			ID: userID, FirstName: "Alice", Username: "Alice",
+		}},
+		Usernames: registry,
+	}, zaptest.NewLogger(t), clock.System)
+
+	var in bin.Buffer
+	if err := (&tg.HelpGetConfigRequest{}).Encode(&in); err != nil {
+		t.Fatalf("encode help.getConfig: %v", err)
+	}
+	ctx := postresponse.WithCallbacks(WithUserID(context.Background(), userID))
+	if _, err := r.Dispatch(ctx, [8]byte{32}, 312, &in); err != nil {
+		t.Fatalf("dispatch help.getConfig: %v", err)
+	}
+	postresponse.Run(ctx)
+	got := sessions.snapshot()
+	if !got.receives || got.sessionPushCalls != 0 {
+		t.Fatalf("registry failure effects = receives:%v pushes:%d, want true/0", got.receives, got.sessionPushCalls)
 	}
 }
 

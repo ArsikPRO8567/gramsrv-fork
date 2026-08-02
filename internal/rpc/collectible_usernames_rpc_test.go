@@ -12,6 +12,7 @@ import (
 	"github.com/iamxvbaba/td/clock"
 	"github.com/iamxvbaba/td/tg"
 	"github.com/iamxvbaba/td/tgerr"
+	"github.com/iamxvbaba/td/tlprofile"
 	"go.uber.org/zap/zaptest"
 
 	appchannels "telesrv/internal/app/channels"
@@ -285,6 +286,149 @@ func TestUsersGetUsersProjectsCollectibleUsernamesInOneBatch(t *testing.T) {
 	// Two users, one batch read: no N+1.
 	if registry.batchCalls != 1 || registry.peerCalls != 0 {
 		t.Fatalf("registry reads = batch %d / peer %d, want batch 1 / peer 0", registry.batchCalls, registry.peerCalls)
+	}
+}
+
+func TestResolveUsernamePreservesCompleteUsernamesThroughLayer228(t *testing.T) {
+	registry := newFakeUsernameRegistry()
+	f := newUsernameProjectionFixture(t, registry)
+	registry.byPeer[domain.Peer{Type: domain.PeerTypeUser, ID: f.owner.ID}] = []domain.Username{
+		{Username: "owner_slot", Editable: true, Active: true, SortOrder: 0},
+		{Username: "owner_collectible_b", Active: true, SortOrder: 1, CollectibleID: 22},
+		{Username: "owner_collectible_a", Active: true, SortOrder: 2, CollectibleID: 21},
+	}
+
+	resolved, err := f.router.onContactsResolveUsername(
+		WithUserID(context.Background(), f.friend.ID),
+		&tg.ContactsResolveUsernameRequest{Username: "@owner_slot"},
+	)
+	if err != nil {
+		t.Fatalf("resolve username: %v", err)
+	}
+	assertResolvedUsernames := func(stage string, value *tg.ContactsResolvedPeer) {
+		t.Helper()
+		if value == nil || len(value.Users) != 1 {
+			t.Fatalf("%s resolved users = %+v, want one user", stage, value)
+		}
+		user, ok := value.Users[0].(*tg.User)
+		if !ok {
+			t.Fatalf("%s resolved user = %T, want *tg.User", stage, value.Users[0])
+		}
+		if scalar, set := user.GetUsername(); !set || scalar != "owner_slot" {
+			t.Fatalf("%s scalar username = %q (set %v), want owner_slot", stage, scalar, set)
+		}
+		vector, set := user.GetUsernames()
+		want := []string{"owner_slot", "owner_collectible_b", "owner_collectible_a"}
+		if !set || !reflect.DeepEqual(usernameStrings(vector), want) {
+			t.Fatalf("%s usernames = %v (set %v), want %v", stage, usernameStrings(vector), set, want)
+		}
+	}
+	assertResolvedUsernames("canonical", resolved)
+
+	var wire bin.Buffer
+	if err := tlprofile.EncodeObject(tlprofile.Profile228, resolved, &wire); err != nil {
+		t.Fatalf("encode Layer 228 resolved peer: %v", err)
+	}
+	decoded, err := tlprofile.DecodeObject(
+		tlprofile.Profile228,
+		&bin.Buffer{Buf: wire.Copy()},
+		tlprofile.Limits{},
+	)
+	if err != nil {
+		t.Fatalf("decode Layer 228 resolved peer: %v", err)
+	}
+	decodedResolved, ok := decoded.(*tg.ContactsResolvedPeer)
+	if !ok {
+		t.Fatalf("decoded Layer 228 object = %T, want *tg.ContactsResolvedPeer", decoded)
+	}
+	assertResolvedUsernames("Layer 228", decodedResolved)
+
+	requestBody := encodeExactLayerRPC(t, tlprofile.Profile228, &tg.ContactsResolveUsernameRequest{
+		Username: "@owner_slot",
+	})
+	admitted, err := f.router.AdmitLayer(tlprofile.Profile228, &requestBody, tlprofile.Limits{})
+	if err != nil {
+		t.Fatalf("admit Layer 228 contacts.resolveUsername: %v", err)
+	}
+	result, method, err := f.router.DispatchAdmitted(
+		WithUserID(context.Background(), f.friend.ID),
+		[8]byte{1},
+		1,
+		1,
+		1,
+		admitted,
+	)
+	if err != nil || method != "contacts.resolveUsername" {
+		t.Fatalf("dispatch Layer 228 method=%q err=%v", method, err)
+	}
+	var resultWire bin.Buffer
+	if err := result.Encode(&resultWire); err != nil {
+		t.Fatalf("encode Layer 228 method result: %v", err)
+	}
+	decodedResult, err := tlprofile.DecodeObject(
+		tlprofile.Profile228,
+		&bin.Buffer{Buf: resultWire.Copy()},
+		tlprofile.Limits{},
+	)
+	if err != nil {
+		t.Fatalf("decode Layer 228 method result: %v", err)
+	}
+	methodResolved, ok := decodedResult.(*tg.ContactsResolvedPeer)
+	if !ok {
+		t.Fatalf("decoded Layer 228 method result = %T, want *tg.ContactsResolvedPeer", decodedResult)
+	}
+	assertResolvedUsernames("Layer 228 method result", methodResolved)
+}
+
+func TestAuthLoginTokenSuccessProjectsCompleteSelfUsernames(t *testing.T) {
+	registry := newFakeUsernameRegistry()
+	f := newUsernameProjectionFixture(t, registry)
+	registry.byPeer[domain.Peer{Type: domain.PeerTypeUser, ID: f.owner.ID}] = []domain.Username{
+		{Username: "owner_slot", Editable: true, Active: true, SortOrder: 0},
+		{Username: "owner_collectible_b", Active: true, SortOrder: 1, CollectibleID: 22},
+		{Username: "owner_collectible_a", Active: true, SortOrder: 2, CollectibleID: 21},
+	}
+
+	result, err := f.router.authLoginTokenSuccess(context.Background(), domain.Authorization{UserID: f.owner.ID})
+	if err != nil {
+		t.Fatalf("auth login token success: %v", err)
+	}
+	success, ok := result.(*tg.AuthLoginTokenSuccess)
+	if !ok {
+		t.Fatalf("auth login token result = %T, want *tg.AuthLoginTokenSuccess", result)
+	}
+	authorization, ok := success.Authorization.(*tg.AuthAuthorization)
+	if !ok {
+		t.Fatalf("authorization = %T, want *tg.AuthAuthorization", success.Authorization)
+	}
+	self, ok := authorization.User.(*tg.User)
+	if !ok {
+		t.Fatalf("authorization user = %T, want *tg.User", authorization.User)
+	}
+	want := []string{"owner_slot", "owner_collectible_b", "owner_collectible_a"}
+	vector, set := self.GetUsernames()
+	if !set || !reflect.DeepEqual(usernameStrings(vector), want) {
+		t.Fatalf("authorization usernames = %v (set %v), want %v", usernameStrings(vector), set, want)
+	}
+
+	var wire bin.Buffer
+	if err := tlprofile.EncodeObject(tlprofile.Profile228, success, &wire); err != nil {
+		t.Fatalf("encode Layer 228 login token success: %v", err)
+	}
+	decoded, err := tlprofile.DecodeObject(tlprofile.Profile228, &bin.Buffer{Buf: wire.Copy()}, tlprofile.Limits{})
+	if err != nil {
+		t.Fatalf("decode Layer 228 login token success: %v", err)
+	}
+	decodedSuccess, ok := decoded.(*tg.AuthLoginTokenSuccess)
+	if !ok {
+		t.Fatalf("decoded login token success = %T", decoded)
+	}
+	decodedAuthorization := decodedSuccess.Authorization.(*tg.AuthAuthorization)
+	decodedSelf := decodedAuthorization.User.(*tg.User)
+	decodedVector, decodedSet := decodedSelf.GetUsernames()
+	if !decodedSet || !reflect.DeepEqual(usernameStrings(decodedVector), want) {
+		t.Fatalf("decoded authorization usernames = %v (set %v), want %v",
+			usernameStrings(decodedVector), decodedSet, want)
 	}
 }
 
