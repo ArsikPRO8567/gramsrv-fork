@@ -2,7 +2,6 @@ package rpc
 
 import (
 	"context"
-	"strconv"
 	"time"
 
 	"go.uber.org/zap"
@@ -203,8 +202,7 @@ func (r *Router) registerUpdatesDeliveryPlan(ctx context.Context, plan *updatesD
 //  1. commit the exact account cursor carried by the delivered result;
 //  2. the just-delivered difference may retire its projected secret-chat events;
 //  3. membership routing is rebuilt before SetReceivesUpdates starts FIFO flush;
-//  4. one claim owner activates the session and emits its username convergence update;
-//  5. bootstrap jobs are published last, so they queue behind older pending updates.
+//  4. bootstrap jobs are published last, so they queue behind older pending updates.
 //
 // Each phase gets an independent timeout so one failed side effect cannot starve
 // the remaining delivery-safe transitions.
@@ -237,53 +235,11 @@ func (r *Router) runUpdatesDeliveryPlan(plan updatesDeliveryPlan) {
 		}
 	}
 	if plan.markSessionReady {
-		r.activateSessionUpdates(baseCtx, plan.readyUserID)
+		ctx, cancel := context.WithTimeout(baseCtx, updatesDeliveryPhaseTimeout)
+		r.markSessionReceivesUpdatesNow(ctx, plan.readyUserID)
+		cancel()
 	}
 	if plan.publishBootstrap {
 		r.publishBootstrapAfterBaseline(baseCtx, plan.bootstrapUserID)
 	}
-}
-
-func (r *Router) activateSessionUpdates(baseCtx context.Context, userID int64) {
-	rawAuthKeyID, okRaw := RawAuthKeyIDFrom(baseCtx)
-	sessionID, okSession := SessionIDFrom(baseCtx)
-	if userID == 0 {
-		return
-	}
-	if !okRaw || !okSession {
-		// Direct handler tests and lightweight embeddings may not carry the full
-		// physical identity. They cannot benefit from a cross-request claim, but
-		// must retain the historical delivery-gated activation behavior.
-		ctx, cancel := context.WithTimeout(baseCtx, updatesDeliveryPhaseTimeout)
-		started := r.markSessionReceivesUpdatesNow(ctx, userID)
-		cancel()
-		if started {
-			ctx, cancel = context.WithTimeout(baseCtx, updatesDeliveryPhaseTimeout)
-			r.pushUpdatesReadySelfProfile(ctx, userID)
-			cancel()
-		}
-		return
-	}
-	if r.sessionUpdatesActivationStarted(baseCtx) {
-		return
-	}
-	key := string(rawAuthKeyID[:]) + strconv.FormatInt(sessionID, 10)
-	_, _, _ = r.updatesReadySF.Do(key, func() (any, error) {
-		// A callback may have been staged before another callback completed the
-		// same activation. Re-check under singleflight before touching storage.
-		if r.sessionUpdatesActivationStarted(baseCtx) {
-			return nil, nil
-		}
-		ctx, cancel := context.WithTimeout(baseCtx, updatesDeliveryPhaseTimeout)
-		started := r.markSessionReceivesUpdatesNow(ctx, userID)
-		cancel()
-		if !started {
-			return nil, nil
-		}
-
-		ctx, cancel = context.WithTimeout(baseCtx, updatesDeliveryPhaseTimeout)
-		r.pushUpdatesReadySelfProfile(ctx, userID)
-		cancel()
-		return nil, nil
-	})
 }

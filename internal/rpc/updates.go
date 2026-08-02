@@ -210,39 +210,26 @@ func (r *Router) maybeMarkSessionReceivesUpdates(ctx context.Context) {
 	if !ok {
 		return
 	}
-	if r.sessionUpdatesActivationStarted(ctx) {
-		return
+	if provider, ok := r.deps.Sessions.(SessionUpdatesStateProvider); ok {
+		rawAuthKeyID, okRaw := RawAuthKeyIDFrom(ctx)
+		sessionID, okSess := SessionIDFrom(ctx)
+		if okRaw && okSess && provider.ReceivesUpdatesForAuthKey(rawAuthKeyID, sessionID) {
+			return
+		}
 	}
 	r.stageSessionUpdatesReadyAfterDelivery(ctx, userID)
 }
 
-func (r *Router) sessionUpdatesActivationStarted(ctx context.Context) bool {
-	provider, ok := r.deps.Sessions.(SessionUpdatesStateProvider)
-	if !ok {
-		return false
-	}
-	rawAuthKeyID, okRaw := RawAuthKeyIDFrom(ctx)
-	sessionID, okSession := SessionIDFrom(ctx)
-	return okRaw && okSession && provider.UpdatesActivationStartedForAuthKey(rawAuthKeyID, sessionID)
-}
-
-func (r *Router) markSessionReceivesUpdatesNow(ctx context.Context, userID int64) bool {
+func (r *Router) markSessionReceivesUpdatesNow(ctx context.Context, userID int64) {
 	if r.deps.Sessions == nil {
-		return false
+		return
 	}
 	r.syncSessionChannelMemberships(ctx, userID)
 	sessionID, ok := SessionIDFrom(ctx)
 	if !ok {
-		return false
+		return
 	}
 	r.deps.Sessions.SetReceivesUpdatesForAuthKey(rawAuthKeyIDForOrigin(ctx), sessionID, true)
-	if _, ok := r.deps.Sessions.(SessionUpdatesStateProvider); !ok {
-		// Alternate lightweight binders cannot expose flushing/membership state.
-		// Preserve their historical behavior; the Router claim still collapses
-		// callbacks which overlap this activation attempt.
-		return true
-	}
-	return r.sessionUpdatesActivationStarted(ctx)
 }
 
 func ptr[T any](v T) *T { return &v }

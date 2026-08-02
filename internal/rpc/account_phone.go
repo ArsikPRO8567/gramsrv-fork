@@ -87,5 +87,5 @@ func (r *Router) onAccountChangePhone(ctx context.Context, req *tg.AccountChange
 		}
 		r.bookkeepAuxPtsForCurrentSession(ctx, result.Event)
 	}
-	return r.tgSelfUser(result.User), nil
+	return r.tgSelfUserWithUsernames(ctx, result.User), nil
 }

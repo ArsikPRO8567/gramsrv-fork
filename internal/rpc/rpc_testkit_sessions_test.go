@@ -20,7 +20,6 @@ type captureSessions struct {
 	authKeyResolved    bool
 	receives           bool
 	receivesCalls      int
-	sessionPushCalls   int
 	messageType        proto.MessageType
 	message            bin.Encoder
 	userMessage        bin.Encoder // 最近一次 PushToUser* 的消息（与 message 区分：message 也被 PushToSession 覆盖）
@@ -34,32 +33,30 @@ type captureSessions struct {
 }
 
 type captureSessionsSnapshot struct {
-	sessionID        int64
-	userID           int64
-	userResolved     bool
-	authKeyID        [8]byte
-	authKeyResolved  bool
-	receives         bool
-	receivesCalls    int
-	sessionPushCalls int
-	messageType      proto.MessageType
-	message          bin.Encoder
+	sessionID       int64
+	userID          int64
+	userResolved    bool
+	authKeyID       [8]byte
+	authKeyResolved bool
+	receives        bool
+	receivesCalls   int
+	messageType     proto.MessageType
+	message         bin.Encoder
 }
 
 func (s *captureSessions) snapshot() captureSessionsSnapshot {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return captureSessionsSnapshot{
-		sessionID:        s.sessionID,
-		userID:           s.userID,
-		userResolved:     s.userResolved,
-		authKeyID:        s.authKeyID,
-		authKeyResolved:  s.authKeyResolved,
-		receives:         s.receives,
-		receivesCalls:    s.receivesCalls,
-		sessionPushCalls: s.sessionPushCalls,
-		messageType:      s.messageType,
-		message:          s.message,
+		sessionID:       s.sessionID,
+		userID:          s.userID,
+		userResolved:    s.userResolved,
+		authKeyID:       s.authKeyID,
+		authKeyResolved: s.authKeyResolved,
+		receives:        s.receives,
+		receivesCalls:   s.receivesCalls,
+		messageType:     s.messageType,
+		message:         s.message,
 	}
 }
 
@@ -159,7 +156,6 @@ func (s *captureSessions) PushToSessionForAuthKey(_ context.Context, rawAuthKeyI
 	s.sessionID = sessionID
 	s.messageType = t
 	s.message = msg
-	s.sessionPushCalls++
 	return nil
 }
 

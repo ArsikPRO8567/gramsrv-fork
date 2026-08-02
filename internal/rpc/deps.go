@@ -93,12 +93,10 @@ type ImmediateSessionPusher interface {
 	PushToSessionForAuthKeyImmediate(ctx context.Context, rawAuthKeyID [8]byte, sessionID int64, t proto.MessageType, msg tg.UpdatesClass) error
 }
 
-// SessionUpdatesStateProvider 暴露连接当前的 updates 激活状态（可选能力）。
-// started 同时覆盖 ready 与 pending FIFO 正在 flushing；两者都证明当前物理 session
-// 已完成 membership 建立并开始激活，后续陈旧 post-response callback 不得重复查库或推送。
+// SessionUpdatesStateProvider 暴露连接当前的 updates 接收状态（可选能力）。
+// 用于按 RPC 置位 receivesUpdates 时的幂等短路；不实现时每次都走完整置位（幂等，仅多余开销）。
 type SessionUpdatesStateProvider interface {
 	ReceivesUpdatesForAuthKey(rawAuthKeyID [8]byte, sessionID int64) bool
-	UpdatesActivationStartedForAuthKey(rawAuthKeyID [8]byte, sessionID int64) bool
 }
 
 // ClientLayerBinder 把协商 TL layer 即时下推到连接（可选能力）。
