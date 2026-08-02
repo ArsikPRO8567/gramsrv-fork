@@ -75,10 +75,26 @@ func (r *Router) updatesReadySelfProfile(ctx context.Context, userID int64) (*tg
 	r.applyStoryMaxIDsToPeerObjects(ctx, userID, users, nil)
 	r.applyBotVerificationIconsToPeerObjects(ctx, users, nil)
 
+	usernames := tgUsernames(u.Username)
+	if vector, ok := self.GetUsernames(); ok && len(vector) != 0 {
+		usernames = vector
+	}
 	return &tg.Updates{
-		Updates: []tg.UpdateClass{&tg.UpdateUser{UserID: userID}},
-		Users:   users,
-		Date:    int(r.clock.Now().Unix()),
-		Seq:     0,
+		Updates: []tg.UpdateClass{
+			// updateUserName is the authoritative basic-name/username cache write.
+			// TDLib handles it by calling on_update_user_usernames directly.
+			&tg.UpdateUserName{
+				UserID:    userID,
+				FirstName: u.FirstName,
+				LastName:  u.LastName,
+				Usernames: usernames,
+			},
+			// updateUser additionally invalidates userFull while the complete basic
+			// User remains bundled in the outer users vector.
+			&tg.UpdateUser{UserID: userID},
+		},
+		Users: users,
+		Date:  int(r.clock.Now().Unix()),
+		Seq:   0,
 	}, nil
 }

@@ -124,19 +124,26 @@ func TestDispatchPushesCompleteSelfProfileOnceWhenSessionBecomesReady(t *testing
 			got.receives, got.receivesCalls, got.sessionPushCalls)
 	}
 	updates, ok := got.message.(*tg.Updates)
-	if !ok || len(updates.Updates) != 1 || len(updates.Users) != 1 {
-		t.Fatalf("self refresh = %T %+v, want one update and one user", got.message, got.message)
+	if !ok || len(updates.Updates) != 2 || len(updates.Users) != 1 {
+		t.Fatalf("self refresh = %T %+v, want two updates and one user", got.message, got.message)
 	}
-	refresh, ok := updates.Updates[0].(*tg.UpdateUser)
+	nameRefresh, ok := updates.Updates[0].(*tg.UpdateUserName)
+	if !ok || nameRefresh.UserID != userID || nameRefresh.FirstName != "Alice" || nameRefresh.LastName != "" {
+		t.Fatalf("self name refresh = %T %+v, want updateUserName(%d, Alice)", updates.Updates[0], updates.Updates[0], userID)
+	}
+	wantUsernames := []string{"Alice", "aliceCollect0728b", "aliceCollect0728a"}
+	if !reflect.DeepEqual(usernameStrings(nameRefresh.Usernames), wantUsernames) {
+		t.Fatalf("self updateUserName usernames = %v, want %v", usernameStrings(nameRefresh.Usernames), wantUsernames)
+	}
+	refresh, ok := updates.Updates[1].(*tg.UpdateUser)
 	if !ok || refresh.UserID != userID {
-		t.Fatalf("self refresh update = %T %+v, want updateUser(%d)", updates.Updates[0], updates.Updates[0], userID)
+		t.Fatalf("self refresh update = %T %+v, want updateUser(%d)", updates.Updates[1], updates.Updates[1], userID)
 	}
 	projected, ok := updates.Users[0].(*tg.User)
 	if !ok {
 		t.Fatalf("self refresh user = %T, want *tg.User", updates.Users[0])
 	}
 	vector, set := projected.GetUsernames()
-	wantUsernames := []string{"Alice", "aliceCollect0728b", "aliceCollect0728a"}
 	if !set || !reflect.DeepEqual(usernameStrings(vector), wantUsernames) {
 		t.Fatalf("self refresh usernames = %v (set %v), want %v", usernameStrings(vector), set, wantUsernames)
 	}
@@ -156,8 +163,13 @@ func TestDispatchPushesCompleteSelfProfileOnceWhenSessionBecomesReady(t *testing
 		t.Fatalf("decode Layer 228 self refresh: %v", err)
 	}
 	decodedUpdates, ok := decoded.(*tg.Updates)
-	if !ok || len(decodedUpdates.Users) != 1 {
+	if !ok || len(decodedUpdates.Updates) != 2 || len(decodedUpdates.Users) != 1 {
 		t.Fatalf("decoded Layer 228 self refresh = %T %+v", decoded, decoded)
+	}
+	decodedNameRefresh, ok := decodedUpdates.Updates[0].(*tg.UpdateUserName)
+	if !ok || !reflect.DeepEqual(usernameStrings(decodedNameRefresh.Usernames), wantUsernames) {
+		t.Fatalf("decoded Layer 228 updateUserName = %T usernames=%v, want %v",
+			decodedUpdates.Updates[0], usernameStrings(decodedNameRefresh.Usernames), wantUsernames)
 	}
 	decodedUser := decodedUpdates.Users[0].(*tg.User)
 	decodedVector, decodedSet := decodedUser.GetUsernames()
