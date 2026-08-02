@@ -80,7 +80,7 @@ func TestCachedRPCResultReplayUsesPreReservedBodyWithoutDoubleCharge(t *testing.
 
 	done := make(chan error, 1)
 	go func() {
-		done <- s.sendCachedRPCResult(context.Background(), c, encoded)
+		done <- s.sendReplayedRPCResult(context.Background(), c, encoded)
 	}()
 	select {
 	case <-tr.started:

@@ -133,7 +133,7 @@ type Conn struct {
 	rpcReady         bool
 	rpcClosed        bool
 	// rpcReplayRestores is a per-physical-connection ordering barrier. An exact
-	// cached/rewrapped init request has already executed its business handler,
+	// replayed/rewrapped init request has already executed its business handler,
 	// but its wrapper/client/readiness state becomes authoritative only after the
 	// replacement rpc_result is physically written. Queued naked RPCs remain
 	// admitted and budgeted, but are not scheduler-runnable until every such

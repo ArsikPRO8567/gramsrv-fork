@@ -61,7 +61,7 @@ type layerRPCProfileEvidence struct {
 
 // layerRPCAdmissionCursor is the wire-ordered, side-effect-free view used while
 // decoding one MTProto container. evidenceMsgID is the last explicit
-// invokeWithLayer proof, not merely the profile used by an arbitrary cached
+// invokeWithLayer proof, not merely the profile used by an arbitrary retained
 // request. It therefore advances only after generated admission reports
 // ProfileEvidence.
 type layerRPCAdmissionCursor struct {
@@ -355,7 +355,7 @@ func (s *Server) prepareInboundLayerRPCBatch(ctx context.Context, c *Conn, plan 
 		item.method = method
 		if profile, hasEvidence := admitted.ProfileEvidence(); hasEvidence {
 			if existing && profile != existingProfile {
-				return fmt.Errorf("%w: cached msg_id %d used Layer %d but replay selected Layer %d", ErrLayerProfileConflict, item.msgID, existingProfile, profile)
+				return fmt.Errorf("%w: retained msg_id %d used Layer %d but replay selected Layer %d", ErrLayerProfileConflict, item.msgID, existingProfile, profile)
 			}
 			evidence[index] = layerRPCProfileEvidence{profile: profile, present: true, fresh: item.profileEvidenceFresh()}
 			if evidence[index].fresh {
@@ -436,7 +436,7 @@ func (s *Server) prepareInboundLayerRPCBatch(ctx context.Context, c *Conn, plan 
 				case rpcResultAcquireCompleted:
 					// Transfer the materialization ticket to the plan before any
 					// profile-restore step can fail; plan.close is the universal abort
-					// path and sendCached releases it after outbound-budget handoff.
+					// path and sendReplayed releases it after outbound-budget handoff.
 					item.payload = claim.encoded
 					after, prepareErr := s.prepareAdmittedLayerRPCReplay(ctx, c, item.msgID, claim.admissionSeq, item.profileEvidenceFresh(), item.admitted)
 					if prepareErr != nil {
@@ -1034,7 +1034,7 @@ func (s *Server) decodeInboundLayerRPCWithOptions(state LayerProfileSnapshot, bo
 // commitLayerProfileEvidence publishes one generated invokeWithLayer proof.
 // The exact-session registry is the cross-physical-connection linearization
 // point; the Conn cursor then prevents a concurrent older admission from
-// overwriting its local wire epoch. Older cached duplicates remain decodable
+// overwriting its local wire epoch. Older retained duplicates remain decodable
 // and request-bound, but cannot mutate session/profile state.
 func (s *Server) commitLayerProfileEvidence(ctx context.Context, c *Conn, profile tlprofile.Profile, msgID int64) (bool, error) {
 	if s == nil || c == nil {

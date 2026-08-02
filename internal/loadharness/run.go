@@ -920,9 +920,9 @@ func evaluateReport(report *RunReport, cfg RunConfig) {
 		checks := []string{
 			"telesrv_mtproto_raw_connections", "telesrv_mtproto_logical_sessions",
 			"telesrv_mtproto_logical_outbox_bytes", "telesrv_mtproto_pending_push_bytes",
-			"telesrv_mtproto_outbound_tracked_bytes", "telesrv_mtproto_rpc_result_owners",
-			"telesrv_mtproto_rpc_result_receipts", "telesrv_mtproto_rpc_result_receipt_bytes",
-			"telesrv_mtproto_rpc_result_subscribers",
+			"telesrv_mtproto_outbound_tracked_bytes", "telesrv_mtproto_rpc_execution_owners",
+			"telesrv_mtproto_rpc_execution_reserved_entries", "telesrv_mtproto_rpc_execution_receipts",
+			"telesrv_mtproto_rpc_execution_receipt_budget_bytes", "telesrv_mtproto_rpc_execution_subscribers",
 		}
 		for _, name := range checks {
 			baseline := metricValue(report.BaselineServerMetrics, name)

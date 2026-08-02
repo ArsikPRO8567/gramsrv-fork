@@ -7,34 +7,35 @@ package mtprotoedge
 // concurrent transition; every individual budget/count remains internally
 // consistent.
 type RuntimeSnapshot struct {
-	RawConnections             int64
-	RawConnectionLimit         int64
-	Handshakes                 int64
-	HandshakeLimit             int64
-	ActiveSessions             int64
-	ProvisionalSessions        int64
-	LogicalSessions            int64
-	OfflineLogicalSessions     int64
-	LogicalOutboxFrames        int64
-	LogicalOutboxBytes         int64
-	PendingPushBytes           int64
-	InboundRPCTasks            int64
-	InboundRPCBytes            int64
-	InboundRPCReadyConnections int64
-	InboundRPCMaxTasks         int64
-	InboundRPCMaxBytes         int64
-	InboundFrameBytes          int64
-	InboundFrameMaxBytes       int64
-	OutboundTrackedBytes       int64
-	OutboundTrackedMaxBytes    int64
-	OutboundControlBytes       int64
-	OutboundControlMaxBytes    int64
-	OutboundWriteBytes         int64
-	OutboundWriteMaxBytes      int64
-	RPCResultOwners            int64
-	RPCResultReceipts          int64
-	RPCResultReceiptBytes      int64
-	RPCResultSubscribers       int64
+	RawConnections                 int64
+	RawConnectionLimit             int64
+	Handshakes                     int64
+	HandshakeLimit                 int64
+	ActiveSessions                 int64
+	ProvisionalSessions            int64
+	LogicalSessions                int64
+	OfflineLogicalSessions         int64
+	LogicalOutboxFrames            int64
+	LogicalOutboxBytes             int64
+	PendingPushBytes               int64
+	InboundRPCTasks                int64
+	InboundRPCBytes                int64
+	InboundRPCReadyConnections     int64
+	InboundRPCMaxTasks             int64
+	InboundRPCMaxBytes             int64
+	InboundFrameBytes              int64
+	InboundFrameMaxBytes           int64
+	OutboundTrackedBytes           int64
+	OutboundTrackedMaxBytes        int64
+	OutboundControlBytes           int64
+	OutboundControlMaxBytes        int64
+	OutboundWriteBytes             int64
+	OutboundWriteMaxBytes          int64
+	RPCExecutionOwners             int64
+	RPCExecutionReservedEntries    int64
+	RPCExecutionReceipts           int64
+	RPCExecutionReceiptBudgetBytes int64
+	RPCExecutionSubscribers        int64
 }
 
 type sessionManagerRuntimeSnapshot struct {
@@ -175,11 +176,12 @@ func (s *Server) RuntimeSnapshot() RuntimeSnapshot {
 		result.OutboundWriteMaxBytes = s.outboundScratchPool.budget.maxBytes
 	}
 	if s.rpcResults != nil {
-		result.RPCResultOwners = s.rpcResults.flightLimit.snapshot()
-		result.RPCResultReceipts = s.rpcResults.completedEntries.snapshot()
-		result.RPCResultReceiptBytes = s.rpcResults.completedBytes.snapshot()
+		result.RPCExecutionOwners = s.rpcResults.flightLimit.snapshot()
+		result.RPCExecutionReservedEntries = s.rpcResults.reservedEntries.snapshot()
+		result.RPCExecutionReceipts = s.rpcResults.receiptCount.Load()
+		result.RPCExecutionReceiptBudgetBytes = s.rpcResults.receiptBudgetBytes()
 		if s.rpcResults.subscriberBudget != nil {
-			result.RPCResultSubscribers = s.rpcResults.subscriberBudget.global.snapshot()
+			result.RPCExecutionSubscribers = s.rpcResults.subscriberBudget.global.snapshot()
 		}
 	}
 	return result

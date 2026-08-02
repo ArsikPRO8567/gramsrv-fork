@@ -69,7 +69,7 @@ func storeLogicalRPCResultForTest(
 	encoded.replayMsgID = frame.msgID
 	encoded.replaySeqNo = frame.seqNo
 	state.mu.Unlock()
-	s.rpcResults.Put(c.authKeyID, c.sessionID, reqMsgID, encoded)
+	s.rpcResults.Complete(c.authKeyID, c.sessionID, reqMsgID, encoded, true)
 }
 
 func acknowledgeLogicalRPCResultForTest(t *testing.T, s *Server, c *Conn, reqMsgID int64) {
@@ -160,12 +160,10 @@ func TestLogicalSessionACKReleasesPayloadAndReceipt(t *testing.T) {
 	}
 	c.outboundState.mu.Unlock()
 
-	ledger := newRPCResultCacheWithFairCapacity(time.Now, rpcResultCacheCapacity{
+	ledger := newRPCExecutionLedger(time.Now, rpcExecutionLedgerCapacity{
 		maxPending: 16, maxPendingPerAuth: 16,
-		globalMaxEntries: 16, globalMaxBytes: 16,
-		authMaxEntries: 16, authMaxBytes: 16,
-		sessionMaxEntries: 16, sessionMaxBytes: 16,
-		sessions: manager,
+		globalMaxEntries: 16, authMaxEntries: 16, sessionMaxEntries: 16,
+		replayStore: manager,
 	})
 	claim, err := ledger.Acquire(authKeyID, 43, 88)
 	if err != nil || claim.state != rpcResultAcquireOwner {
@@ -173,17 +171,20 @@ func TestLogicalSessionACKReleasesPayloadAndReceipt(t *testing.T) {
 	}
 	claim.owner.CompleteExecution(true)
 	claim.owner.HandOff()
-	ledger.Put(authKeyID, 43, 88, &encodedOutboundMessage{body: body, typeID: proto.ResultTypeID, reqMsgID: 88})
+	ledger.Complete(authKeyID, 43, 88, &encodedOutboundMessage{body: body, typeID: proto.ResultTypeID, reqMsgID: 88}, true)
 
-	key := rpcResultCacheKey{authKeyID: authKeyID, sessionID: 43, reqMsgID: 88}
+	key := rpcExecutionKey{authKeyID: authKeyID, sessionID: 43, reqMsgID: 88}
 	shard := ledger.shard(key)
 	shard.mu.Lock()
-	entry := shard.byKey[key].Value.(*rpcResultCacheEntry)
-	if entry.encoded != nil || entry.size != 1 {
+	entry := shard.byKey[key].Value.(*rpcExecutionReceipt)
+	if entry.unavailable {
 		shard.mu.Unlock()
-		t.Fatalf("completed ledger retained payload: encoded=%p size=%d", entry.encoded, entry.size)
+		t.Fatal("logical outbox receipt was marked unavailable")
 	}
 	shard.mu.Unlock()
+	if got := ledger.receiptBudgetBytes(); got != rpcExecutionReceiptBudgetBytes {
+		t.Fatalf("receipt budget bytes = %d, want %d", got, rpcExecutionReceiptBudgetBytes)
+	}
 
 	c.outboundState.mu.Lock()
 	acked := c.outboundState.ack([]int64{201})
@@ -241,13 +242,13 @@ func TestLogicalSessionDestroyReleasesPayloadAndCompletedReceipt(t *testing.T) {
 	storeLogicalRPCResultForTest(t, s, c, 901, &encodedOutboundMessage{
 		body: make([]byte, 32), typeID: proto.ResultTypeID, reqMsgID: 901,
 	})
-	if _, ok := s.rpcResults.Get(authKeyID, 91, 901); !ok {
+	if _, ok := s.rpcResults.Replay(authKeyID, 91, 901); !ok {
 		t.Fatal("logical result fixture was not published")
 	}
 	if removed := s.conns.DestroySessionForAuthKey(authKeyID, 91); removed {
 		t.Fatal("construction-only logical session unexpectedly reported active")
 	}
-	if _, ok := s.rpcResults.Get(authKeyID, 91, 901); ok {
+	if _, ok := s.rpcResults.Replay(authKeyID, 91, 901); ok {
 		t.Fatal("destroy retained completed receipt")
 	}
 	if got := s.outboundTrackedBudget.snapshot(); got != 0 {
@@ -272,7 +273,7 @@ func TestBusinessAuthRevocationReleasesOfflineTempLogicalSession(t *testing.T) {
 	if closed := s.conns.CloseSessionsForBusinessAuthKey(businessAuthKeyID); closed != 0 {
 		t.Fatalf("offline logical revocation closed %d physical conns", closed)
 	}
-	if _, ok := s.rpcResults.Get(rawAuthKeyID, 92, 902); ok {
+	if _, ok := s.rpcResults.Replay(rawAuthKeyID, 92, 902); ok {
 		t.Fatal("business auth revocation retained temp-key receipt")
 	}
 	if got := s.outboundTrackedBudget.snapshot(); got != 0 {

@@ -92,7 +92,7 @@ func (t *blockingCloseRPCResultTransport) Close() error {
 	return nil
 }
 
-func TestRPCResultCachePublishesOnlyAfterPhysicalWrite(t *testing.T) {
+func TestRPCExecutionLedgerPublishesOnlyAfterPhysicalWrite(t *testing.T) {
 	tr := newGatedRequiredControlTransport(nil)
 	s := New(Options{WriteTimeout: time.Second})
 	key := newTestAuthKey(t)
@@ -113,7 +113,7 @@ func TestRPCResultCachePublishesOnlyAfterPhysicalWrite(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("rpc_result did not reach physical writer")
 	}
-	if _, ok := s.rpcResults.Get(key.ID, c.sessionID, reqMsgID); ok {
+	if _, ok := s.rpcResults.Replay(key.ID, c.sessionID, reqMsgID); ok {
 		t.Fatal("rpc_result became completed before physical write")
 	}
 	pending, err := s.rpcResults.Acquire(key.ID, c.sessionID, reqMsgID)
@@ -280,7 +280,7 @@ func TestRouterUpdateCursorDoesNotCommitAfterPhysicalWriteFailure(t *testing.T) 
 	deadline := time.Now().Add(time.Second)
 	replayable := false
 	for time.Now().Before(deadline) {
-		if cached, ok := s.rpcResults.Get(key.ID, c.sessionID, reqMsgID); ok && cached.deliveryState() == rpcResultDeliveryReplayable {
+		if cached, ok := s.rpcResults.Replay(key.ID, c.sessionID, reqMsgID); ok && cached.deliveryState() == rpcResultDeliveryReplayable {
 			replayable = true
 			break
 		}
@@ -334,7 +334,7 @@ func TestRouterUpdateCursorDoesNotCommitWhenResultEncodingFails(t *testing.T) {
 	}
 	deadline := time.Now().Add(time.Second)
 	for time.Now().Before(deadline) {
-		if cached, ok := s.rpcResults.Get(key.ID, c.sessionID, reqMsgID); ok && cached.deliveryState() == rpcResultDeliveryDelivered {
+		if cached, ok := s.rpcResults.Replay(key.ID, c.sessionID, reqMsgID); ok && cached.deliveryState() == rpcResultDeliveryDelivered {
 			break
 		}
 		time.Sleep(time.Millisecond)

@@ -279,7 +279,7 @@ func TestLayerRPCAdmissionNestedGZIPSiblingsShareFrameExpansionLimit(t *testing.
 func TestLayerRPCAdmissionNestedGZIPReDecodeReusesMaterializationCharge(t *testing.T) {
 	handler := newAdmissionOnlyLayerRPC()
 	s := New(Options{DC: 2, LayerRPC: handler, Logger: zaptest.NewLogger(t)})
-	s.rpcResults = newRPCResultCacheWithFlightLimit(time.Now, 8)
+	s.rpcResults = newRPCExecutionLedgerForServerTest(s, time.Now, 8)
 	scheduler := newInboundRPCScheduler(1, 4, 1<<30)
 	s.rpcScheduler = scheduler
 	authKeyID := [8]byte{8, 24}

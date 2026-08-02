@@ -898,24 +898,16 @@ func (s *Server) publishRPCResult(
 		if s == nil || s.rpcResults == nil || c == nil || encoded == nil || reqMsgID == 0 {
 			return errors.New("rpc result receipt ledger is unavailable")
 		}
-		if s.rpcResults.sessions == nil && int64(len(encoded.body)) > s.rpcResults.completedBytes.max {
-			// Focused legacy-cache tests may intentionally use a byte budget smaller
-			// than one legal transport result. Production receipts never own bodies.
-			panic(fmt.Sprintf(
-				"mtprotoedge: legacy encoded rpc result exceeds inline-ledger budget: body=%d max=%d",
-				len(encoded.body), s.rpcResults.completedBytes.max,
-			))
-		}
 		priority, visible := prepareEncoded(encoded)
 		if owner != nil && !owner.HandOff() {
 			return ErrRPCResultFlightInvalid
 		}
 		started := time.Now()
 		encoded.markReplayable()
-		// Put may expose a completed result only after the old logical connection
+		// Complete may expose terminal execution only after the old connection
 		// is irreversibly unable to accept another same-generation request.
 		c.fenceUndeliveredRPCResult()
-		s.storeRPCResult(c, reqMsgID, encoded)
+		s.completeRPCResult(c, reqMsgID, encoded, false)
 		latency := time.Since(started)
 		if metrics, ok := s.metrics.(RPCResultMetrics); ok {
 			metrics.RPCResultDelivered(method, latency, len(encoded.body), admissionErr)
@@ -989,7 +981,7 @@ func (s *Server) publishRPCResult(
 		if deliveryErr != nil {
 			encoded.markReplayable()
 			c.fenceUndeliveredRPCResult()
-			s.storeRPCResult(c, reqMsgID, encoded)
+			s.completeRPCResult(c, reqMsgID, encoded, true)
 			if checked := s.log.Check(resultLogLevel, "RPC result delivery fenced for replay"); checked != nil {
 				checked.Write(
 					zap.String("method", method), zap.Int64("req_msg_id", reqMsgID),
@@ -1001,7 +993,7 @@ func (s *Server) publishRPCResult(
 			return
 		}
 		encoded.markDelivered()
-		s.storeRPCResult(c, reqMsgID, encoded)
+		s.completeRPCResult(c, reqMsgID, encoded, true)
 		if checked := s.log.Check(resultLogLevel, "RPC result delivered"); checked != nil {
 			checked.Write(
 				zap.String("method", method), zap.Int64("req_msg_id", reqMsgID),
@@ -1054,24 +1046,24 @@ func (s *Server) sendResult(ctx context.Context, c *Conn, reqMsgID int64, result
 		// same-Conn duplicate would be ACKed while no result can ever arrive.
 		c.fenceUndeliveredRPCResult()
 		encoded.markReplayable()
-		s.storeRPCResult(c, reqMsgID, encoded)
+		s.completeRPCResult(c, reqMsgID, encoded, true)
 		return err
 	}
 	encoded.markDelivered()
 	// On a live Conn, completed means the rpc_result has reached the reliable byte
 	// stream. Same-physical duplicates can therefore be ACK-only without data loss.
-	s.storeRPCResult(c, reqMsgID, encoded)
+	s.completeRPCResult(c, reqMsgID, encoded, true)
 	return nil
 }
 
-// sendCachedRPCResult preserves the delivery half of the rpc_result invariant
+// sendReplayedRPCResult preserves the delivery half of the rpc_result invariant
 // for completed-flight replays: either the logical outbox result reaches this physical
 // byte stream, or this logical Conn is fenced so a replacement may retry it.
-func (s *Server) sendCachedRPCResult(ctx context.Context, c *Conn, encoded *encodedOutboundMessage) error {
-	return s.sendCachedRPCResultWithHook(ctx, c, encoded, nil)
+func (s *Server) sendReplayedRPCResult(ctx context.Context, c *Conn, encoded *encodedOutboundMessage) error {
+	return s.sendReplayedRPCResultWithHook(ctx, c, encoded, nil)
 }
 
-func (s *Server) sendCachedRPCResultWithHook(
+func (s *Server) sendReplayedRPCResultWithHook(
 	ctx context.Context,
 	c *Conn,
 	encoded *encodedOutboundMessage,
@@ -1079,7 +1071,7 @@ func (s *Server) sendCachedRPCResultWithHook(
 ) error {
 	if encoded == nil {
 		c.fenceUndeliveredRPCResult()
-		return errors.New("nil cached rpc_result")
+		return errors.New("nil replayed rpc_result")
 	}
 	attempt, reserved, err := c.cloneRPCResultForRequestReserved(encoded, encoded.reqMsgID, false)
 	if err != nil {
@@ -1096,7 +1088,7 @@ func (s *Server) sendCachedRPCResultWithHook(
 		finishRestore = c.beginRPCReplayRestore()
 		defer finishRestore()
 	}
-	// Cached replay owns its delivery-gated state synchronously. Calling the
+	// Outbox replay owns its delivery-gated state synchronously. Calling the
 	// lower send primitive avoids reserving the process-wide asynchronous hook
 	// executor; the logical hook is claimed only after this physical write wins.
 	if err := c.sendOutboundWithTerminalReserved(
@@ -1117,10 +1109,10 @@ func (s *Server) sendCachedRPCResultWithHook(
 		// the sticky deferral). Fence before the deferred barrier is released; a
 		// later physical generation may wait for Done and replay the same bytes.
 		c.fenceUndeliveredRPCResult()
-		return fmt.Errorf("wait for cached rpc_result logical restore: %w", claimErr)
+		return fmt.Errorf("wait for replayed rpc_result logical restore: %w", claimErr)
 	}
 	return s.runBoundedRPCReplayRestore(
-		restoreCtx, c, "cached rpc_result", logicalRestore, afterSuccessfulDelivery,
+		restoreCtx, c, "replayed rpc_result", logicalRestore, afterSuccessfulDelivery,
 	)
 }
 
@@ -1320,11 +1312,11 @@ func (s *Server) encodeRPCResultWithoutSlot(ctx context.Context, c *Conn, reqMsg
 	}, nil
 }
 
-func (s *Server) cachedRPCResult(c *Conn, reqMsgID int64) (*encodedOutboundMessage, bool) {
+func (s *Server) replayableRPCResult(c *Conn, reqMsgID int64) (*encodedOutboundMessage, bool) {
 	if s == nil || s.rpcResults == nil || c == nil {
 		return nil, false
 	}
-	return s.rpcResults.Get(c.authKeyID, c.sessionID, reqMsgID)
+	return s.rpcResults.Replay(c.authKeyID, c.sessionID, reqMsgID)
 }
 
 func (s *Server) replayRPCResultByRequest(ctx context.Context, c *Conn, reqMsgID int64) error {
@@ -1335,24 +1327,26 @@ func (s *Server) replayRPCResultByRequest(ctx context.Context, c *Conn, reqMsgID
 		c.fenceUndeliveredRPCResult()
 		return err
 	} else if resent {
-		s.log.Debug("Resent connection cached rpc_result for duplicate msg_id", zap.Int64("msg_id", reqMsgID))
+		s.log.Debug("Resent connection-retained rpc_result for duplicate msg_id", zap.Int64("msg_id", reqMsgID))
 		return nil
 	}
-	if cached, ok := s.cachedRPCResult(c, reqMsgID); ok {
-		if err := s.sendCachedRPCResult(ctx, c, cached); err != nil {
+	if replayed, ok := s.replayableRPCResult(c, reqMsgID); ok {
+		if err := s.sendReplayedRPCResult(ctx, c, replayed); err != nil {
 			return err
 		}
-		s.log.Debug("Resent session cached rpc_result for duplicate msg_id", zap.Int64("msg_id", reqMsgID))
+		s.log.Debug("Resent logical-outbox rpc_result for duplicate msg_id", zap.Int64("msg_id", reqMsgID))
 	}
 	return nil
 }
 
-func (s *Server) storeRPCResult(c *Conn, reqMsgID int64, encoded *encodedOutboundMessage) {
+func (s *Server) completeRPCResult(c *Conn, reqMsgID int64, encoded *encodedOutboundMessage, replayable bool) {
 	if s == nil || s.rpcResults == nil || c == nil {
 		return
 	}
-	s.conns.adoptLogicalSession(c)
-	s.rpcResults.Put(c.authKeyID, c.sessionID, reqMsgID, encoded)
+	if s.conns != nil {
+		s.conns.adoptLogicalSession(c)
+	}
+	s.rpcResults.Complete(c.authKeyID, c.sessionID, reqMsgID, encoded, replayable)
 }
 
 // sendPong 回复 mt.PingRequest / mt.PingDelayDisconnectRequest。

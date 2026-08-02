@@ -138,7 +138,7 @@ func TestProjectionFailureCachesInternalWithoutRepeatingBusiness(t *testing.T) {
 	if rpcErr.ErrorCode != 500 || rpcErr.ErrorMessage != "INTERNAL" {
 		t.Fatalf("projection terminal = %+v", rpcErr)
 	}
-	if _, ok := s.rpcResults.Get(c.authKeyID, c.sessionID, reqMsgID); !ok {
+	if _, ok := s.rpcResults.Replay(c.authKeyID, c.sessionID, reqMsgID); !ok {
 		t.Fatal("projection receipt disappeared before duplicate acquire")
 	}
 	// A same-msg replay is served from the completed exact identity; there is no

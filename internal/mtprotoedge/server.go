@@ -56,7 +56,7 @@ type legacyRPCHandlerWithMethod interface {
 // LayerRPCHandler is the production API-RPC boundary. Admission is a separate
 // allocation-bounded phase so the edge can freeze the connection profile,
 // validate wrapper dependencies and establish exact request identity before
-// flight/cache/scheduler ownership is acquired.
+// execution-ledger/scheduler ownership is acquired.
 type LayerRPCHandler interface {
 	AdmitLayer(profile tlprofile.Profile, b *bin.Buffer, limits tlprofile.Limits) (tlprofile.Admission, error)
 	AdmitUnprofiled(b *bin.Buffer, limits tlprofile.Limits) (tlprofile.Admission, error)
@@ -103,7 +103,7 @@ type LayerRPCSessionProfileResolver interface {
 
 // LayerRPCOrderedSessionProfileResolver restores both the selected Layer and
 // the newest invokeWithLayer client msg_id which proved it. The cursor prevents
-// an old cached request replay on a replacement physical connection from
+// an old retained request replay on a replacement physical connection from
 // rolling the logical session back to an older profile.
 type LayerRPCOrderedSessionProfileResolver interface {
 	NegotiatedSessionLayerEvidence(authKeyID [8]byte, sessionID int64) (layer int, msgID int64, ok bool)
@@ -175,7 +175,7 @@ type LayerRPCDurableSessionProfileDeleter interface {
 // LayerRPCReplayPreparer reapplies connection-local wrapper state for an
 // already-executed exact request without consuming its one-shot business
 // dispatch lease. The returned callback is safe to run only after a successful
-// cached rpc_result reaches the replacement physical connection.
+// replayed rpc_result reaches the replacement physical connection.
 type LayerRPCReplayPreparer interface {
 	PrepareAdmittedReplay(
 		ctx context.Context,
@@ -201,7 +201,7 @@ type LayerRPCProfileEvidenceContext interface {
 // LayerRPCAdmissionProfilePublisher advances the auth-key-wide inherited
 // default for fresh explicit evidence. admissionSeq is allocated once by the
 // edge's exact flight owner and globally orders different MTProto sessions;
-// cached joins/replays never call this hook again.
+// joined/replayed requests never call this hook again.
 type LayerRPCAdmissionProfilePublisher interface {
 	PublishAdmittedLayerProfileEvidence(
 		ctx context.Context,
@@ -284,16 +284,16 @@ type Options struct {
 	// 等于 copied body；exact charge 是 typed decode 前的保守 materialization
 	// 上界，因此该配置不表示可并发接收 512 MiB wire body。默认 512 MiB。
 	RPCGlobalMaxBytes int64
-	// RPCResultCache*Entries bound in-flight owners and compact completed
-	// receipts. Exact payload bytes are not charged here: the logical-session
+	// RPCExecution*Entries bound in-flight owners and compact completed
+	// receipts. Payload bytes are not charged here: the logical-session
 	// outbox owns them under OutboundTrackedGlobalMaxBytes until ACK. ACK removes
 	// the receipt immediately; 331 seconds is only the no-ACK safety horizon.
-	RPCResultCacheMaxEntries        int
-	RPCResultCacheAuthMaxEntries    int
-	RPCResultCacheSessionMaxEntries int
-	// RPCResultPendingPerAuth is an additional active-owner bound, independent
+	RPCExecutionMaxEntries        int
+	RPCExecutionAuthMaxEntries    int
+	RPCExecutionSessionMaxEntries int
+	// RPCExecutionPendingPerAuth is an additional active-owner bound, independent
 	// from the retained entry limits and RPCGlobalMaxTasks. Default 2048.
-	RPCResultPendingPerAuth int
+	RPCExecutionPendingPerAuth int
 	// InboundFrameGlobalMaxBytes 是所有物理连接当前正在处理的 transport wire buffer
 	// 与最大解密 plaintext buffer 的总预算。长度前缀读取后、payload 分配前预留，默认
 	// 512 MiB；非正值使用默认值。
@@ -332,7 +332,7 @@ type Options struct {
 	// generated Layer admission by configuring the canonical-only route.
 	legacyRPC legacyRPCHandler
 	// LayerRPC is the generated exact-profile production path. When configured,
-	// every API request must complete admission before flight/cache scheduling.
+	// every API request must complete admission before execution-ledger scheduling.
 	LayerRPC LayerRPCHandler
 	// Metrics 接收连接层指标。默认 NopMetrics。
 	Metrics Metrics
@@ -389,19 +389,19 @@ func (o *Options) setDefaults() {
 	if o.RPCGlobalMaxBytes <= 0 {
 		o.RPCGlobalMaxBytes = 512 << 20
 	}
-	if o.RPCResultCacheMaxEntries == 0 {
-		o.RPCResultCacheMaxEntries = rpcResultCacheMaxEntries
+	if o.RPCExecutionMaxEntries == 0 {
+		o.RPCExecutionMaxEntries = rpcExecutionMaxEntries
 	}
-	if o.RPCResultCacheAuthMaxEntries == 0 {
-		o.RPCResultCacheAuthMaxEntries = rpcResultCacheAuthMaxEntries
+	if o.RPCExecutionAuthMaxEntries == 0 {
+		o.RPCExecutionAuthMaxEntries = rpcExecutionAuthMaxEntries
 	}
-	if o.RPCResultCacheSessionMaxEntries == 0 {
-		o.RPCResultCacheSessionMaxEntries = rpcResultCacheSessionMaxEntries
+	if o.RPCExecutionSessionMaxEntries == 0 {
+		o.RPCExecutionSessionMaxEntries = rpcExecutionSessionMaxEntries
 	}
-	if o.RPCResultPendingPerAuth == 0 {
-		o.RPCResultPendingPerAuth = rpcResultFlightMaxPendingPerAuth
-		if o.RPCResultPendingPerAuth > o.RPCGlobalMaxTasks {
-			o.RPCResultPendingPerAuth = o.RPCGlobalMaxTasks
+	if o.RPCExecutionPendingPerAuth == 0 {
+		o.RPCExecutionPendingPerAuth = rpcExecutionPendingPerAuth
+		if o.RPCExecutionPendingPerAuth > o.RPCGlobalMaxTasks {
+			o.RPCExecutionPendingPerAuth = o.RPCGlobalMaxTasks
 		}
 	}
 	if o.InboundFrameGlobalMaxBytes <= 0 {
@@ -436,19 +436,19 @@ func (o *Options) setDefaults() {
 	}
 }
 
-func validateRPCResultCacheOptions(o Options) error {
-	if o.RPCResultCacheMaxEntries <= 0 || o.RPCResultCacheAuthMaxEntries <= 0 || o.RPCResultCacheSessionMaxEntries <= 0 {
-		return fmt.Errorf("rpc_result cache entry limits must be positive")
+func validateRPCExecutionOptions(o Options) error {
+	if o.RPCExecutionMaxEntries <= 0 || o.RPCExecutionAuthMaxEntries <= 0 || o.RPCExecutionSessionMaxEntries <= 0 {
+		return fmt.Errorf("rpc execution ledger entry limits must be positive")
 	}
-	if o.RPCResultCacheMaxEntries < o.RPCResultCacheAuthMaxEntries ||
-		o.RPCResultCacheAuthMaxEntries < o.RPCResultCacheSessionMaxEntries {
-		return fmt.Errorf("rpc_result cache entry hierarchy must satisfy global >= auth >= session: %d/%d/%d",
-			o.RPCResultCacheMaxEntries, o.RPCResultCacheAuthMaxEntries, o.RPCResultCacheSessionMaxEntries)
+	if o.RPCExecutionMaxEntries < o.RPCExecutionAuthMaxEntries ||
+		o.RPCExecutionAuthMaxEntries < o.RPCExecutionSessionMaxEntries {
+		return fmt.Errorf("rpc execution ledger entry hierarchy must satisfy global >= auth >= session: %d/%d/%d",
+			o.RPCExecutionMaxEntries, o.RPCExecutionAuthMaxEntries, o.RPCExecutionSessionMaxEntries)
 	}
-	if o.RPCResultPendingPerAuth <= 0 || o.RPCResultPendingPerAuth > o.RPCGlobalMaxTasks ||
-		o.RPCResultPendingPerAuth > o.RPCResultCacheAuthMaxEntries {
-		return fmt.Errorf("rpc_result per-auth pending limit %d must be positive and <= global pending %d and auth entries %d",
-			o.RPCResultPendingPerAuth, o.RPCGlobalMaxTasks, o.RPCResultCacheAuthMaxEntries)
+	if o.RPCExecutionPendingPerAuth <= 0 || o.RPCExecutionPendingPerAuth > o.RPCGlobalMaxTasks ||
+		o.RPCExecutionPendingPerAuth > o.RPCExecutionAuthMaxEntries {
+		return fmt.Errorf("rpc execution per-auth pending limit %d must be positive and <= global pending %d and auth entries %d",
+			o.RPCExecutionPendingPerAuth, o.RPCGlobalMaxTasks, o.RPCExecutionAuthMaxEntries)
 	}
 	return nil
 }
@@ -494,7 +494,7 @@ type Server struct {
 	types     *tmap.Map
 	admission *admissionController
 
-	rpcResults *rpcResultCache
+	rpcResults *rpcExecutionLedger
 	rpcRewrap  *rpcRewrapRegistry
 
 	// onFrame 是测试钩子：收到一帧时回调其字节数；生产为 nil。
@@ -504,8 +504,8 @@ type Server struct {
 // New 创建 Server。
 func New(opts Options) *Server {
 	opts.setDefaults()
-	if err := validateRPCResultCacheOptions(opts); err != nil {
-		panic(fmt.Sprintf("mtprotoedge: invalid result-cache options: %v", err))
+	if err := validateRPCExecutionOptions(opts); err != nil {
+		panic(fmt.Sprintf("mtprotoedge: invalid rpc execution options: %v", err))
 	}
 	conns := opts.ActiveSessions
 	if conns == nil {
@@ -544,22 +544,19 @@ func New(opts Options) *Server {
 		clock:                    opts.Clock,
 		rand:                     opts.Rand,
 		types:                    tmap.New(tg.TypesMap(), mt.TypesMap(), proto.TypesMap()),
-		rpcResults: newRPCResultCacheWithFairCapacity(opts.Clock.Now, rpcResultCacheCapacity{
+		rpcResults: newRPCExecutionLedger(opts.Clock.Now, rpcExecutionLedgerCapacity{
 			maxPending:        opts.RPCGlobalMaxTasks,
-			maxPendingPerAuth: opts.RPCResultPendingPerAuth,
-			globalMaxBytes:    int64(opts.RPCResultCacheMaxEntries),
-			globalMaxEntries:  opts.RPCResultCacheMaxEntries,
-			authMaxBytes:      int64(opts.RPCResultCacheAuthMaxEntries),
-			authMaxEntries:    opts.RPCResultCacheAuthMaxEntries,
-			sessionMaxBytes:   int64(opts.RPCResultCacheSessionMaxEntries),
-			sessionMaxEntries: opts.RPCResultCacheSessionMaxEntries,
-			sessions:          conns,
+			maxPendingPerAuth: opts.RPCExecutionPendingPerAuth,
+			globalMaxEntries:  opts.RPCExecutionMaxEntries,
+			authMaxEntries:    opts.RPCExecutionAuthMaxEntries,
+			sessionMaxEntries: opts.RPCExecutionSessionMaxEntries,
+			replayStore:       conns,
 		}),
 		rpcRewrap: newRPCRewrapRegistry(opts.RPCGlobalMaxTasks),
 		admission: newAdmissionController(opts.MaxConnections, opts.MaxConnectionsPerIP, opts.MaxConcurrentHandshakes),
 	}
 	conns.setLogicalSessionReleaseHook(func(key sessionKey) {
-		server.rpcResults.forgetCompletedSession(key.authKeyID, key.sessionID)
+		server.rpcResults.forgetSession(key.authKeyID, key.sessionID)
 	})
 	return server
 }

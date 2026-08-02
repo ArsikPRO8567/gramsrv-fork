@@ -457,7 +457,7 @@ func (m *SessionManager) ApplyOrderedRawLayerForSession(
 // ExplicitLayerEvidenceForAuthKey exposes live exact-session truth to
 // auth.bindTempAuthKey. Router's bounded exact registry may expire while a Conn
 // remains active; bind must not replace that explicit profile with a permanent
-// key's inherited default merely because the cache TTL elapsed.
+// key's inherited default merely because the execution-receipt TTL elapsed.
 func (m *SessionManager) ExplicitLayerEvidenceForAuthKey(rawAuthKeyID [8]byte, sessionID int64) (layer int, msgID int64, ok bool) {
 	if m == nil || rawAuthKeyID == ([8]byte{}) || sessionID == 0 {
 		return 0, 0, false

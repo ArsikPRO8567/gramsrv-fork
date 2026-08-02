@@ -966,7 +966,7 @@ func TestDurabilityOutageInitializesOnlyCurrentConnection(t *testing.T) {
 		}
 		time.Sleep(time.Millisecond)
 	}
-	if _, ok := s.rpcResults.Get(c.authKeyID, c.sessionID, msgID); !ok {
+	if _, ok := s.rpcResults.Replay(c.authKeyID, c.sessionID, msgID); !ok {
 		t.Fatal("successful outage-local init did not publish its exact RPC result")
 	}
 	if layer, found, err := router.ResolveInheritedAuthKeyLayer(ctx, c.authKeyID); err != nil || found || layer != 0 {
@@ -1071,7 +1071,7 @@ func TestInvariantReplayNeverCachesInternalCanonicalProfile(t *testing.T) {
 func TestSameMsgIDNakedReplayUsesWinnerAdmissionProfile(t *testing.T) {
 	handler := newAdmissionOnlyLayerRPC()
 	s := New(Options{DC: 2, LayerRPC: handler})
-	s.rpcResults = newRPCResultCacheWithFlightLimit(time.Now, 8)
+	s.rpcResults = newRPCExecutionLedgerForServerTest(s, time.Now, 8)
 	authKeyID := [8]byte{0x22, 0x99}
 	const sessionID = int64(2299)
 	body := exactOutboundLayerRPCBody(t, tlprofile.Profile225, &tg.MessagesGetHistoryRequest{
@@ -1201,7 +1201,7 @@ func TestLayerEvidencePublicationBelongsOnlyToFreshFlightOwner(t *testing.T) {
 func TestLayerEvidenceNotPublishedWhenBatchFlightCapacityRollsBack(t *testing.T) {
 	handler := newAdmissionOnlyLayerRPC()
 	s := New(Options{DC: 2, LayerRPC: handler})
-	s.rpcResults = newRPCResultCacheWithFlightLimit(time.Now, 1)
+	s.rpcResults = newRPCExecutionLedgerForServerTest(s, time.Now, 1)
 	c := &Conn{authKeyID: [8]byte{0x22, 0x97}, sessionID: 2297, metrics: NopMetrics{}}
 	c.startInboundRPCScheduler(s.rpcScheduler, 1, 8, time.Second)
 	defer c.Close()
@@ -1285,7 +1285,7 @@ func TestLogicalSessionLayerWatermarkSurvivesResultExpiryAndOldContainer(t *test
 	now := newExpiryTestClock(time.Unix(1_900_000_000, 0))
 	router := rpc.New(rpc.Config{DC: 2}, rpc.Deps{}, zaptest.NewLogger(t), now)
 	s := New(Options{DC: 2, LayerRPC: router, Clock: now})
-	s.rpcResults = newRPCResultCacheWithFlightLimit(now.Now, 8)
+	s.rpcResults = newRPCExecutionLedgerForServerTest(s, now.Now, 8)
 	authKeyID := [8]byte{0x22, 0x95}
 	const sessionID = int64(2295)
 	newConn := func() *Conn {
@@ -1331,7 +1331,7 @@ func TestLogicalSessionLayerWatermarkSurvivesResultExpiryAndOldContainer(t *test
 	// inherited default remains Layer 227, while an old inner request may execute
 	// request-bound but cannot recreate or roll back the exact-session watermark.
 	now.Advance(10 * time.Minute)
-	if _, ok := s.rpcResults.Get(authKeyID, sessionID, oldMsgID); ok {
+	if _, ok := s.rpcResults.Replay(authKeyID, sessionID, oldMsgID); ok {
 		t.Fatal("old completed result did not expire")
 	}
 
@@ -1978,7 +1978,7 @@ func TestUnprofiledInvariantBindKeepsProfileUnknownAndReturnsExactBool(t *testin
 func TestLayerRPCBatchCapacityKeepsExistingPendingReplay(t *testing.T) {
 	router := rpc.New(rpc.Config{DC: 2, IP: "127.0.0.1", Port: 2398}, rpc.Deps{}, zaptest.NewLogger(t), clock.System)
 	s := New(Options{DC: 2, LayerRPC: router})
-	s.rpcResults = newRPCResultCacheWithFlightLimit(time.Now, 1)
+	s.rpcResults = newRPCExecutionLedgerForServerTest(s, time.Now, 1)
 	c := &Conn{
 		authKeyID: [8]byte{7, 7, 1},
 		sessionID: 771,
@@ -2033,7 +2033,7 @@ func TestLayerRPCBatchCapacityKeepsExistingPendingReplay(t *testing.T) {
 }
 
 func TestLayerRPCBatchCapacityAbortsRejectedRewrapOwner(t *testing.T) {
-	cache := newRPCResultCacheWithFlightLimit(time.Now, 1)
+	cache := newRPCExecutionLedgerForTest(time.Now, 1)
 	authKeyID := [8]byte{7, 7, 9}
 	const (
 		sessionID = int64(779)

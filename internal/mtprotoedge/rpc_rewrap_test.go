@@ -165,7 +165,7 @@ func TestRPCRewrapFailedSourceAttemptPhysicallyDeliversAliasOnce(t *testing.T) {
 
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		cached, ok := s.rpcResults.Get(key.ID, sessionID, newReqID)
+		cached, ok := s.rpcResults.Replay(key.ID, sessionID, newReqID)
 		if ok && cached.deliveryState() == rpcResultDeliveryDelivered && hooks.Load() == 1 {
 			if got := cached.writtenRequestID(); got != newReqID {
 				t.Fatalf("alias physical request ID = %d, want %d", got, newReqID)
@@ -173,7 +173,7 @@ func TestRPCRewrapFailedSourceAttemptPhysicallyDeliversAliasOnce(t *testing.T) {
 			if got := len(aliasTransport.snapshot()); got != 1 {
 				t.Fatalf("alias physical writes = %d, want 1", got)
 			}
-			sourceCached, sourceOK := s.rpcResults.Get(key.ID, sessionID, oldReqID)
+			sourceCached, sourceOK := s.rpcResults.Replay(key.ID, sessionID, oldReqID)
 			if !sourceOK || sourceCached.deliveryState() != rpcResultDeliveryReplayable {
 				t.Fatalf("source physical attempt = cached:%v state:%d, want replayable", sourceOK, sourceCached.deliveryState())
 			}
@@ -181,13 +181,13 @@ func TestRPCRewrapFailedSourceAttemptPhysicallyDeliversAliasOnce(t *testing.T) {
 		}
 		time.Sleep(time.Millisecond)
 	}
-	cached, ok := s.rpcResults.Get(key.ID, sessionID, newReqID)
+	cached, ok := s.rpcResults.Replay(key.ID, sessionID, newReqID)
 	t.Fatalf("alias result = cached:%v state:%v hooks:%d writes:%d", ok, cached.deliveryState(), hooks.Load(), len(aliasTransport.snapshot()))
 }
 
 func TestRPCRewrapRepeatedReplacementSubscriberCapacityStaysBounded(t *testing.T) {
 	s := New(Options{WriteTimeout: time.Second})
-	s.rpcResults = newRPCResultSubscriberTestCache(2, 2, 2, 2)
+	s.rpcResults = newRPCExecutionSubscriberTestLedger(2, 2, 2, 2)
 	transport := &collectingSessionTransport{}
 	key := newTestAuthKey(t)
 	const sessionID, oldReqID, newReqID = int64(188), int64(15101), int64(15201)
@@ -289,7 +289,7 @@ func TestRPCRewrapRetargetFailureRequiresReplacementAliasWrite(t *testing.T) {
 	deadline := time.Now().Add(2 * time.Second)
 	var aliasCached *encodedOutboundMessage
 	for time.Now().Before(deadline) {
-		if cached, ok := s.rpcResults.Get(key.ID, sessionID, newReqID); ok && cached.deliveryState() == rpcResultDeliveryReplayable {
+		if cached, ok := s.rpcResults.Replay(key.ID, sessionID, newReqID); ok && cached.deliveryState() == rpcResultDeliveryReplayable {
 			aliasCached = cached
 			break
 		}
@@ -306,7 +306,7 @@ func TestRPCRewrapRetargetFailureRequiresReplacementAliasWrite(t *testing.T) {
 	replacement := s.newConn(replacementTransport, key, sessionID, 1)
 	legacyCanonicalTestConn(t, replacement)
 	t.Cleanup(replacement.ForceClose)
-	if err := s.sendCachedRPCResult(context.Background(), replacement, aliasCached); err != nil {
+	if err := s.sendReplayedRPCResult(context.Background(), replacement, aliasCached); err != nil {
 		t.Fatalf("replacement alias replay: %v", err)
 	}
 	deadline = time.Now().Add(time.Second)
@@ -319,7 +319,7 @@ func TestRPCRewrapRetargetFailureRequiresReplacementAliasWrite(t *testing.T) {
 }
 
 func TestRPCResultWaiterSubscribeIsEventDriven(t *testing.T) {
-	cache := newRPCResultCacheWithFlightLimit(time.Now, 8)
+	cache := newRPCExecutionLedgerForTest(time.Now, 8)
 	claim, err := cache.Acquire([8]byte{1}, 2, 3)
 	if err != nil || claim.state != rpcResultAcquireOwner {
 		t.Fatalf("Acquire owner = %+v, %v", claim, err)
@@ -337,14 +337,14 @@ func TestRPCResultWaiterSubscribeIsEventDriven(t *testing.T) {
 		t.Fatal("Subscribe waited for or fabricated a result")
 	}
 	encoded := &encodedOutboundMessage{typeID: mt.RPCResultTypeID, body: make([]byte, 16), reqMsgID: 3}
-	cache.Put([8]byte{1}, 2, 3, encoded)
+	cache.completeReplayableForTest([8]byte{1}, 2, 3, encoded)
 	if !called.Load() {
 		t.Fatal("completion event did not invoke subscriber")
 	}
 }
 
 func TestRPCResultOwnerAbortHookInstallationIsFlightBound(t *testing.T) {
-	cache := newRPCResultCacheWithFlightLimit(time.Now, 8)
+	cache := newRPCExecutionLedgerForTest(time.Now, 8)
 	claim, err := cache.Acquire([8]byte{2}, 3, 4)
 	if err != nil || claim.state != rpcResultAcquireOwner {
 		t.Fatalf("Acquire owner = %+v, %v", claim, err)
@@ -362,7 +362,7 @@ func TestRPCResultOwnerAbortHookInstallationIsFlightBound(t *testing.T) {
 }
 
 func TestRPCRewrapRegistryIsPlatformAgnosticAndAckBound(t *testing.T) {
-	cache := newRPCResultCacheWithFlightLimit(time.Now, 8)
+	cache := newRPCExecutionLedgerForTest(time.Now, 8)
 	claim, err := cache.Acquire([8]byte{4}, 5, 6)
 	if err != nil || claim.state != rpcResultAcquireOwner {
 		t.Fatalf("Acquire owner = %+v, %v", claim, err)
@@ -451,7 +451,7 @@ func TestInitRewrapAfterWritingReplaysWithoutBusinessExecution(t *testing.T) {
 	deadline := time.Now().Add(2 * time.Second)
 	var replayed *encodedOutboundMessage
 	for time.Now().Before(deadline) {
-		if got, ok := s.rpcResults.Get(c.authKeyID, c.sessionID, newReqID); ok {
+		if got, ok := s.rpcResults.Replay(c.authKeyID, c.sessionID, newReqID); ok {
 			replayed = got
 			break
 		}
@@ -543,7 +543,7 @@ func TestInitRewrapAliasesExecutionAndRetargetsQueuedResult(t *testing.T) {
 	)
 	deadline := time.Now().Add(time.Second)
 	for time.Now().Before(deadline) {
-		if aliased, ok = s.rpcResults.Get(c.authKeyID, c.sessionID, newReqID); ok {
+		if aliased, ok = s.rpcResults.Replay(c.authKeyID, c.sessionID, newReqID); ok {
 			break
 		}
 		time.Sleep(time.Millisecond)
@@ -609,8 +609,8 @@ func TestRPCRewrapDeliveryJobPanicAndDeadlineReleaseBarrier(t *testing.T) {
 	}
 }
 
-func TestExpiredRPCRewrapResultJobPublishesCompletedAliasExactlyOnce(t *testing.T) {
-	cache := newRPCResultCacheWithFlightLimit(time.Now, 1)
+func TestExpiredRPCRewrapResultJobPublishesUnavailableAliasExactlyOnce(t *testing.T) {
+	cache := newRPCExecutionLedgerForTest(time.Now, 1)
 	s := &Server{log: zaptest.NewLogger(t), rpcResults: cache}
 	c := &Conn{
 		metrics:   NopMetrics{},
@@ -668,27 +668,22 @@ func TestExpiredRPCRewrapResultJobPublishesCompletedAliasExactlyOnce(t *testing.
 		t.Fatalf("pending result flights = %d, want 0", used)
 	}
 
-	completed, ok := cache.Get(c.authKeyID, c.sessionID, reqMsgID)
-	if !ok || completed != encoded {
-		t.Fatalf("completed aliased result = (%p, %v), want (%p, true)", completed, ok, encoded)
+	completed, ok := cache.Replay(c.authKeyID, c.sessionID, reqMsgID)
+	if ok || completed != nil {
+		t.Fatalf("failed alias retained payload = (%p, %v)", completed, ok)
 	}
-	replay, err := cache.Acquire(c.authKeyID, c.sessionID, reqMsgID)
-	if err != nil {
-		t.Fatalf("reacquire completed aliased result: %v", err)
-	}
-	if replay.state != rpcResultAcquireCompleted || replay.encoded != encoded ||
-		!replay.executionKnown || !replay.executionOK {
-		t.Fatalf("completed aliased result metadata = %#v", replay)
+	if _, err := cache.Acquire(c.authKeyID, c.sessionID, reqMsgID); !errors.Is(err, ErrRPCResultFlightCapacity) {
+		t.Fatalf("reacquire unavailable aliased result = %v, want capacity", err)
 	}
 
 	// A defensive duplicate failure report must not republish or underflow the
-	// completed flight. The first handoff/cache completion is the sole winner.
+	// completed flight. The first handoff/ledger completion is the sole winner.
 	s.failRPCRewrapResultJob(alias, encoded, context.DeadlineExceeded)
 	if used := cache.flightLimit.snapshot(); used != 0 {
 		t.Fatalf("pending result flights after duplicate failure = %d, want 0", used)
 	}
-	if got, ok := cache.Get(c.authKeyID, c.sessionID, reqMsgID); !ok || got != encoded {
-		t.Fatalf("completed result changed after duplicate failure = (%p, %v)", got, ok)
+	if got, ok := cache.Replay(c.authKeyID, c.sessionID, reqMsgID); ok || got != nil {
+		t.Fatalf("unavailable result changed after duplicate failure = (%p, %v)", got, ok)
 	}
 }
 
@@ -788,7 +783,7 @@ func TestRetargetedRPCRestoreIsOrderedAndIndependentOfGlobalHookExecutor(t *test
 	if pending != 0 {
 		t.Fatalf("retarget restore barriers = %d, want 0", pending)
 	}
-	if _, ok := s.rpcResults.Get(c.authKeyID, c.sessionID, newReqID); !ok {
+	if _, ok := s.rpcResults.Replay(c.authKeyID, c.sessionID, newReqID); !ok {
 		t.Fatal("retargeted result was not cached under new req_msg_id")
 	}
 }
@@ -980,7 +975,7 @@ func TestRPCRewrapPhysicalSuccessAfterWatchdogStillRunsLogicalRestore(t *testing
 }
 
 func TestConcurrentRPCRewrapDeliveredFinalizationPublishesOnceWithMetadata(t *testing.T) {
-	cache := newRPCResultCacheWithFlightLimit(time.Now, 1)
+	cache := newRPCExecutionLedgerForTest(time.Now, 1)
 	s := &Server{log: zaptest.NewLogger(t), rpcResults: cache}
 	c := &Conn{
 		metrics:   NopMetrics{},
@@ -1006,6 +1001,7 @@ func TestConcurrentRPCRewrapDeliveredFinalizationPublishesOnceWithMetadata(t *te
 	encoded := encodedRPCResultForPriorityTest(reqMsgID, 0)
 	encoded.delivery = claim.owner.Delivery()
 	encoded.setDeliveryHook(func() { logical.Add(1) })
+	cache.replayStore.(*rpcReplayStoreForTest).put(c.authKeyID, c.sessionID, reqMsgID, encoded)
 	alias := &rpcRewrapAlias{
 		conn: c, newReqID: reqMsgID, method: "help.getConfig", newOwner: claim.owner,
 		afterSuccessfulDelivery: func() error {
@@ -1036,7 +1032,7 @@ func TestConcurrentRPCRewrapDeliveredFinalizationPublishesOnceWithMetadata(t *te
 		t.Fatalf("logical finalizations = %d, want 1", got)
 	}
 	if got := subscribers.Load(); got != 1 {
-		t.Fatalf("cache subscriber calls = %d, want 1", got)
+		t.Fatalf("ledger subscriber calls = %d, want 1", got)
 	}
 	replay, err := cache.Acquire(c.authKeyID, c.sessionID, reqMsgID)
 	if err != nil || replay.state != rpcResultAcquireCompleted ||
@@ -1109,7 +1105,7 @@ func TestRPCRewrapSubscriberPanicCannotLoseClaimedLogicalHook(t *testing.T) {
 	if pending != 0 {
 		t.Fatalf("restore barriers after subscriber panic = %d, want 0", pending)
 	}
-	if cached, ok := s.rpcResults.Get(c.authKeyID, c.sessionID, reqMsgID); !ok ||
+	if cached, ok := s.rpcResults.Replay(c.authKeyID, c.sessionID, reqMsgID); !ok ||
 		cached.delivery != encoded.delivery || !bytes.Equal(cached.body, encoded.body) || cached.replayMsgID == 0 {
 		t.Fatalf("logical outbox result after subscriber panic = (%p, %v), source=%p", cached, ok, encoded)
 	}

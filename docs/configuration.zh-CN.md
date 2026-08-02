@@ -35,10 +35,10 @@
 | `TELESRV_MTPROTO_RPC_GLOBAL_WORKERS` | int / `256` | 共享公平调度器 worker 数。 |
 | `TELESRV_MTPROTO_RPC_GLOBAL_MAX_TASKS` | int / `8192` | 进程级排队与执行中的 RPC task 上限。 |
 | `TELESRV_MTPROTO_RPC_GLOBAL_MAX_BYTES` | int64 charge bytes / `536870912` | 进程级已预留/排队/执行中 RPC 内存 charge 预算；legacy 等于 copied body，exact 是 typed decode 前按 wire 与生成对象放大计算的保守 materialization charge。nested gzip 展开后会在 decoder 分配 typed graph 前原子增长该 charge，grow 失败原子拒绝整批候选 RPC；该值不代表可并发接收同等大小的 wire body。 |
-| `TELESRV_MTPROTO_RPC_RESULT_CACHE_MAX_ENTRIES` | int / `262144` | pending owner 与未 ACK 的轻量结果收据全局上限。收据只存请求身份、执行结果和 Layer admission 元数据，不存 TL body；收到 `msgs_ack` 立即删除，331 秒仅是无 ACK 时的安全上限。 |
-| `TELESRV_MTPROTO_RPC_RESULT_CACHE_AUTH_MAX_ENTRIES` | int / `32768` | 单 raw auth key 的 owner/收据条目上限；必须满足 `global >= auth >= session`。 |
-| `TELESRV_MTPROTO_RPC_RESULT_CACHE_SESSION_MAX_ENTRIES` | int / `16384` | 单 `raw auth key + session_id` 的 owner/收据条目上限。 |
-| `TELESRV_MTPROTO_RPC_RESULT_PENDING_PER_AUTH` | int / `2048` | 单 raw auth key 的 active pending owner 附加上限；必须不大于 `RPC_GLOBAL_MAX_TASKS` 和 auth entry 上限。 |
+| `TELESRV_MTPROTO_RPC_EXECUTION_MAX_ENTRIES` | int / `262144` | pending owner 与未 ACK execution receipt 的全局上限。receipt 只存请求身份、执行结果和 Layer admission 元数据，不存 TL body；收到 `msgs_ack` 立即删除，331 秒仅是无 ACK 时的安全上限。 |
+| `TELESRV_MTPROTO_RPC_EXECUTION_AUTH_MAX_ENTRIES` | int / `32768` | 单 raw auth key 的 owner/receipt 条目上限；必须满足 `global >= auth >= session`。 |
+| `TELESRV_MTPROTO_RPC_EXECUTION_SESSION_MAX_ENTRIES` | int / `16384` | 单 `raw auth key + session_id` 的 owner/receipt 条目上限。 |
+| `TELESRV_MTPROTO_RPC_EXECUTION_PENDING_PER_AUTH` | int / `2048` | 单 raw auth key 的 active pending owner 附加上限；必须不大于 `RPC_GLOBAL_MAX_TASKS` 和 auth entry 上限。 |
 | `TELESRV_MTPROTO_INBOUND_FRAME_GLOBAL_MAX_BYTES` | int64 bytes / `536870912` | transport wire、最大解密明文以及每个 live outer/nested gzip 输出的进程级在途预算，均在对应 payload 分配前预留。 |
 | `TELESRV_MTPROTO_OUTBOUND_QUEUE_SIZE` | int / `128` | 单连接普通 outbound mailbox 容量。 |
 | `TELESRV_MTPROTO_OUTBOUND_CONTROL_QUEUE_SIZE` | int / `32` | 单连接控制消息 mailbox 容量。 |

@@ -35,10 +35,10 @@ This document describes every setting loaded by `internal/config`. Defaults and 
 | `TELESRV_MTPROTO_RPC_GLOBAL_WORKERS` | int / `256` | Shared fair-scheduler worker count. |
 | `TELESRV_MTPROTO_RPC_GLOBAL_MAX_TASKS` | int / `8192` | Process-wide scheduled/in-flight RPC task cap. |
 | `TELESRV_MTPROTO_RPC_GLOBAL_MAX_BYTES` | int64 charge bytes / `536870912` | Process-wide reserved/queued/in-flight RPC memory charge. Exact admission reserves a conservative typed-materialization charge from wire size and grows it atomically before a nested-gzip-expanded graph is decoded; grow failure rejects the complete candidate batch. This is not an equal amount of concurrently receivable wire bytes. |
-| `TELESRV_MTPROTO_RPC_RESULT_CACHE_MAX_ENTRIES` | int / `262144` | Global cap for pending owners and compact unacknowledged-result receipts. Receipts retain request identity, execution outcome, and Layer admission metadata only—never TL bodies. `msgs_ack` removes them immediately; 331 seconds is only the no-ACK safety horizon. |
-| `TELESRV_MTPROTO_RPC_RESULT_CACHE_AUTH_MAX_ENTRIES` | int / `32768` | Per-raw-auth owner/receipt cap; limits satisfy `global >= auth >= session`. |
-| `TELESRV_MTPROTO_RPC_RESULT_CACHE_SESSION_MAX_ENTRIES` | int / `16384` | Per `raw auth key + session_id` owner/receipt cap. |
-| `TELESRV_MTPROTO_RPC_RESULT_PENDING_PER_AUTH` | int / `2048` | Additional active-owner cap per raw auth key; no greater than global pending tasks or auth entries. |
+| `TELESRV_MTPROTO_RPC_EXECUTION_MAX_ENTRIES` | int / `262144` | Global cap for pending owners and compact unacknowledged execution receipts. Receipts retain request identity, execution outcome, and Layer admission metadata only—never TL bodies. `msgs_ack` removes them immediately; 331 seconds is only the no-ACK safety horizon. |
+| `TELESRV_MTPROTO_RPC_EXECUTION_AUTH_MAX_ENTRIES` | int / `32768` | Per-raw-auth owner/receipt cap; limits satisfy `global >= auth >= session`. |
+| `TELESRV_MTPROTO_RPC_EXECUTION_SESSION_MAX_ENTRIES` | int / `16384` | Per `raw auth key + session_id` owner/receipt cap. |
+| `TELESRV_MTPROTO_RPC_EXECUTION_PENDING_PER_AUTH` | int / `2048` | Additional active-owner cap per raw auth key; no greater than global pending tasks or auth entries. |
 | `TELESRV_MTPROTO_INBOUND_FRAME_GLOBAL_MAX_BYTES` | int64 bytes / `536870912` | Process-wide reservation for transport wire bytes, maximum decrypted plaintext, and every live outer/nested gzip expansion, acquired before the corresponding payload allocation. |
 | `TELESRV_MTPROTO_OUTBOUND_QUEUE_SIZE` | int / `128` | Per-connection normal outbound mailbox capacity. |
 | `TELESRV_MTPROTO_OUTBOUND_CONTROL_QUEUE_SIZE` | int / `32` | Per-connection control-message mailbox capacity. |

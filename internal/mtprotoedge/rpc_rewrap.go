@@ -446,7 +446,7 @@ func (a *rpcRewrapAlias) storeResultOnce(s *Server, encoded *encodedOutboundMess
 	if a == nil || s == nil || encoded == nil || !a.resultStoreClaimed.CompareAndSwap(false, true) {
 		return
 	}
-	s.storeRPCResult(a.conn, a.newReqID, encoded)
+	s.completeRPCResult(a.conn, a.newReqID, encoded, true)
 }
 
 func claimRPCRewrapLogicalHook(
@@ -465,8 +465,8 @@ func claimRPCRewrapLogicalHook(
 // completeDeliveredRPCRewrapResult is safe after a watchdog has already fenced
 // this physical generation. The caller has independent proof that the
 // retargeted bytes reached the stream; deliveredFinalizeOnce, the shared hook
-// coordinator and cache publication make late/concurrent invocations converge
-// while preserving replacement -> logical -> cache -> barrier order.
+// coordinator and ledger publication make late/concurrent invocations converge
+// while preserving replacement -> logical -> ledger -> barrier order.
 func (s *Server) completeDeliveredRPCRewrapResult(
 	ctx context.Context,
 	a *rpcRewrapAlias,
@@ -618,7 +618,7 @@ func (c *rpcRewrapDeliveryControl) timeout() bool {
 
 // commit records successful physical delivery (or an already-proven retarget)
 // without disarming the watchdog. The same absolute deadline covers the
-// replacement/logical restore and cache/barrier terminal path; complete is the
+// replacement/logical restore and ledger/barrier terminal path; complete is the
 // only successful transition that stops the timer.
 func (c *rpcRewrapDeliveryControl) commit() bool {
 	if c == nil || !c.transition(rpcRewrapJobRunning, rpcRewrapJobCommitted) {
@@ -840,7 +840,7 @@ func (s *Server) failRPCRewrapResultJob(
 	publish := a.newOwner.HandOff()
 	encoded.markReplayable()
 	encoded.releaseDeferredLogicalDeliveryHook()
-	// Release the connection-local scheduler before any defensive cache panic;
+	// Release the connection-local scheduler before any defensive ledger panic;
 	// the physical generation is already fenced, so no following task can run.
 	a.releaseReplayRestoreBarrier()
 	if publish {
@@ -1093,7 +1093,7 @@ func (s *Server) publishRewrappedRPCResult(
 	}
 	ctx, cancel := context.WithDeadline(context.Background(), deadline)
 	defer cancel()
-	// attachRPCRewrapReplayPreparation froze cache-copied scheduling metadata
+	// attachRPCRewrapReplayPreparation froze replay-copied scheduling metadata
 	// before the watchdog started. The delivery path must not mutate plain fields
 	// that a concurrent timeout publication can copy into the replay ledger.
 	encoded.markQueued()

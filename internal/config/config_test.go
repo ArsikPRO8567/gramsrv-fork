@@ -176,10 +176,10 @@ func TestLoadMTProtoAdmissionAndRPCBudgets(t *testing.T) {
 	t.Setenv("TELESRV_MTPROTO_RPC_GLOBAL_WORKERS", "33")
 	t.Setenv("TELESRV_MTPROTO_RPC_GLOBAL_MAX_TASKS", "444")
 	t.Setenv("TELESRV_MTPROTO_RPC_GLOBAL_MAX_BYTES", "555555")
-	t.Setenv("TELESRV_MTPROTO_RPC_RESULT_CACHE_MAX_ENTRIES", "555")
-	t.Setenv("TELESRV_MTPROTO_RPC_RESULT_CACHE_AUTH_MAX_ENTRIES", "444")
-	t.Setenv("TELESRV_MTPROTO_RPC_RESULT_CACHE_SESSION_MAX_ENTRIES", "333")
-	t.Setenv("TELESRV_MTPROTO_RPC_RESULT_PENDING_PER_AUTH", "222")
+	t.Setenv("TELESRV_MTPROTO_RPC_EXECUTION_MAX_ENTRIES", "555")
+	t.Setenv("TELESRV_MTPROTO_RPC_EXECUTION_AUTH_MAX_ENTRIES", "444")
+	t.Setenv("TELESRV_MTPROTO_RPC_EXECUTION_SESSION_MAX_ENTRIES", "333")
+	t.Setenv("TELESRV_MTPROTO_RPC_EXECUTION_PENDING_PER_AUTH", "222")
 	t.Setenv("TELESRV_MTPROTO_INBOUND_FRAME_GLOBAL_MAX_BYTES", "777777")
 	t.Setenv("TELESRV_MTPROTO_OUTBOUND_QUEUE_SIZE", "88")
 	t.Setenv("TELESRV_MTPROTO_OUTBOUND_CONTROL_QUEUE_SIZE", "22")
@@ -200,15 +200,15 @@ func TestLoadMTProtoAdmissionAndRPCBudgets(t *testing.T) {
 		cfg.MTProtoRPCGlobalWorkers != 33 || cfg.MTProtoRPCGlobalMaxTasks != 444 || cfg.MTProtoRPCGlobalMaxBytes != 555555 {
 		t.Fatalf("rpc budget config = %d/%d/%v/%d/%d/%d", cfg.MTProtoRPCMaxInflight, cfg.MTProtoRPCQueueSize, cfg.MTProtoRPCTimeout, cfg.MTProtoRPCGlobalWorkers, cfg.MTProtoRPCGlobalMaxTasks, cfg.MTProtoRPCGlobalMaxBytes)
 	}
-	if cfg.MTProtoRPCResultCacheMaxEntries != 555 ||
-		cfg.MTProtoRPCResultCacheAuthMaxEntries != 444 ||
-		cfg.MTProtoRPCResultCacheSessionMaxEntries != 333 ||
-		cfg.MTProtoRPCResultPendingPerAuth != 222 {
-		t.Fatalf("rpc result receipt config = global:%d auth:%d session:%d pending/auth:%d",
-			cfg.MTProtoRPCResultCacheMaxEntries,
-			cfg.MTProtoRPCResultCacheAuthMaxEntries,
-			cfg.MTProtoRPCResultCacheSessionMaxEntries,
-			cfg.MTProtoRPCResultPendingPerAuth)
+	if cfg.MTProtoRPCExecutionMaxEntries != 555 ||
+		cfg.MTProtoRPCExecutionAuthMaxEntries != 444 ||
+		cfg.MTProtoRPCExecutionSessionMaxEntries != 333 ||
+		cfg.MTProtoRPCExecutionPendingPerAuth != 222 {
+		t.Fatalf("rpc execution ledger config = global:%d auth:%d session:%d pending/auth:%d",
+			cfg.MTProtoRPCExecutionMaxEntries,
+			cfg.MTProtoRPCExecutionAuthMaxEntries,
+			cfg.MTProtoRPCExecutionSessionMaxEntries,
+			cfg.MTProtoRPCExecutionPendingPerAuth)
 	}
 	if cfg.MTProtoInboundFrameGlobalMaxBytes != 777777 {
 		t.Fatalf("inbound frame budget config = %d", cfg.MTProtoInboundFrameGlobalMaxBytes)
@@ -221,32 +221,32 @@ func TestLoadMTProtoAdmissionAndRPCBudgets(t *testing.T) {
 	}
 }
 
-func TestLoadRPCResultFairBudgetDefaults(t *testing.T) {
+func TestLoadRPCExecutionFairBudgetDefaults(t *testing.T) {
 	disableDefaultConfigFile(t)
 	cfg, err := Load()
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if cfg.MTProtoRPCResultCacheMaxEntries != 1<<18 ||
-		cfg.MTProtoRPCResultCacheAuthMaxEntries != 1<<15 ||
-		cfg.MTProtoRPCResultCacheSessionMaxEntries != 1<<14 ||
-		cfg.MTProtoRPCResultPendingPerAuth != 1<<11 {
-		t.Fatalf("rpc_result receipt defaults = global:%d auth:%d session:%d pending/auth:%d",
-			cfg.MTProtoRPCResultCacheMaxEntries,
-			cfg.MTProtoRPCResultCacheAuthMaxEntries,
-			cfg.MTProtoRPCResultCacheSessionMaxEntries,
-			cfg.MTProtoRPCResultPendingPerAuth)
+	if cfg.MTProtoRPCExecutionMaxEntries != 1<<18 ||
+		cfg.MTProtoRPCExecutionAuthMaxEntries != 1<<15 ||
+		cfg.MTProtoRPCExecutionSessionMaxEntries != 1<<14 ||
+		cfg.MTProtoRPCExecutionPendingPerAuth != 1<<11 {
+		t.Fatalf("rpc execution receipt defaults = global:%d auth:%d session:%d pending/auth:%d",
+			cfg.MTProtoRPCExecutionMaxEntries,
+			cfg.MTProtoRPCExecutionAuthMaxEntries,
+			cfg.MTProtoRPCExecutionSessionMaxEntries,
+			cfg.MTProtoRPCExecutionPendingPerAuth)
 	}
 }
 
-func TestLoadRejectsInvalidRPCResultFairBudgets(t *testing.T) {
+func TestLoadRejectsInvalidRPCExecutionFairBudgets(t *testing.T) {
 	tests := []struct {
 		name  string
 		key   string
 		value string
 	}{
-		{name: "entry hierarchy", key: "TELESRV_MTPROTO_RPC_RESULT_CACHE_MAX_ENTRIES", value: "1024"},
-		{name: "pending hierarchy", key: "TELESRV_MTPROTO_RPC_RESULT_PENDING_PER_AUTH", value: "9000"},
+		{name: "entry hierarchy", key: "TELESRV_MTPROTO_RPC_EXECUTION_MAX_ENTRIES", value: "1024"},
+		{name: "pending hierarchy", key: "TELESRV_MTPROTO_RPC_EXECUTION_PENDING_PER_AUTH", value: "9000"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -266,7 +266,7 @@ func TestLoadRejectsMalformedMTProtoCapacity(t *testing.T) {
 		value string
 	}{
 		{name: "worker tasks malformed", key: "TELESRV_MTPROTO_RPC_GLOBAL_MAX_TASKS", value: "lots"},
-		{name: "receipt entries overflow", key: "TELESRV_MTPROTO_RPC_RESULT_CACHE_MAX_ENTRIES", value: "999999999999999999999999"},
+		{name: "receipt entries overflow", key: "TELESRV_MTPROTO_RPC_EXECUTION_MAX_ENTRIES", value: "999999999999999999999999"},
 		{name: "tracked bytes overflow", key: "TELESRV_MTPROTO_OUTBOUND_TRACKED_GLOBAL_MAX_BYTES", value: "999999999999999999999999"},
 		{name: "outbound queue malformed", key: "TELESRV_MTPROTO_OUTBOUND_QUEUE_SIZE", value: "many"},
 	} {

@@ -41,7 +41,7 @@ const (
 	// It never dispatches business code a second time.
 	inboundItemRewrappedRPC
 	// inboundItemReplayRPC is a request first observed by this physical Conn whose
-	// terminal result already exists in the cross-connection cache. It is distinct
+	// terminal result already exists in the cross-connection execution ledger. It is distinct
 	// from inboundItemDuplicate: a duplicate already present in this Conn's seen
 	// table must only be ACKed. The original owner/result is already using the same
 	// reliable TCP stream, so replaying it once per retransmit wave amplifies a
@@ -732,7 +732,7 @@ func preflightInboundItem(msgID int64, seqNo int32, typeID uint32, content bool,
 
 // prepareInboundRPCBatch performs the whole container's count/byte admission
 // before copying or scheduling any API RPC. Capacity exhaustion is converted
-// into one consistent local 500 WORKER_BUSY_TOO_LONG_RETRY result per uncached
+// into one consistent local 500 WORKER_BUSY_TOO_LONG_RETRY result per new
 // RPC; no business handler from the batch is allowed to start in that case.
 func (s *Server) prepareInboundRPCBatch(ctx context.Context, c *Conn, plan *inboundPlan) error {
 	if s.layerRPC != nil {
@@ -846,7 +846,7 @@ func (s *Server) prepareInboundRPCBatch(ctx context.Context, c *Conn, plan *inbo
 		}
 		switch claim.state {
 		case rpcResultAcquireCompleted:
-			s.log.Info("RPC duplicate replay from session cache",
+			s.log.Info("RPC duplicate replay from logical-session outbox",
 				zap.String("method", method),
 				zap.Int64("msg_id", item.msgID),
 				zap.String("auth_key_id", c.authKeyHex),
@@ -943,14 +943,14 @@ func (s *Server) executeInboundPlan(ctx context.Context, cs *connState, c *Conn,
 		case inboundItemServiceDuplicate:
 			// Classify from the originally committed connState record, never from the
 			// retransmitted body. This prevents same-id payload replacement. Only an
-			// already cached answer is eligible for resend (rpc_drop_answer today);
+			// already retained answer is eligible for resend (rpc_drop_answer today);
 			// other best-effort service traffic uses a later fresh request.
 			if err := s.replayRPCResultByRequest(ctx, c, item.msgID); err != nil {
 				return err
 			}
 		case inboundItemReplayRPC:
 			if encoded, _ := item.payload.(*encodedOutboundMessage); encoded != nil {
-				if err := s.sendCachedRPCResultWithHook(ctx, c, encoded, item.replayAfterSuccessfulDelivery); err != nil {
+				if err := s.sendReplayedRPCResultWithHook(ctx, c, encoded, item.replayAfterSuccessfulDelivery); err != nil {
 					return err
 				}
 			} else if err := s.replayRPCResultByRequest(ctx, c, item.msgID); err != nil {
