@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"strings"
-	"time"
 
 	"github.com/jackc/pgerrcode"
 	"github.com/jackc/pgx/v5"
@@ -36,18 +35,17 @@ SELECT
   email_unconfirmed_pattern, login_email_pattern, secure_random,
   current_algo_salt1, current_algo_salt2, current_algo_g, current_algo_p,
   srp_id, srp_verifier, srp_b_secret, srp_b,
-  recovery_email, recovery_code, recovery_code_expires_at, login_email
+  recovery_email, login_email
 FROM account_passwords
 WHERE user_id = $1`, userID)
 	var settings domain.PasswordSettings
 	var salt1, salt2, p []byte
-	var recoveryExpires sql.NullTime
 	if err := row.Scan(
 		&settings.HasRecovery, &settings.HasSecureValues, &settings.HasPassword, &settings.Hint,
 		&settings.EmailUnconfirmedPattern, &settings.LoginEmailPattern, &settings.SecureRandom,
 		&salt1, &salt2, &settings.NewAlgo.G, &p,
 		&settings.SRPID, &settings.SRPVerifier, &settings.SRPBSecret, &settings.SRPB,
-		&settings.RecoveryEmail, &settings.RecoveryCode, &recoveryExpires, &settings.LoginEmail,
+		&settings.RecoveryEmail, &settings.LoginEmail,
 	); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return domain.PasswordSettings{}, false, nil
@@ -65,9 +63,6 @@ WHERE user_id = $1`, userID)
 	settings.NewAlgo.Salt1 = append([]byte(nil), salt1...)
 	settings.NewAlgo.Salt2 = append([]byte(nil), salt2...)
 	settings.NewAlgo.P = append([]byte(nil), p...)
-	if recoveryExpires.Valid {
-		settings.RecoveryCodeExpiresAt = recoveryExpires.Time.Unix()
-	}
 	settings.SecureRandom = append([]byte(nil), settings.SecureRandom...)
 	settings.SRPVerifier = append([]byte(nil), settings.SRPVerifier...)
 	settings.SRPBSecret = append([]byte(nil), settings.SRPBSecret...)
@@ -102,19 +97,15 @@ func (s *PasswordStore) Save(ctx context.Context, userID int64, settings domain.
 	if settings.CurrentAlgo != nil {
 		algo = *settings.CurrentAlgo
 	}
-	var recoveryExpires any
-	if settings.RecoveryCodeExpiresAt > 0 {
-		recoveryExpires = time.Unix(settings.RecoveryCodeExpiresAt, 0)
-	}
 	_, err := s.db.Exec(ctx, `
 INSERT INTO account_passwords (
   user_id, has_recovery, has_secure_values, has_password, hint,
   email_unconfirmed_pattern, login_email_pattern, secure_random,
   current_algo_salt1, current_algo_salt2, current_algo_g, current_algo_p,
   srp_id, srp_verifier, srp_b_secret, srp_b,
-  recovery_email, recovery_code, recovery_code_expires_at, login_email
+  recovery_email, login_email
 )
-VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
 ON CONFLICT (user_id) DO UPDATE SET
   has_recovery = EXCLUDED.has_recovery,
   has_secure_values = EXCLUDED.has_secure_values,
@@ -132,8 +123,6 @@ ON CONFLICT (user_id) DO UPDATE SET
   srp_b_secret = EXCLUDED.srp_b_secret,
   srp_b = EXCLUDED.srp_b,
   recovery_email = EXCLUDED.recovery_email,
-  recovery_code = EXCLUDED.recovery_code,
-  recovery_code_expires_at = EXCLUDED.recovery_code_expires_at,
   login_email = EXCLUDED.login_email,
   updated_at = now()`,
 		userID,
@@ -141,7 +130,7 @@ ON CONFLICT (user_id) DO UPDATE SET
 		settings.EmailUnconfirmedPattern, settings.LoginEmailPattern, nonNilBytea(settings.SecureRandom),
 		nonNilBytea(algo.Salt1), nonNilBytea(algo.Salt2), algo.G, nonNilBytea(algo.P),
 		settings.SRPID, nonNilBytea(settings.SRPVerifier), nonNilBytea(settings.SRPBSecret), nonNilBytea(settings.SRPB),
-		settings.RecoveryEmail, settings.RecoveryCode, recoveryExpires, settings.LoginEmail,
+		settings.RecoveryEmail, settings.LoginEmail,
 	)
 	if err != nil {
 		if isAccountPasswordLoginEmailUnique(err) {

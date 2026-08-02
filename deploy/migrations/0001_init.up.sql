@@ -1237,9 +1237,7 @@ CREATE TABLE public.account_passwords (
     srp_verifier bytea DEFAULT '\x'::bytea NOT NULL,
     srp_b_secret bytea DEFAULT '\x'::bytea NOT NULL,
     srp_b bytea DEFAULT '\x'::bytea NOT NULL,
-    recovery_email character varying(256) DEFAULT ''::character varying NOT NULL,
-    recovery_code character varying(32) DEFAULT ''::character varying NOT NULL,
-    recovery_code_expires_at timestamp with time zone
+    recovery_email character varying(256) DEFAULT ''::character varying NOT NULL
 );
 
 

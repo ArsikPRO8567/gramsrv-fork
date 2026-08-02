@@ -479,6 +479,12 @@ func passwordErr(err error) error {
 		return emailNotAllowedErr()
 	case errors.Is(err, domain.ErrEmailCodeInvalid):
 		return emailCodeInvalidErr()
+	case errors.Is(err, domain.ErrRecoveryCodeEmpty):
+		return tgerr.New(400, "CODE_EMPTY")
+	case errors.Is(err, domain.ErrRecoveryCodeInvalid):
+		return tgerr.New(400, "CODE_INVALID")
+	case errors.Is(err, domain.ErrPasswordRecoveryExpired):
+		return tgerr.New(400, "PASSWORD_RECOVERY_EXPIRED")
 	case errors.Is(err, domain.ErrPasswordRecoveryNA):
 		return passwordRecoveryNAErr()
 	default:

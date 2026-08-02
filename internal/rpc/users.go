@@ -249,15 +249,13 @@ func applyContactNoteToUserFull(user domain.User, full *tg.UserFull) bool {
 }
 
 func (r *Router) buildUserFullProjection(ctx context.Context, currentUserID int64, u domain.User) (tg.UserFull, error) {
+	visibility, err := r.userFullPrivacyVisibility(ctx, currentUserID, u.ID)
+	if err != nil {
+		return tg.UserFull{}, internalErr()
+	}
 	about := u.About
-	if r.deps.Privacy != nil && u.ID != currentUserID {
-		allowed, err := r.deps.Privacy.CanSee(ctx, u.ID, currentUserID, domain.PrivacyKeyAbout)
-		if err != nil {
-			return tg.UserFull{}, internalErr()
-		}
-		if !allowed {
-			about = ""
-		}
+	if !visibility[domain.PrivacyKeyAbout] {
+		about = ""
 	}
 	full := tg.UserFull{
 		ID:             u.ID,
@@ -279,24 +277,9 @@ func (r *Router) buildUserFullProjection(ctx context.Context, currentUserID int6
 	// 通话入口：客户端不见 phone_calls_available=true 不显示通话按钮（P1 前置项）。
 	// phone_calls_private 标记对端禁 P2P（p2p_allowed 真值在通话确认时另行计算）。
 	if !u.Bot && u.ID != currentUserID {
-		callsAllowed, p2pAllowed, voiceAllowed := true, true, true
-		if r.deps.Privacy != nil {
-			allowed, err := r.deps.Privacy.CanSee(ctx, u.ID, currentUserID, domain.PrivacyKeyPhoneCall)
-			if err != nil {
-				return tg.UserFull{}, internalErr()
-			}
-			callsAllowed = allowed
-			allowed, err = r.deps.Privacy.CanSee(ctx, u.ID, currentUserID, domain.PrivacyKeyPhoneP2P)
-			if err != nil {
-				return tg.UserFull{}, internalErr()
-			}
-			p2pAllowed = allowed
-			allowed, err = r.deps.Privacy.CanSee(ctx, u.ID, currentUserID, domain.PrivacyKeyVoiceMessages)
-			if err != nil {
-				return tg.UserFull{}, internalErr()
-			}
-			voiceAllowed = allowed
-		}
+		callsAllowed := visibility[domain.PrivacyKeyPhoneCall]
+		p2pAllowed := visibility[domain.PrivacyKeyPhoneP2P]
+		voiceAllowed := visibility[domain.PrivacyKeyVoiceMessages]
 		full.PhoneCallsAvailable = callsAllowed
 		full.VideoCallsAvailable = callsAllowed
 		full.PhoneCallsPrivate = !p2pAllowed
@@ -326,15 +309,11 @@ func (r *Router) buildUserFullProjection(ctx context.Context, currentUserID int6
 			break
 		}
 	}
-	if err := r.fillUserFullPhotos(ctx, currentUserID, u.ID, &full); err != nil {
+	if err := r.fillUserFullPhotos(ctx, currentUserID, u.ID, visibility[domain.PrivacyKeyProfilePhoto], &full); err != nil {
 		return tg.UserFull{}, err
 	}
 	if r.deps.Account != nil {
-		allowed, err := r.canSeeSavedMusic(ctx, currentUserID, u.ID)
-		if err != nil {
-			return tg.UserFull{}, err
-		}
-		if allowed {
+		if visibility[domain.PrivacyKeySavedMusic] {
 			music, err := r.deps.Account.ListSavedMusic(ctx, u.ID, 0, 1)
 			if err != nil {
 				return tg.UserFull{}, internalErr()
@@ -406,15 +385,7 @@ func (r *Router) buildUserFullProjection(ctx context.Context, currentUserID int6
 	// 生日（account.updateBirthday）：落 userFull.birthday，按 PrivacyKeyBirthday 对他人裁剪，
 	// 本人恒可见。
 	if u.Birthday.IsSet() {
-		birthdayVisible := true
-		if r.deps.Privacy != nil && u.ID != currentUserID {
-			allowed, err := r.deps.Privacy.CanSee(ctx, u.ID, currentUserID, domain.PrivacyKeyBirthday)
-			if err != nil {
-				return tg.UserFull{}, internalErr()
-			}
-			birthdayVisible = allowed
-		}
-		if birthdayVisible {
+		if visibility[domain.PrivacyKeyBirthday] {
 			full.SetBirthday(tgBirthday(u.Birthday))
 		}
 	}
@@ -423,6 +394,51 @@ func (r *Router) buildUserFullProjection(ctx context.Context, currentUserID int6
 	// overlay 处理（applyPersonalChannelToUserFull），避免烤进 per-(viewer,target) 投影缓存以及
 	// build/chats 两次解析同一频道。
 	return full, nil
+}
+
+// userFullPrivacyVisibility evaluates every privacy-controlled UserFull field
+// from one owner snapshot when the service supports batching. Older test or
+// alternate implementations retain scalar parity; a missing batch key fails
+// closed instead of exposing that field.
+func (r *Router) userFullPrivacyVisibility(ctx context.Context, viewerUserID, ownerUserID int64) (map[domain.PrivacyKey]bool, error) {
+	keys := []domain.PrivacyKey{
+		domain.PrivacyKeyAbout,
+		domain.PrivacyKeyPhoneCall,
+		domain.PrivacyKeyPhoneP2P,
+		domain.PrivacyKeyVoiceMessages,
+		domain.PrivacyKeyProfilePhoto,
+		domain.PrivacyKeySavedMusic,
+		domain.PrivacyKeyBirthday,
+	}
+	out := make(map[domain.PrivacyKey]bool, len(keys))
+	if r.deps.Privacy == nil || ownerUserID == viewerUserID {
+		for _, key := range keys {
+			out[key] = true
+		}
+		return out, nil
+	}
+	if batch, ok := r.deps.Privacy.(batchPrivacyEvaluator); ok {
+		matrix, err := batch.CanSeeBatch(ctx, []int64{ownerUserID}, viewerUserID, keys)
+		if err != nil {
+			return nil, err
+		}
+		ownerVisibility, found := matrix[ownerUserID]
+		if !found {
+			return out, nil
+		}
+		for _, key := range keys {
+			out[key] = ownerVisibility[key]
+		}
+		return out, nil
+	}
+	for _, key := range keys {
+		allowed, err := r.deps.Privacy.CanSee(ctx, ownerUserID, viewerUserID, key)
+		if err != nil {
+			return nil, err
+		}
+		out[key] = allowed
+	}
+	return out, nil
 }
 
 // applyAccountRatingToUserFull projects gramsrv's stored composite rating through
@@ -724,7 +740,7 @@ func savedMusicDocumentIDs(docs []domain.Document) []int64 {
 	return ids
 }
 
-func (r *Router) fillUserFullPhotos(ctx context.Context, viewerUserID, ownerUserID int64, full *tg.UserFull) error {
+func (r *Router) fillUserFullPhotos(ctx context.Context, viewerUserID, ownerUserID int64, profileAllowed bool, full *tg.UserFull) error {
 	if r.deps.Files == nil || full == nil || ownerUserID == 0 {
 		return nil
 	}
@@ -754,14 +770,6 @@ func (r *Router) fillUserFullPhotos(ctx context.Context, viewerUserID, ownerUser
 			if found {
 				full.SetPersonalPhoto(tgPhoto(photo))
 			}
-		}
-	}
-	profileAllowed := true
-	if r.deps.Privacy != nil {
-		var err error
-		profileAllowed, err = r.deps.Privacy.CanSee(ctx, ownerUserID, viewerUserID, domain.PrivacyKeyProfilePhoto)
-		if err != nil {
-			return internalErr()
 		}
 	}
 	if profileAllowed {

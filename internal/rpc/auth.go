@@ -433,7 +433,7 @@ func tgSMSSentCode(hash string, length int) tg.AuthSentCodeClass {
 	}
 }
 
-func tgEmailSentCode(hash, emailPattern string, length int) tg.AuthSentCodeClass {
+func tgEmailSentCode(hash, emailPattern string, length int, resetAvailable bool) tg.AuthSentCodeClass {
 	if length <= 0 {
 		length = devCodeLength
 	}
@@ -441,13 +441,24 @@ func tgEmailSentCode(hash, emailPattern string, length int) tg.AuthSentCodeClass
 		EmailPattern: emailPattern,
 		Length:       length,
 	}
-	// reset_available_period=0 表示可立即调用 auth.resetLoginEmail（开发环境无等待期），
-	// 让客户端的"无法访问邮箱?"逃生入口可用。
-	codeType.SetResetAvailablePeriod(0)
+	if resetAvailable {
+		// 0 means the SMS fallback is available immediately. Absence means this
+		// deployment cannot safely service auth.resetLoginEmail.
+		codeType.SetResetAvailablePeriod(0)
+	}
 	return &tg.AuthSentCode{
 		Type:          codeType,
 		PhoneCodeHash: hash,
 	}
+}
+
+type loginEmailResetAvailabilityChecker interface {
+	LoginEmailResetAvailable() bool
+}
+
+func (r *Router) loginEmailResetAvailable() bool {
+	checker, ok := r.deps.Auth.(loginEmailResetAvailabilityChecker)
+	return ok && checker.LoginEmailResetAvailable()
 }
 
 func tgEmailSetupRequiredSentCode(hash string) tg.AuthSentCodeClass {
@@ -472,7 +483,7 @@ func (r *Router) tgSentCodeForHash(ctx context.Context, hash string) (tg.AuthSen
 	case domain.AuthCodeDeliverySMS:
 		return tgSMSSentCode(hash, delivery.Length), nil
 	case domain.AuthCodeDeliveryEmail:
-		return tgEmailSentCode(hash, delivery.EmailPattern, delivery.Length), nil
+		return tgEmailSentCode(hash, delivery.EmailPattern, delivery.Length, r.loginEmailResetAvailable()), nil
 	case domain.AuthCodeDeliveryEmailSetupRequired:
 		return tgEmailSetupRequiredSentCode(hash), nil
 	default:
