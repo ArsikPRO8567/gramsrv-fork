@@ -26,11 +26,36 @@ func TestReceivesUpdatesForAuthKeyRequiresMembershipSync(t *testing.T) {
 	if sm.ReceivesUpdatesForAuthKey(raw, 42) {
 		t.Fatal("ready before membership sync — a failed sync would never be retried")
 	}
+	if sm.UpdatesActivationStartedForAuthKey(raw, 42) {
+		t.Fatal("activation started before membership sync")
+	}
 
 	sm.SetSessionChannelMemberships(raw, 42, 100, []int64{7}, sm.ChannelMembershipGeneration(raw, 42))
 	if !sm.ReceivesUpdatesForAuthKey(raw, 42) {
 		t.Fatal("not ready after successful membership sync")
 	}
+	if !sm.UpdatesActivationStartedForAuthKey(raw, 42) {
+		t.Fatal("activation not started after successful membership sync")
+	}
+
+	// Pending FIFO drain counts as an activation already in progress even though
+	// the session is not fully ready yet. A stale RPC callback must not enqueue a
+	// duplicate cache-convergence update behind that same FIFO.
+	key := sessionKey{authKeyID: raw, sessionID: 42}
+	sm.mu.Lock()
+	c.receivesUpdates.Store(false)
+	sm.flushing[key] = true
+	sm.mu.Unlock()
+	if sm.ReceivesUpdatesForAuthKey(raw, 42) {
+		t.Fatal("flushing session reported fully ready")
+	}
+	if !sm.UpdatesActivationStartedForAuthKey(raw, 42) {
+		t.Fatal("flushing session did not report activation started")
+	}
+	sm.mu.Lock()
+	delete(sm.flushing, key)
+	c.receivesUpdates.Store(true)
+	sm.mu.Unlock()
 
 	// 没有任何频道的账号：空列表的成功同步同样算就绪。
 	sm.SetSessionChannelMemberships(raw, 42, 100, nil, sm.ChannelMembershipGeneration(raw, 42))

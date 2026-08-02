@@ -1307,6 +1307,24 @@ func (m *SessionManager) ReceivesUpdatesForAuthKey(authKeyID [8]byte, sessionID 
 	return hasProfile && c.receivesUpdates.Load() && c.membershipsSynced.Load()
 }
 
+// UpdatesActivationStartedForAuthKey reports whether the session has completed
+// membership synchronization and either became ready or is draining its older
+// pending FIFO. Unlike ReceivesUpdatesForAuthKey, flushing is a positive result:
+// another delivery callback must not rebuild memberships or enqueue a duplicate
+// cache-convergence update behind the same pending batch.
+func (m *SessionManager) UpdatesActivationStartedForAuthKey(authKeyID [8]byte, sessionID int64) bool {
+	m.mu.RLock()
+	key := sessionKey{authKeyID: authKeyID, sessionID: sessionID}
+	c, ok := m.bySession[key]
+	flushing := m.flushing[key]
+	m.mu.RUnlock()
+	if !ok {
+		return false
+	}
+	_, hasProfile := c.LayerProfile()
+	return hasProfile && c.membershipsSynced.Load() && (c.receivesUpdates.Load() || flushing)
+}
+
 // SetReceivesUpdatesForAuthKey 标记指定 raw auth_key_id + session_id 是否接收主动 updates。
 func (m *SessionManager) SetReceivesUpdatesForAuthKey(authKeyID [8]byte, sessionID int64, receives bool) {
 	m.mu.Lock()

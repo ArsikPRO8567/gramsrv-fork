@@ -149,6 +149,13 @@ type Router struct {
 	// online 过滤前），按 userID 短 TTL；零值 sync.Map 即可用，无需构造器初始化。候选集变动
 	// 很慢（加好友/开新私聊），短 TTL 内复用避免 updateStatus 每次重跑 ~25-30 条 hydration 查询。
 	presenceCandidateCache sync.Map // userID(int64) -> *presenceCandidateEntry
+	// updatesReadySF serializes the delivery-gated activation of one physical
+	// raw auth-key + session. Cold-start RPCs are concurrent and can all be staged
+	// before the first rpc_result is delivered; only the claim owner may rebuild
+	// memberships and emit the one-shot self cache-convergence update. Waiters
+	// share completion so their later bootstrap phase cannot overtake activation;
+	// SessionUpdatesStateProvider retains ready/flushing for stale callbacks.
+	updatesReadySF singleflight.Group
 
 	// botStatus 永久缓存 userID->是否 bot。bot 标志按账号不可变（BotFather 注册即定，普通用户永不变 bot），
 	// 故可无 TTL 缓存。userIsBot 在 PFS 连接上被 announceSessionOnline 每 RPC 调用，不缓存则每次一发

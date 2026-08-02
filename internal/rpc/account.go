@@ -1962,7 +1962,7 @@ func (r *Router) pushSelfUserChangedUpdate(ctx context.Context, u domain.User) {
 	}
 	r.pushUserUpdates(ctx, u.ID, &tg.Updates{
 		Updates: []tg.UpdateClass{&tg.UpdateUser{UserID: u.ID}},
-		Users:   []tg.UserClass{r.tgSelfUserWithReadModels(ctx, u)},
+		Users:   []tg.UserClass{r.tgSelfUserWithUsernames(ctx, u)},
 		Date:    int(r.clock.Now().Unix()),
 	})
 }

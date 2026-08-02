@@ -430,6 +430,10 @@ func TestAuthLoginTokenSuccessProjectsCompleteSelfUsernames(t *testing.T) {
 		t.Fatalf("decoded authorization usernames = %v (set %v), want %v",
 			usernameStrings(decodedVector), decodedSet, want)
 	}
+	if registry.peerCalls != 1 || registry.batchCalls != 0 {
+		t.Fatalf("authorization username reads = peer:%d batch:%d, want 1/0",
+			registry.peerCalls, registry.batchCalls)
+	}
 }
 
 func TestMessageEchoProjectsCompleteUsernamesInOneBatch(t *testing.T) {

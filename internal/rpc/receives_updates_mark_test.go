@@ -5,7 +5,9 @@ import (
 	"errors"
 	"reflect"
 	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/iamxvbaba/td/bin"
 	"github.com/iamxvbaba/td/clock"
@@ -69,7 +71,21 @@ type updatesStateCaptureSessions struct {
 	*captureSessions
 }
 
+type selfCountingUsersService struct {
+	staticUsersService
+	selfCalls atomic.Int32
+}
+
+func (s *selfCountingUsersService) Self(ctx context.Context, userID int64) (domain.User, error) {
+	s.selfCalls.Add(1)
+	return s.staticUsersService.Self(ctx, userID)
+}
+
 func (s *updatesStateCaptureSessions) ReceivesUpdatesForAuthKey([8]byte, int64) bool {
+	return s.snapshot().receives
+}
+
+func (s *updatesStateCaptureSessions) UpdatesActivationStartedForAuthKey([8]byte, int64) bool {
 	return s.snapshot().receives
 }
 
@@ -93,9 +109,10 @@ func TestDispatchPushesCompleteSelfProfileOnceWhenSessionBecomesReady(t *testing
 		{Username: "aliceCollect0728a", Active: true, SortOrder: 2, CollectibleID: 1},
 	}
 	sessions := &updatesStateCaptureSessions{captureSessions: &captureSessions{}}
+	users := &selfCountingUsersService{staticUsersService: staticUsersService{user: self}}
 	r := New(Config{DC: 2, IP: "127.0.0.1", Port: 2398}, Deps{
 		Sessions:  sessions,
-		Users:     staticUsersService{user: self},
+		Users:     users,
 		Usernames: registry,
 	}, zaptest.NewLogger(t), clock.System)
 
@@ -113,10 +130,12 @@ func TestDispatchPushesCompleteSelfProfileOnceWhenSessionBecomesReady(t *testing
 	}
 
 	ctx := dispatch()
+	staleCtx := dispatch() // staged before the first delivery makes the session ready
 	if got := sessions.snapshot(); got.receives || got.sessionPushCalls != 0 {
 		t.Fatalf("pre-delivery readiness = receives:%v pushes:%d, want false/0", got.receives, got.sessionPushCalls)
 	}
 	postresponse.Run(ctx)
+	postresponse.Run(staleCtx)
 
 	got := sessions.snapshot()
 	if !got.receives || got.receivesCalls != 1 || got.sessionPushCalls != 1 {
@@ -124,8 +143,8 @@ func TestDispatchPushesCompleteSelfProfileOnceWhenSessionBecomesReady(t *testing
 			got.receives, got.receivesCalls, got.sessionPushCalls)
 	}
 	updates, ok := got.message.(*tg.Updates)
-	if !ok || len(updates.Updates) != 2 || len(updates.Users) != 1 {
-		t.Fatalf("self refresh = %T %+v, want two updates and one user", got.message, got.message)
+	if !ok || len(updates.Updates) != 1 || len(updates.Users) != 1 {
+		t.Fatalf("self refresh = %T %+v, want one updateUserName and one user", got.message, got.message)
 	}
 	nameRefresh, ok := updates.Updates[0].(*tg.UpdateUserName)
 	if !ok || nameRefresh.UserID != userID || nameRefresh.FirstName != "Alice" || nameRefresh.LastName != "" {
@@ -134,10 +153,6 @@ func TestDispatchPushesCompleteSelfProfileOnceWhenSessionBecomesReady(t *testing
 	wantUsernames := []string{"Alice", "aliceCollect0728b", "aliceCollect0728a"}
 	if !reflect.DeepEqual(usernameStrings(nameRefresh.Usernames), wantUsernames) {
 		t.Fatalf("self updateUserName usernames = %v, want %v", usernameStrings(nameRefresh.Usernames), wantUsernames)
-	}
-	refresh, ok := updates.Updates[1].(*tg.UpdateUser)
-	if !ok || refresh.UserID != userID {
-		t.Fatalf("self refresh update = %T %+v, want updateUser(%d)", updates.Updates[1], updates.Updates[1], userID)
 	}
 	projected, ok := updates.Users[0].(*tg.User)
 	if !ok {
@@ -154,37 +169,130 @@ func TestDispatchPushesCompleteSelfProfileOnceWhenSessionBecomesReady(t *testing
 		t.Fatalf("self refresh seq = %d, want 0", updates.Seq)
 	}
 
-	var wire bin.Buffer
-	if err := tlprofile.EncodeObject(tlprofile.Profile228, updates, &wire); err != nil {
-		t.Fatalf("encode Layer 228 self refresh: %v", err)
-	}
-	decoded, err := tlprofile.DecodeObject(tlprofile.Profile228, &bin.Buffer{Buf: wire.Copy()}, tlprofile.Limits{})
-	if err != nil {
-		t.Fatalf("decode Layer 228 self refresh: %v", err)
-	}
-	decodedUpdates, ok := decoded.(*tg.Updates)
-	if !ok || len(decodedUpdates.Updates) != 2 || len(decodedUpdates.Users) != 1 {
-		t.Fatalf("decoded Layer 228 self refresh = %T %+v", decoded, decoded)
-	}
-	decodedNameRefresh, ok := decodedUpdates.Updates[0].(*tg.UpdateUserName)
-	if !ok || !reflect.DeepEqual(usernameStrings(decodedNameRefresh.Usernames), wantUsernames) {
-		t.Fatalf("decoded Layer 228 updateUserName = %T usernames=%v, want %v",
-			decodedUpdates.Updates[0], usernameStrings(decodedNameRefresh.Usernames), wantUsernames)
-	}
-	decodedUser := decodedUpdates.Users[0].(*tg.User)
-	decodedVector, decodedSet := decodedUser.GetUsernames()
-	if !decodedSet || !reflect.DeepEqual(usernameStrings(decodedVector), wantUsernames) {
-		t.Fatalf("decoded Layer 228 usernames = %v (set %v), want %v",
-			usernameStrings(decodedVector), decodedSet, wantUsernames)
+	for _, profile := range []tlprofile.Profile{
+		tlprofile.Profile225,
+		tlprofile.Profile226,
+		tlprofile.Profile227,
+		tlprofile.Profile228,
+	} {
+		var wire bin.Buffer
+		if err := tlprofile.EncodeObject(profile, updates, &wire); err != nil {
+			t.Fatalf("encode Layer %d self refresh: %v", profile, err)
+		}
+		decoded, err := tlprofile.DecodeObject(profile, &bin.Buffer{Buf: wire.Copy()}, tlprofile.Limits{})
+		if err != nil {
+			t.Fatalf("decode Layer %d self refresh: %v", profile, err)
+		}
+		decodedUpdates, ok := decoded.(*tg.Updates)
+		if !ok || len(decodedUpdates.Updates) != 1 || len(decodedUpdates.Users) != 1 {
+			t.Fatalf("decoded Layer %d self refresh = %T %+v", profile, decoded, decoded)
+		}
+		decodedNameRefresh, ok := decodedUpdates.Updates[0].(*tg.UpdateUserName)
+		if !ok || !reflect.DeepEqual(usernameStrings(decodedNameRefresh.Usernames), wantUsernames) {
+			t.Fatalf("decoded Layer %d updateUserName = %T usernames=%v, want %v",
+				profile, decodedUpdates.Updates[0], usernameStrings(decodedNameRefresh.Usernames), wantUsernames)
+		}
+		decodedUser := decodedUpdates.Users[0].(*tg.User)
+		decodedVector, decodedSet := decodedUser.GetUsernames()
+		if !decodedSet || !reflect.DeepEqual(usernameStrings(decodedVector), wantUsernames) {
+			t.Fatalf("decoded Layer %d usernames = %v (set %v), want %v",
+				profile, usernameStrings(decodedVector), decodedSet, wantUsernames)
+		}
 	}
 
 	// A session that is already fully ready must not receive the bootstrap again
 	// on every ordinary RPC.
 	postresponse.Run(dispatch())
 	got = sessions.snapshot()
-	if got.receivesCalls != 1 || got.sessionPushCalls != 1 || registry.peerCalls != 1 {
-		t.Fatalf("repeat dispatch effects = ready_calls:%d pushes:%d registry_reads:%d, want 1/1/1",
-			got.receivesCalls, got.sessionPushCalls, registry.peerCalls)
+	if got.receivesCalls != 1 || got.sessionPushCalls != 1 || users.selfCalls.Load() != 1 || registry.peerCalls != 1 {
+		t.Fatalf("repeat dispatch effects = ready_calls:%d pushes:%d self_reads:%d registry_reads:%d, want 1/1/1/1",
+			got.receivesCalls, got.sessionPushCalls, users.selfCalls.Load(), registry.peerCalls)
+	}
+}
+
+type blockingActivationSessions struct {
+	*updatesStateCaptureSessions
+	setEntered chan struct{}
+	releaseSet chan struct{}
+	blockOnce  sync.Once
+}
+
+func (s *blockingActivationSessions) SetReceivesUpdatesForAuthKey(rawAuthKeyID [8]byte, sessionID int64, receives bool) {
+	s.blockOnce.Do(func() {
+		close(s.setEntered)
+		<-s.releaseSet
+	})
+	s.captureSessions.SetReceivesUpdatesForAuthKey(rawAuthKeyID, sessionID, receives)
+}
+
+func TestConcurrentDeliveredRPCsClaimSessionActivationOnce(t *testing.T) {
+	const (
+		userID    = int64(1000000313)
+		sessionID = int64(313)
+	)
+	rawAuthKeyID := [8]byte{33}
+	peer := domain.Peer{Type: domain.PeerTypeUser, ID: userID}
+	registry := newFakeUsernameRegistry()
+	registry.byPeer[peer] = []domain.Username{
+		{Username: "Alice", Active: true, Editable: true, SortOrder: 0},
+		{Username: "aliceCollect0728b", Active: true, SortOrder: 1, CollectibleID: 2},
+	}
+	sessions := &blockingActivationSessions{
+		updatesStateCaptureSessions: &updatesStateCaptureSessions{captureSessions: &captureSessions{}},
+		setEntered:                  make(chan struct{}),
+		releaseSet:                  make(chan struct{}),
+	}
+	users := &selfCountingUsersService{staticUsersService: staticUsersService{user: domain.User{
+		ID: userID, FirstName: "Alice", Username: "Alice",
+	}}}
+	r := New(Config{DC: 2, IP: "127.0.0.1", Port: 2398}, Deps{
+		Sessions:  sessions,
+		Users:     users,
+		Usernames: registry,
+	}, zaptest.NewLogger(t), clock.System)
+
+	dispatch := func() context.Context {
+		t.Helper()
+		var in bin.Buffer
+		if err := (&tg.HelpGetConfigRequest{}).Encode(&in); err != nil {
+			t.Fatalf("encode help.getConfig: %v", err)
+		}
+		ctx := postresponse.WithCallbacks(WithUserID(context.Background(), userID))
+		if _, err := r.Dispatch(ctx, rawAuthKeyID, sessionID, &in); err != nil {
+			t.Fatalf("dispatch help.getConfig: %v", err)
+		}
+		return ctx
+	}
+	first, second := dispatch(), dispatch()
+	firstDone := make(chan struct{})
+	go func() {
+		postresponse.Run(first)
+		close(firstDone)
+	}()
+	<-sessions.setEntered
+
+	secondDone := make(chan struct{})
+	go func() {
+		postresponse.Run(second)
+		close(secondDone)
+	}()
+	select {
+	case <-secondDone:
+		close(sessions.releaseSet)
+		<-firstDone
+		t.Fatal("second activation callback overtook the in-flight activation")
+	case <-time.After(50 * time.Millisecond):
+		// The waiter shares the owner's activation result, preserving the later
+		// bootstrap phase ordering without repeating membership work.
+	}
+	close(sessions.releaseSet)
+	<-firstDone
+	<-secondDone
+
+	got := sessions.snapshot()
+	if !got.receives || got.receivesCalls != 1 || got.sessionPushCalls != 1 || users.selfCalls.Load() != 1 || registry.peerCalls != 1 {
+		t.Fatalf("concurrent activation effects = receives:%v ready_calls:%d pushes:%d self_reads:%d registry_reads:%d, want true/1/1/1/1",
+			got.receives, got.receivesCalls, got.sessionPushCalls, users.selfCalls.Load(), registry.peerCalls)
 	}
 }
 

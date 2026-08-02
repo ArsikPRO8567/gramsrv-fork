@@ -10,22 +10,24 @@ import (
 	"telesrv/internal/domain"
 )
 
-// tgSelfUserWithReadModels is the single-object response-boundary projection
-// used by authorization results and self-profile updates. tgSelfUser itself is
-// intentionally a pure domain -> TL conversion because many list paths call it
-// in loops; the read-model pass belongs here, where it stays one query per
-// response.
-func (r *Router) tgSelfUserWithReadModels(ctx context.Context, u domain.User) *tg.User {
+// tgSelfUserWithUsernames is the narrow single-object projection used by
+// authorization results and self-profile updates. Those constructors already
+// carry a User, so it must include the complete username registry vector and
+// never downgrade a client's collectible usernames to the legacy scalar. Story
+// and bot-verification read models are unrelated and deliberately not queried.
+func (r *Router) tgSelfUserWithUsernames(ctx context.Context, u domain.User) *tg.User {
 	self := r.tgSelfUser(u)
 	users := []tg.UserClass{self}
-	r.applyPeerReadModels(ctx, u.ID, users, nil)
+	r.applyUsernamesToPeerObjects(ctx, users, nil)
 	return self
 }
 
 // pushUpdatesReadySelfProfile repairs the current session's cached self user
-// when it first becomes eligible for proactive updates. Telegram's updateUser
-// contract requires the complete User to be carried by the outer updates.users
-// vector; TDLib applies that vector before invalidating userFull for updateUser.
+// when it first becomes eligible for proactive updates. updateUserName is the
+// authoritative basic-name/username cache write in TDLib and DrKLO. A companion
+// username-complete User remains in updates.users so DrKLO's normal peer merge
+// persists the vector, but no updateUser is sent because it only invalidates
+// userFull (and makes DrKLO clear photo caches).
 //
 // This is an ephemeral cache-convergence update: it allocates no PTS, writes no
 // durable update event and targets only the physical session that just became
@@ -69,30 +71,17 @@ func (r *Router) updatesReadySelfProfile(ctx context.Context, userID int64) (*tg
 			applyUsernamesFromRegistry(users, nil, map[domain.Peer][]domain.Username{peer: list})
 		}
 	}
-	// These read models are optional projections. Their existing response-boundary
-	// contract degrades independently; the username registry above is handled
-	// strictly because losing that vector is the cache corruption fixed here.
-	r.applyStoryMaxIDsToPeerObjects(ctx, userID, users, nil)
-	r.applyBotVerificationIconsToPeerObjects(ctx, users, nil)
-
 	usernames := tgUsernames(u.Username)
 	if vector, ok := self.GetUsernames(); ok && len(vector) != 0 {
 		usernames = vector
 	}
 	return &tg.Updates{
-		Updates: []tg.UpdateClass{
-			// updateUserName is the authoritative basic-name/username cache write.
-			// TDLib handles it by calling on_update_user_usernames directly.
-			&tg.UpdateUserName{
-				UserID:    userID,
-				FirstName: u.FirstName,
-				LastName:  u.LastName,
-				Usernames: usernames,
-			},
-			// updateUser additionally invalidates userFull while the complete basic
-			// User remains bundled in the outer users vector.
-			&tg.UpdateUser{UserID: userID},
-		},
+		Updates: []tg.UpdateClass{&tg.UpdateUserName{
+			UserID:    userID,
+			FirstName: u.FirstName,
+			LastName:  u.LastName,
+			Usernames: usernames,
+		}},
 		Users: users,
 		Date:  int(r.clock.Now().Unix()),
 		Seq:   0,

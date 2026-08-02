@@ -160,7 +160,7 @@ func (r *Router) pushPremiumStatusUpdate(ctx context.Context, u domain.User) {
 	defer cancel()
 	r.pushUserUpdates(pushCtx, u.ID, &tg.Updates{
 		Updates: []tg.UpdateClass{&tg.UpdateUser{UserID: u.ID}},
-		Users:   []tg.UserClass{r.tgSelfUserWithReadModels(pushCtx, u)},
+		Users:   []tg.UserClass{r.tgSelfUserWithUsernames(pushCtx, u)},
 		Date:    int(r.clock.Now().Unix()),
 	})
 }
