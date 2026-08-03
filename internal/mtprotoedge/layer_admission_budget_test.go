@@ -776,7 +776,7 @@ func TestLayerRPCAdmissionTransfersOriginalReservationToFreshOwner(t *testing.T)
 func tdlibNestedGZIPBody(t *testing.T, profile tlprofile.Profile, terminal bin.Object) ([]byte, int) {
 	t.Helper()
 	terminalWire := exactOutboundLayerRPCBody(t, profile, terminal)
-	return tdlibWrappedBody(t, profile, &proto.GZIP{Data: terminalWire}), len(terminalWire)
+	return tdlibWrappedBody(t, profile, zlibPackedObjectForTest(t, terminalWire)), len(terminalWire)
 }
 
 func tdlibWrappedBody(t *testing.T, profile tlprofile.Profile, terminal bin.Object) []byte {
