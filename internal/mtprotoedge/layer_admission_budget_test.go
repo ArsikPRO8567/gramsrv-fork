@@ -13,7 +13,9 @@ import (
 	"github.com/iamxvbaba/td/proto"
 	"github.com/iamxvbaba/td/tg"
 	"github.com/iamxvbaba/td/tgerr"
+	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest"
+	"go.uber.org/zap/zaptest/observer"
 
 	"github.com/iamxvbaba/td/tlprofile"
 	appfiles "telesrv/internal/app/files"
@@ -218,10 +220,10 @@ func TestLayerRPCAdmissionAdmitsTDLibUploadParts(t *testing.T) {
 		bare        bool
 	}{
 		{
-			name:   "small_file_part",
+			name:   "pixel_9a_small_file_part_negative_file_id",
 			method: "upload.saveFilePart",
 			body: &tg.UploadSaveFilePartRequest{
-				FileID:   91,
+				FileID:   -3596058967254453060,
 				FilePart: 0,
 				Bytes:    make([]byte, 1071),
 			},
@@ -321,6 +323,86 @@ func TestLayerRPCAdmissionAdmitsTDLibUploadParts(t *testing.T) {
 				t.Fatalf("nested gzip upload dispatch = method:%q err:%v, want %s/NOT_IMPLEMENTED", method, err, tc.method)
 			}
 		})
+	}
+}
+
+func TestLayerRPCAdmissionRejectionLogsBoundedMetadataWithoutUploadBody(t *testing.T) {
+	const marker = "DO_NOT_LOG_UPLOAD_BODY_MARKER"
+	payload := make([]byte, 1071)
+	copy(payload, marker)
+	body := tdlibWrappedBody(t, tlprofile.Profile228, &tg.UploadSaveFilePartRequest{
+		FileID:   -3596058967254453060,
+		FilePart: 0,
+		Bytes:    payload,
+	})
+	// Remove the final TL padding byte. Exact admission must reject the malformed
+	// wire while the edge still records its explicit wrapper and bounded cause.
+	body = body[:len(body)-1]
+
+	core, logs := observer.New(zap.DebugLevel)
+	router := rpc.New(rpc.Config{DC: 2}, rpc.Deps{}, zap.New(core), clock.System)
+	s := New(Options{DC: 2, LayerRPC: router, Logger: zap.New(core)})
+	c := &Conn{
+		authKeyID:  [8]byte{8, 34},
+		authKeyHex: "0822000000000000",
+		sessionID:  834,
+		metrics:    NopMetrics{},
+	}
+	c.startInboundRPCScheduler(s.rpcScheduler, 1, 2, time.Second)
+	defer func() {
+		c.closeInboundRPCScheduler()
+		s.rpcScheduler.stop(time.Second)
+	}()
+
+	for attempt := 0; attempt < 2; attempt++ {
+		plan := &inboundPlan{items: []inboundItem{{
+			kind:   inboundItemRPC,
+			msgID:  int64(100 + attempt*4),
+			typeID: tg.InvokeWithLayerRequestTypeID,
+			body:   body,
+		}}}
+		if err := s.prepareInboundLayerRPCBatch(context.Background(), c, plan); err != nil {
+			plan.close()
+			t.Fatal(err)
+		}
+		if item := plan.items[0]; item.kind != inboundItemRPCAdmissionError {
+			plan.close()
+			t.Fatalf("malformed upload attempt %d kind = %d, want admission error", attempt, item.kind)
+		}
+		plan.close()
+	}
+
+	entries := logs.FilterMessage("RPC exact admission rejected").All()
+	if len(entries) != 2 {
+		t.Fatalf("admission rejection log count = %d, want 2", len(entries))
+	}
+	if entries[0].Level != zap.InfoLevel || entries[1].Level != zap.DebugLevel {
+		t.Fatalf("admission rejection levels = %s/%s, want info/debug", entries[0].Level, entries[1].Level)
+	}
+	fields := entries[0].ContextMap()
+	for key, want := range map[string]any{
+		"method":                  "invokeWithLayer#da9b0d0d",
+		"auth_key_id":             "0822000000000000",
+		"session_id":              int64(834),
+		"msg_id":                  int64(100),
+		"top_level_wire_id":       uint32(tg.InvokeWithLayerRequestTypeID),
+		"wire_bytes":              int64(len(body)),
+		"profile_origin":          "unknown",
+		"explicit_layer_selector": true,
+		"rpc_error_code":          int64(400),
+		"rpc_error_message":       "INPUT_REQUEST_INVALID",
+	} {
+		if got := fields[key]; got != want {
+			t.Fatalf("admission rejection field %q = %#v (%T), want %#v (%T); all=%#v", key, got, got, want, want, fields)
+		}
+	}
+	for _, entry := range entries {
+		if strings.Contains(entry.Message, marker) || strings.Contains(entry.ContextMap()["error"].(string), marker) {
+			t.Fatalf("admission rejection leaked upload body marker: %#v", entry.ContextMap())
+		}
+		if _, ok := entry.ContextMap()["body"]; ok {
+			t.Fatalf("admission rejection exposed body field: %#v", entry.ContextMap())
+		}
 	}
 }
 

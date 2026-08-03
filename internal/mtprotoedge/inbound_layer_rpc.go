@@ -401,16 +401,11 @@ func (s *Server) prepareInboundLayerRPCBatch(ctx context.Context, c *Conn, plan 
 			if errors.Is(err, ErrLayerProfileConflict) {
 				return err
 			}
-			s.log.Debug("RPC exact admission rejected",
-				zap.String("method", method),
-				zap.String("auth_key_id", c.authKeyHex),
-				zap.Int64("session_id", c.sessionID),
-				zap.Int64("msg_id", item.msgID),
-				zap.Error(err),
-			)
+			rpcError := layerRPCAdmissionError(err)
+			s.logLayerRPCAdmissionRejection(c, item, itemState, admissionCursor, method, rpcError, err)
 			item.kind = inboundItemRPCAdmissionError
 			item.method = method
-			item.payload = layerRPCAdmissionError(err)
+			item.payload = rpcError
 			c.metrics.InboundRPCDropped(method, "layer_admission")
 			continue
 		}
@@ -1222,6 +1217,63 @@ func layerRPCAdmissionError(err error) *mt.RPCError {
 		return &mt.RPCError{ErrorCode: 501, ErrorMessage: "NOT_IMPLEMENTED"}
 	}
 	return &mt.RPCError{ErrorCode: 400, ErrorMessage: "INPUT_REQUEST_INVALID"}
+}
+
+// logLayerRPCAdmissionRejection preserves one production-visible diagnostic for
+// an otherwise generic RPC 400 without exposing the request body. The INFO path
+// is one-shot per physical Conn; compatibility-traced unknown RPCs already have
+// their own warning and therefore do not consume this diagnostic slot.
+func (s *Server) logLayerRPCAdmissionRejection(
+	c *Conn,
+	item *inboundItem,
+	state LayerProfileSnapshot,
+	cursor layerRPCAdmissionCursor,
+	method string,
+	rpcError *mt.RPCError,
+	admissionErr error,
+) {
+	if s == nil || s.log == nil || c == nil || item == nil || rpcError == nil {
+		return
+	}
+	wireID := item.typeID
+	if wireID == 0 {
+		if id, err := (&bin.Buffer{Buf: item.body}).PeekID(); err == nil {
+			wireID = id
+		}
+	}
+	fields := []zap.Field{
+		zap.String("method", method),
+		zap.String("auth_key_id", c.authKeyHex),
+		zap.Int64("session_id", c.sessionID),
+		zap.Int64("msg_id", item.msgID),
+		zap.Uint32("top_level_wire_id", wireID),
+		zap.Int("wire_bytes", len(item.body)),
+		zap.Int("selected_profile", int(state.Profile)),
+		zap.String("profile_origin", layerProfileOriginLogName(state.Origin)),
+		zap.Uint32("profile_epoch", state.Epoch),
+		zap.Int("raw_layer_evidence", cursor.rawLayer),
+		zap.Int64("layer_evidence_msg_id", cursor.evidenceMsgID),
+		zap.Bool("explicit_layer_selector", layerRPCAdmissionHasExplicitSelector(item.body, admissionErr)),
+		zap.Int("rpc_error_code", rpcError.ErrorCode),
+		zap.String("rpc_error_message", rpcError.ErrorMessage),
+		zap.Error(admissionErr),
+	}
+	if !errors.Is(admissionErr, tlprofile.ErrUnknownRPCMethod) && c.layerRPCAdmissionTraceLogged.CompareAndSwap(false, true) {
+		s.log.Info("RPC exact admission rejected", fields...)
+		return
+	}
+	s.log.Debug("RPC exact admission rejected", fields...)
+}
+
+func layerProfileOriginLogName(origin LayerProfileOrigin) string {
+	switch origin {
+	case LayerProfileInherited:
+		return "inherited"
+	case LayerProfileExplicit:
+		return "explicit"
+	default:
+		return "unknown"
+	}
 }
 
 func (s *Server) layerRPCDependencies(c *Conn, msgID int64, request tlprofile.Admission) layerRPCDependencySet {
