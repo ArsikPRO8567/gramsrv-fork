@@ -21,12 +21,6 @@ type requestVectorPolicy struct {
 	tooLong      func() error
 }
 
-type rpcPreflightWire interface {
-	WireSize() int
-	ByteAt(offset int) (byte, error)
-	Uint32At(offset int) (uint32, error)
-}
-
 type rawRPCPreflightWire []byte
 
 func (w rawRPCPreflightWire) WireSize() int { return len(w) }
@@ -159,7 +153,7 @@ func preflightRPCRequest(id uint32, b *bin.Buffer) error {
 	return preflightRPCWire(id, rawRPCPreflightWire(b.Buf))
 }
 
-func preflightRPCWire(id uint32, wire rpcPreflightWire) error {
+func preflightRPCWire(id uint32, wire rawRPCPreflightWire) error {
 	if wire == nil {
 		return inputRequestInvalidErr()
 	}
@@ -209,7 +203,7 @@ func (r *Router) LayerRPCFlatBytesPayloadSize(wire []byte) (int, bool) {
 	return payloadBytes, true
 }
 
-func preflightFixedVector(wire rpcPreflightWire, policy requestVectorPolicy) error {
+func preflightFixedVector(wire rawRPCPreflightWire, policy requestVectorPolicy) error {
 	if policy.vectorOffset < 4 || policy.minElemBytes <= 0 || wire.WireSize() < policy.vectorOffset+8 {
 		return inputRequestInvalidErr()
 	}
@@ -240,7 +234,7 @@ func preflightFixedVector(wire rpcPreflightWire, policy requestVectorPolicy) err
 	return nil
 }
 
-func preflightUploadPart(wire rpcPreflightWire, bytesOffset int, big bool) error {
+func preflightUploadPart(wire rawRPCPreflightWire, bytesOffset int, big bool) error {
 	if wire.WireSize() < bytesOffset {
 		return inputRequestInvalidErr()
 	}
@@ -280,7 +274,7 @@ func preflightUploadPart(wire rpcPreflightWire, bytesOffset int, big bool) error
 
 // tlBytesSizeAt parses a TL bytes prefix without copying the payload. encoded
 // includes prefix, payload and 4-byte padding.
-func tlBytesSizeAt(wire rpcPreflightWire, offset int) (n, encoded int, err error) {
+func tlBytesSizeAt(wire rawRPCPreflightWire, offset int) (n, encoded int, err error) {
 	if offset < 0 || offset >= wire.WireSize() {
 		return 0, 0, fmt.Errorf("bytes prefix out of range")
 	}

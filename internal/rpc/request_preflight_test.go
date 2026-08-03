@@ -149,6 +149,47 @@ func TestLayerRPCFlatBytesPayloadSizeRequiresCompleteLegalUpload(t *testing.T) {
 	}
 }
 
+func TestLayerRPCFlatBytesPayloadSizeDoesNotAllocate(t *testing.T) {
+	router := New(Config{}, Deps{}, zaptest.NewLogger(t), clock.System)
+	wire := uploadPartRequest(
+		tg.UploadSaveBigFilePartRequestTypeID,
+		20,
+		7,
+		364,
+		appfiles.MaxUploadPartBytes,
+	)
+	var payloadBytes int
+	var ok bool
+	allocs := testing.AllocsPerRun(1000, func() {
+		payloadBytes, ok = router.LayerRPCFlatBytesPayloadSize(wire)
+	})
+	if !ok || payloadBytes != appfiles.MaxUploadPartBytes {
+		t.Fatalf("flat payload = %d/%v", payloadBytes, ok)
+	}
+	if allocs != 0 {
+		t.Fatalf("flat payload preflight allocations = %v, want 0", allocs)
+	}
+}
+
+func BenchmarkLayerRPCFlatBytesPayloadSize(b *testing.B) {
+	router := New(Config{}, Deps{}, zaptest.NewLogger(b), clock.System)
+	wire := uploadPartRequest(
+		tg.UploadSaveBigFilePartRequestTypeID,
+		20,
+		7,
+		364,
+		appfiles.MaxUploadPartBytes,
+	)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		payloadBytes, ok := router.LayerRPCFlatBytesPayloadSize(wire)
+		if !ok || payloadBytes != appfiles.MaxUploadPartBytes {
+			b.Fatalf("flat payload = %d/%v", payloadBytes, ok)
+		}
+	}
+}
+
 func fixedVectorRequest(id uint32, policy requestVectorPolicy, count int) []byte {
 	raw := make([]byte, policy.vectorOffset+8+count*policy.minElemBytes)
 	binary.LittleEndian.PutUint32(raw[0:4], id)
