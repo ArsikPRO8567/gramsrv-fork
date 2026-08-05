@@ -19,7 +19,7 @@ This document describes every setting loaded by `internal/config`. Defaults and 
 | Setting | Type / code default | Description and constraints |
 |---|---|---|
 | `TELESRV_LISTEN` | string / `0.0.0.0:2398` | MTProto TCP listen address. Must match the address/port reachable by patched clients. |
-| `TELESRV_ADVERTISE_IP` | string / `127.0.0.1` | Client-reachable server IP used by media/call fallbacks. The current static Desktop DC patch does not derive its MTProto endpoint from this value. |
+| `TELESRV_ADVERTISE_IP` | string / `127.0.0.1` | Client-reachable server IP written to `help.getConfig.DCOptions` and used by media/call fallbacks. The loopback default is only safe for pure local TDesktop validation; Android, LAN, and remote validation must set the host LAN/public IP explicitly. On Windows, prefer `scripts\restart-local-server.ps1 -Listen 0.0.0.0:2398 -AdvertiseIP <client-reachable-ip>` so a manual `Start-Process` launch cannot drop the environment. |
 | `TELESRV_RSA_KEY` | path / `data/server_rsa.pem` | MTProto RSA private key. Generated when missing. Treat the file as a secret and keep it stable across restarts. |
 | `TELESRV_DC` | int / `2` | Canonical server DC ID used in server-originated configuration and media/DC metadata. It does not partition key-exchange state on the current single backend. |
 | `TELESRV_DEFAULT_COUNTRY_CODE` | ISO alpha-2 / `CN` | Country returned by `help.getNearestDc` for login-page preselection. Clients map `CN` to calling code `+86`, `US` to `+1`, and so on. Input is trimmed, uppercased, and validated as a country or autonomous area; malformed or unknown values fail startup. |

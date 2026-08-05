@@ -19,7 +19,7 @@
 | 参数 | 类型 / 代码默认值 | 说明与约束 |
 |---|---|---|
 | `TELESRV_LISTEN` | string / `0.0.0.0:2398` | MTProto TCP 监听地址，必须与 patched 客户端可达地址/端口一致。 |
-| `TELESRV_ADVERTISE_IP` | string / `127.0.0.1` | 媒体、通话等回退路径使用的客户端可达 IP；当前 TDesktop 静态 DC patch 不从这里获取 MTProto 地址。 |
+| `TELESRV_ADVERTISE_IP` | string / `127.0.0.1` | 写入 `help.getConfig.DCOptions`、媒体与通话回退路径的客户端可达 IP。默认 loopback 只适合纯本机 TDesktop；Android、局域网或远端验证必须显式设为宿主机 LAN IP/公网 IP。Windows 本地重启优先用 `scripts\restart-local-server.ps1 -Listen 0.0.0.0:2398 -AdvertiseIP <client-reachable-ip>`，避免手动 `Start-Process` 漏掉环境变量。 |
 | `TELESRV_RSA_KEY` | path / `data/server_rsa.pem` | MTProto RSA 私钥；缺失时自动生成。属于敏感文件，重启和升级间必须稳定保存。 |
 | `TELESRV_DC` | int / `2` | 服务端输出配置及媒体/DC 元数据使用的规范 DC ID；当前单后端不会按它分区密钥交换状态。 |
 | `TELESRV_DEFAULT_COUNTRY_CODE` | ISO alpha-2 / `CN` | `help.getNearestDc` 返回的登录页默认国家。客户端把 `CN` 映射为国际区号 `+86`、`US` 映射为 `+1`。输入会 trim、转大写并校验为国家或自治地区；格式错误或未知值会让启动失败。 |

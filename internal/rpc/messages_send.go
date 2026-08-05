@@ -439,9 +439,13 @@ func (r *Router) mentionedUserIDsFromMessage(ctx context.Context, currentUserID 
 		}
 	}
 	if identity != nil {
-		for _, username := range extractMentionUsernames(message, domain.MaxChannelMentionRecipients-len(out)) {
+		blocked := mentionScanBlockedSpansFromTGEntities(message, entities)
+		for _, username := range extractMentionUsernames(message, domain.MaxChannelMentionRecipients-len(out), blocked) {
 			user, found, err := identity.ResolveUsername(ctx, currentUserID, username)
 			if err != nil {
+				if isMentionResolveMiss(err) {
+					continue
+				}
 				return nil, internalErr()
 			}
 			if found {
@@ -455,14 +459,27 @@ func (r *Router) mentionedUserIDsFromMessage(ctx context.Context, currentUserID 
 	return out, nil
 }
 
-func extractMentionUsernames(message string, limit int) []string {
+func isMentionResolveMiss(err error) bool {
+	return errors.Is(err, domain.ErrUsernameInvalid) || errors.Is(err, domain.ErrUsernameNotOccupied)
+}
+
+func extractMentionUsernames(message string, limit int, blocked []byteSpan) []string {
 	if limit <= 0 || message == "" {
 		return nil
 	}
+	blocked = mergeByteSpans(append(blocked, rawURLByteSpans(message)...))
+	blockIndex := 0
 	seen := make(map[string]struct{})
 	out := make([]string, 0)
 	for i := 0; i < len(message); i++ {
 		if message[i] != '@' {
+			continue
+		}
+		for blockIndex < len(blocked) && blocked[blockIndex].end <= i {
+			blockIndex++
+		}
+		if blockIndex < len(blocked) && blocked[blockIndex].start <= i && i < blocked[blockIndex].end {
+			i = blocked[blockIndex].end - 1
 			continue
 		}
 		if i > 0 && isUsernameByte(message[i-1]) {
@@ -487,6 +504,110 @@ func extractMentionUsernames(message string, limit int) []string {
 		i = j - 1
 	}
 	return out
+}
+
+func mergeByteSpans(spans []byteSpan) []byteSpan {
+	if len(spans) == 0 {
+		return nil
+	}
+	out := spans[:0]
+	for _, span := range spans {
+		if span.start < 0 || span.end <= span.start {
+			continue
+		}
+		inserted := false
+		for i := range out {
+			if span.start < out[i].start {
+				out = append(out, byteSpan{})
+				copy(out[i+1:], out[i:])
+				out[i] = span
+				inserted = true
+				break
+			}
+		}
+		if !inserted {
+			out = append(out, span)
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	merged := out[:1]
+	for _, span := range out[1:] {
+		last := &merged[len(merged)-1]
+		if span.start <= last.end {
+			if span.end > last.end {
+				last.end = span.end
+			}
+			continue
+		}
+		merged = append(merged, span)
+	}
+	return merged
+}
+
+func mentionScanBlockedSpansFromTGEntities(message string, entities []tg.MessageEntityClass) []byteSpan {
+	if len(entities) == 0 {
+		return nil
+	}
+	bounds := utf16ByteBoundaries(message)
+	var out []byteSpan
+	for _, entity := range entities {
+		switch entity.(type) {
+		case *tg.MessageEntityURL, *tg.MessageEntityTextURL:
+		default:
+			continue
+		}
+		if span, ok := byteSpanFromUTF16Bounds(bounds, entity.GetOffset(), entity.GetLength()); ok {
+			out = append(out, span)
+		}
+	}
+	return out
+}
+
+func mentionScanBlockedSpansFromDomainEntities(message string, entities []domain.MessageEntity) []byteSpan {
+	if len(entities) == 0 {
+		return nil
+	}
+	bounds := utf16ByteBoundaries(message)
+	var out []byteSpan
+	for _, entity := range entities {
+		if entity.Type != domain.MessageEntityURL && entity.Type != domain.MessageEntityTextURL {
+			continue
+		}
+		if span, ok := byteSpanFromUTF16Bounds(bounds, entity.Offset, entity.Length); ok {
+			out = append(out, span)
+		}
+	}
+	return out
+}
+
+func utf16ByteBoundaries(message string) []int {
+	total := utf16CodeUnitLen(message)
+	bounds := make([]int, total+1)
+	for i := range bounds {
+		bounds[i] = -1
+	}
+	unit := 0
+	bounds[0] = 0
+	for i, r := range message {
+		bounds[unit] = i
+		if r <= 0xFFFF {
+			unit++
+		} else {
+			unit += 2
+		}
+		bounds[unit] = i + utf8.RuneLen(r)
+	}
+	return bounds
+}
+
+func byteSpanFromUTF16Bounds(bounds []int, offset, length int) (byteSpan, bool) {
+	end := offset + length
+	if offset < 0 || length <= 0 || end > len(bounds)-1 || bounds[offset] < 0 || bounds[end] < 0 {
+		return byteSpan{}, false
+	}
+	return byteSpan{start: bounds[offset], end: bounds[end]}, true
 }
 
 func isUsernameByte(b byte) bool {
@@ -764,9 +885,13 @@ func (r *Router) mentionUserIDsFromDomain(ctx context.Context, currentUserID int
 		}
 	}
 	if identity, ok := r.deps.Users.(UserIdentityService); ok && identity != nil {
-		for _, username := range extractMentionUsernames(message, domain.MaxChannelMentionRecipients-len(out)) {
+		blocked := mentionScanBlockedSpansFromDomainEntities(message, entities)
+		for _, username := range extractMentionUsernames(message, domain.MaxChannelMentionRecipients-len(out), blocked) {
 			user, found, err := identity.ResolveUsername(ctx, currentUserID, username)
 			if err != nil {
+				if isMentionResolveMiss(err) {
+					continue
+				}
 				break
 			}
 			if found {
