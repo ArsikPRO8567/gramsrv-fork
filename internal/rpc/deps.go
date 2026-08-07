@@ -353,6 +353,13 @@ type ServiceBotCallbacks interface {
 	OnCallbackQuery(ctx context.Context, query domain.BotCallbackQuery) (domain.BotCallbackAnswer, bool, error)
 }
 
+// ServiceBotInlineResults answers built-in inline bots synchronously while the
+// edge still registers a fresh query_id for messages.sendInlineBotResult.
+type ServiceBotInlineResults interface {
+	HandlesInlineBot(botUserID int64) bool
+	OnInlineQuery(ctx context.Context, botUserID, userID int64, query, offset string) (domain.BotInlineResults, bool, error)
+}
+
 // UserIdentityService 是 UsersService 的资料扩展能力，用于 username/phone 解析。
 type UserIdentityService interface {
 	CheckUsername(ctx context.Context, userID int64, username string) (bool, error)
@@ -1042,55 +1049,56 @@ type Deps struct {
 	// AuthKeySessionLayers is the protocol-only durable ordering boundary for
 	// explicit invokeWithLayer evidence. Production must wire the same auth-key
 	// store used by the MTProto edge; nil is reserved for isolated router tests.
-	AuthKeySessionLayers store.AuthKeySessionLayerStore
-	Account              AccountService
-	Privacy              PrivacyService
-	Help                 HelpService
-	AppUpdates           updatecdn.Resolver
-	AccountFreeze        AccountFreezeService
-	AICompose            AIComposeService
-	Ephemeral            EphemeralService
-	EphemeralPush        store.EphemeralPushBroker
-	Moderation           ModerationService
-	Users                UsersService
-	Usernames            UsernameRegistryService
-	CollectiblePhones    CollectiblePhoneService
-	AccountRatings       AccountRatingService
-	BotVerifications     BotVerificationService
-	TelegramLogin        TelegramLoginService
-	Updates              UpdatesService
-	BootstrapUpdates     store.BootstrapUpdateJobStore
-	BotAPIUpdates        store.BotAPIUpdateStore
-	BotCallbacks         store.BotCallbackRegistryStore
-	Contacts             ContactsService
-	Dialogs              DialogsService
-	Chatlists            ChatlistsService
-	Messages             MessagesService
-	Translation          TranslationService
-	Stories              StoriesService
-	Channels             ChannelsService
-	Communities          CommunitiesService
-	Files                FilesService
-	PremiumPromo         PremiumPromoService
-	Premium              PremiumService
-	Bots                 BotsService
-	ServiceBotCallbacks  ServiceBotCallbacks
-	Polls                PollsService
-	Phone                PhoneService
-	GroupCalls           GroupCallsService
-	LiveStreams          LiveStreamsService
-	SFU                  sfu.Service
-	TURN                 turnsrv.Service
-	LangPack             LangPackService
-	Sessions             SessionBinder
-	Inline               store.InlineRegistryStore
-	Limiter              RateLimiter
-	Metrics              Metrics
-	SecretChats          SecretChatService
-	Stars                StarsService
-	Gifts                GiftsService
-	Passkey              PasskeyService
-	Themes               ThemeService
+	AuthKeySessionLayers    store.AuthKeySessionLayerStore
+	Account                 AccountService
+	Privacy                 PrivacyService
+	Help                    HelpService
+	AppUpdates              updatecdn.Resolver
+	AccountFreeze           AccountFreezeService
+	AICompose               AIComposeService
+	Ephemeral               EphemeralService
+	EphemeralPush           store.EphemeralPushBroker
+	Moderation              ModerationService
+	Users                   UsersService
+	Usernames               UsernameRegistryService
+	CollectiblePhones       CollectiblePhoneService
+	AccountRatings          AccountRatingService
+	BotVerifications        BotVerificationService
+	TelegramLogin           TelegramLoginService
+	Updates                 UpdatesService
+	BootstrapUpdates        store.BootstrapUpdateJobStore
+	BotAPIUpdates           store.BotAPIUpdateStore
+	BotCallbacks            store.BotCallbackRegistryStore
+	Contacts                ContactsService
+	Dialogs                 DialogsService
+	Chatlists               ChatlistsService
+	Messages                MessagesService
+	Translation             TranslationService
+	Stories                 StoriesService
+	Channels                ChannelsService
+	Communities             CommunitiesService
+	Files                   FilesService
+	PremiumPromo            PremiumPromoService
+	Premium                 PremiumService
+	Bots                    BotsService
+	ServiceBotCallbacks     ServiceBotCallbacks
+	ServiceBotInlineResults ServiceBotInlineResults
+	Polls                   PollsService
+	Phone                   PhoneService
+	GroupCalls              GroupCallsService
+	LiveStreams             LiveStreamsService
+	SFU                     sfu.Service
+	TURN                    turnsrv.Service
+	LangPack                LangPackService
+	Sessions                SessionBinder
+	Inline                  store.InlineRegistryStore
+	Limiter                 RateLimiter
+	Metrics                 Metrics
+	SecretChats             SecretChatService
+	Stars                   StarsService
+	Gifts                   GiftsService
+	Passkey                 PasskeyService
+	Themes                  ThemeService
 }
 
 // ThemeService 抽象自定义云主题(app/themes):创建/更新/查询主题 + 维护每用户已安装列表。

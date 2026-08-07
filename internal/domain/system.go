@@ -52,6 +52,12 @@ const (
 	// PremiumBotUserID is the stable identity of the built-in @premiumbot.
 	PremiumBotUserID     int64 = 1250000015
 	PremiumBotAccessHash int64 = 5841763291047652381
+
+	// GifBotUserID is intentionally distinct from PremiumBotUserID. The
+	// upstream dev implementation reused 1250000015; that would overwrite the
+	// retained Premium storefront in this project.
+	GifBotUserID     int64 = 1250000017
+	GifBotAccessHash int64 = 7233282977235616768
 )
 
 var configuredPremiumBotUserID atomic.Int64
@@ -82,7 +88,7 @@ func ValidPremiumBotUserID(id int64) bool {
 	}
 	switch id {
 	case OfficialSystemUserID, BotFatherUserID, StickersBotUserID, ChatBotUserID,
-		VerifyBotUserID, VerifierBotUserID:
+		VerifyBotUserID, VerifierBotUserID, GifBotUserID:
 		return false
 	}
 	return true
@@ -199,6 +205,19 @@ func PremiumBotUser() User {
 	}
 }
 
+// GifBotUser returns the built-in inline-only @gif catalog bot.
+func GifBotUser() User {
+	return User{
+		ID:             GifBotUserID,
+		AccessHash:     GifBotAccessHash,
+		FirstName:      "GIF",
+		Username:       "gif",
+		Verified:       true,
+		Bot:            true,
+		BotInfoVersion: 1,
+	}
+}
+
 // SystemUserByID 返回内置系统账号；非系统账号返回 ok=false。
 // 所有对 777000 的硬编码注入点统一经此函数，新增内置账号只改这里。
 func SystemUserByID(id int64) (User, bool) {
@@ -218,6 +237,8 @@ func SystemUserByID(id int64) (User, bool) {
 		return VerifyBotUser(), true
 	case VerifierBotUserID:
 		return VerifierBotUser(), true
+	case GifBotUserID:
+		return GifBotUser(), true
 	}
 	return User{}, false
 }
@@ -241,7 +262,21 @@ func SystemUserIDs() []int64 {
 		VerifyBotUserID,
 		VerifierBotUserID,
 		PremiumBotConfiguredUserID(),
+		GifBotUserID,
 	}
+}
+
+// SystemUserByUsername resolves reserved short handles such as @gif that do
+// not satisfy the ordinary 4/5-character account creation rules.
+func SystemUserByUsername(username string) (User, bool) {
+	username = strings.TrimPrefix(strings.TrimSpace(username), "@")
+	for _, id := range SystemUserIDs() {
+		u, ok := SystemUserByID(id)
+		if ok && strings.EqualFold(u.Username, username) {
+			return u, true
+		}
+	}
+	return User{}, false
 }
 
 func SystemUserByPhone(phone string) (User, bool) {

@@ -65,6 +65,7 @@ func BuildConfig(dc int, ip string, port int, now time.Time, publicBaseURL, upda
 		MessageLengthMax:     4096,
 		WebfileDCID:          dc,
 	}
+	config.SetGifSearchUsername("gif")
 	config.SetReactionsDefault(&tg.ReactionEmoji{Emoticon: DefaultReactionEmoticon})
 	if updateBaseURL != "" {
 		config.SetAutoupdateURLPrefix(links.NormalizeBaseURL(updateBaseURL))

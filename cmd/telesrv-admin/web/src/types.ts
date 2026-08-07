@@ -845,6 +845,19 @@ export type BroadcastListResponse = {
   next_before_id: string;
 };
 
+export type GifCatalogRow = {
+  ID: string;
+  Title: string;
+  DocumentID: string;
+  Enabled: boolean;
+  SortOrder: number;
+  CreatedBy: string;
+  SourceFilename: string;
+  CreatedAt: string;
+};
+
+export type GifCatalogListResponse = { rows: GifCatalogRow[]; limit: number };
+
 export type EmojiRow = {
   DocumentID: string;
   Alt: string;

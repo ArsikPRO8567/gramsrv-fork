@@ -111,15 +111,19 @@ const replyLockStripes = 256
 
 // Service 提供 bot 账号业务。
 type Service struct {
-	users                 store.UserStore
-	bots                  store.BotStore
-	messages              store.MessageStore
-	blocker               blockChecker
-	channels              publicChannelUsernameResolver
-	stickers              stickerSetCreator
-	installer             userStickerSetInstaller
-	aiChat                aiChatGenerator
-	premium               premiumStorefront
+	users      store.UserStore
+	bots       store.BotStore
+	messages   store.MessageStore
+	blocker    blockChecker
+	channels   publicChannelUsernameResolver
+	stickers   stickerSetCreator
+	installer  userStickerSetInstaller
+	aiChat     aiChatGenerator
+	premium    premiumStorefront
+	gifCatalog interface {
+		ListGifCatalog(context.Context, bool) ([]domain.GifCatalogEntry, error)
+		GetDocuments(context.Context, []int64) ([]domain.Document, error)
+	}
 	verification          verificationApplications
 	customVerification    customVerifications
 	verifierTargets       verifierBotTargets
@@ -231,6 +235,15 @@ func WithPremium(p premiumStorefront) Option {
 			s.premium = p
 		}
 	}
+}
+
+// WithGifCatalog injects the curated catalog plus document resolver used by
+// the inline-only @gif responder.
+func WithGifCatalog(c interface {
+	ListGifCatalog(context.Context, bool) ([]domain.GifCatalogEntry, error)
+	GetDocuments(context.Context, []int64) ([]domain.Document, error)
+}) Option {
+	return func(s *Service) { s.gifCatalog = c }
 }
 
 // WithVerification injects the official verification service used by the

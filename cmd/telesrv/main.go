@@ -723,6 +723,7 @@ func run(logger *zap.Logger) error {
 	communityStore := postgres.NewCommunityStore(pool, channelIDAllocator, channelMessageIDAllocator)
 	pollStore := postgres.NewPollStore(pool)
 	mediaStore := postgres.NewMediaStore(pool)
+	gifCatalogStore := postgres.NewGifCatalogStore(pool)
 	// 头像投影缓存：所有 projector 共用一层短 TTL owner→头像缓存，消除高频「返回用户」RPC
 	// 每次投影对每批 owner 固定 2 次的 CurrentProfilePhotosKind PG 查询。
 	cachedPhotos := userprojection.NewCachedPhotoProvider(mediaStore, userprojection.DefaultPhotoCacheTTL)
@@ -759,6 +760,7 @@ func run(logger *zap.Logger) error {
 	}
 	filesService := filesapp.NewService(mediaStore, blobBackend, cfg.DC,
 		filesapp.WithLogger(logger),
+		filesapp.WithGifCatalog(gifCatalogStore),
 		filesapp.WithUploadPartBackend(uploadPartBackend),
 		filesapp.WithUploadPartQuota(domain.UploadPartQuota{
 			MaxBytes: cfg.UploadInFlightMaxBytes,
@@ -789,6 +791,16 @@ func run(logger *zap.Logger) error {
 			zap.Int("documents", stats.Documents),
 			zap.Int("blobs", stats.Blobs),
 		)
+	}
+	if stats, err := filesService.SeedGifs(ctx, cfg.GifSeedDir); err != nil {
+		return fmt.Errorf("seed gif catalog: %w", err)
+	} else if stats.Imported > 0 || stats.Skipped > 0 {
+		logger.Info("GIF catalog seed complete", zap.String("dir", cfg.GifSeedDir),
+			zap.Int("imported", stats.Imported), zap.Int("skipped", stats.Skipped),
+			zap.String("blob_backend", blobBackend.Name()))
+	}
+	if err := filesService.ValidateGifCatalog(ctx); err != nil {
+		return fmt.Errorf("validate gif catalog: %w", err)
 	}
 	if stats, err := filesService.SeedPremiumPromo(ctx, cfg.PremiumPromoSeedDir); err != nil {
 		return fmt.Errorf("seed premium promo: %w", err)
@@ -953,6 +965,7 @@ func run(logger *zap.Logger) error {
 		botsapp.WithPublicChannelUsernameResolver(channelStore),
 		botsapp.WithUserCache(userCache),
 		botsapp.WithStickerSetCreator(filesService),
+		botsapp.WithGifCatalog(filesService),
 		botsapp.WithUserStickerSets(accountService),
 		botsapp.WithTelegramLogin(telegramLoginService),
 		botsapp.WithDialogRateLimiter(rateLimiter, cfg.VerificationBotRateLimit, cfg.VerificationBotRateWindow),
@@ -1292,51 +1305,52 @@ func run(logger *zap.Logger) error {
 			help.WithMapboxToken(cfg.MapboxToken),
 			help.WithPremiumBotUsername(cfg.PremiumBotUsername),
 			help.WithAccountFreezeProvider(adminService)),
-		AppUpdates:          appUpdateResolver,
-		AccountFreeze:       adminService,
-		AICompose:           aiComposeService,
-		Ephemeral:           ephemeralService,
-		EphemeralPush:       ephemeralStore,
-		Moderation:          moderationService,
-		Users:               usersService,
-		Usernames:           usernamesService,
-		CollectiblePhones:   collectiblePhoneStore,
-		AccountRatings:      ratingService,
-		BotVerifications:    botVerificationService,
-		TelegramLogin:       telegramLoginRPCDependency(telegramLoginService),
-		Updates:             updatesService,
-		BootstrapUpdates:    bootstrapUpdateStore,
-		BotAPIUpdates:       botAPIUpdateStore,
-		BotCallbacks:        botCallbackStore,
-		Contacts:            contactsService,
-		Dialogs:             dialogsService,
-		Chatlists:           chatlistsService,
-		Messages:            messagesService,
-		Translation:         translationService,
-		Channels:            channelsService,
-		Communities:         communitiesService,
-		Files:               filesService,
-		PremiumPromo:        filesService,
-		Bots:                botsService,
-		ServiceBotCallbacks: botsService,
-		Polls:               pollsapp.NewService(pollStore),
-		Stories:             storiesService,
-		Phone:               phoneService,
-		SecretChats:         secretChatService,
-		Stars:               starsService,
-		Premium:             premiumService,
-		Gifts:               giftsService,
-		Passkey:             passkeyService,
-		Themes:              themeService,
-		GroupCalls:          groupCallsService,
-		LiveStreams:         liveStreamDep(liveStreamService),
-		SFU:                 sfuService,
-		TURN:                turnService,
-		LangPack:            langPackService,
-		Sessions:            activeSessions,
-		Metrics:             metricRegistry,
-		Inline:              inlineRegistryStore,
-		Limiter:             rateLimiter,
+		AppUpdates:              appUpdateResolver,
+		AccountFreeze:           adminService,
+		AICompose:               aiComposeService,
+		Ephemeral:               ephemeralService,
+		EphemeralPush:           ephemeralStore,
+		Moderation:              moderationService,
+		Users:                   usersService,
+		Usernames:               usernamesService,
+		CollectiblePhones:       collectiblePhoneStore,
+		AccountRatings:          ratingService,
+		BotVerifications:        botVerificationService,
+		TelegramLogin:           telegramLoginRPCDependency(telegramLoginService),
+		Updates:                 updatesService,
+		BootstrapUpdates:        bootstrapUpdateStore,
+		BotAPIUpdates:           botAPIUpdateStore,
+		BotCallbacks:            botCallbackStore,
+		Contacts:                contactsService,
+		Dialogs:                 dialogsService,
+		Chatlists:               chatlistsService,
+		Messages:                messagesService,
+		Translation:             translationService,
+		Channels:                channelsService,
+		Communities:             communitiesService,
+		Files:                   filesService,
+		PremiumPromo:            filesService,
+		Bots:                    botsService,
+		ServiceBotCallbacks:     botsService,
+		ServiceBotInlineResults: botsService,
+		Polls:                   pollsapp.NewService(pollStore),
+		Stories:                 storiesService,
+		Phone:                   phoneService,
+		SecretChats:             secretChatService,
+		Stars:                   starsService,
+		Premium:                 premiumService,
+		Gifts:                   giftsService,
+		Passkey:                 passkeyService,
+		Themes:                  themeService,
+		GroupCalls:              groupCallsService,
+		LiveStreams:             liveStreamDep(liveStreamService),
+		SFU:                     sfuService,
+		TURN:                    turnService,
+		LangPack:                langPackService,
+		Sessions:                activeSessions,
+		Metrics:                 metricRegistry,
+		Inline:                  inlineRegistryStore,
+		Limiter:                 rateLimiter,
 	}, logger.Named("rpc"), clock.System)
 	readModelListener := postgres.NewReadModelChangeListener(cfg.PostgresDSN, postgres.ReadModelCacheSet{
 		ReadModelVersions:  readModelVersionStore,
@@ -1379,6 +1393,7 @@ func run(logger *zap.Logger) error {
 		Bots:                   botsService,
 		Broadcast:              broadcastService,
 		Emoji:                  filesService,
+		GifCatalog:             filesService,
 		Moderation:             moderationService,
 		Usernames:              usernamesService,
 		CollectiblePhones:      collectiblePhoneStore,

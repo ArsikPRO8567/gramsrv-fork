@@ -25,6 +25,29 @@ func TestAdminAPIRequiresBearerToken(t *testing.T) {
 	}
 }
 
+type gifCatalogReadService struct{ fakeService }
+
+func (gifCatalogReadService) GifCatalog(context.Context) ([]domain.GifCatalogEntry, error) {
+	return []domain.GifCatalogEntry{{
+		ID: 9_007_199_254_740_993, Title: "Wave", DocumentID: 9_007_199_254_740_995, Enabled: true,
+	}}, nil
+}
+
+func TestAdminAPIGifCatalogKeepsInt64IDsAsStrings(t *testing.T) {
+	srv := &Server{token: "secret", svc: gifCatalogReadService{}}
+	req := httptest.NewRequest(http.MethodGet, "/v1/gif-catalog", nil)
+	req.Header.Set("Authorization", "Bearer secret")
+	rec := httptest.NewRecorder()
+	srv.routes().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if body := rec.Body.String(); !strings.Contains(body, `"ID":"9007199254740993"`) ||
+		!strings.Contains(body, `"DocumentID":"9007199254740995"`) {
+		t.Fatalf("int64 ids were not encoded as strings: %s", body)
+	}
+}
+
 func TestAdminAPISetAccountFrozen(t *testing.T) {
 	svc := &captureFreezeService{}
 	srv := &Server{token: "secret", svc: svc}
@@ -683,6 +706,23 @@ func (fakeService) StarGiftAnimation(context.Context, int64) ([]byte, bool, erro
 
 func (fakeService) EmojiAnimation(context.Context, int64) ([]byte, bool, error) {
 	return []byte(`{"v":"5.7","w":100,"h":100}`), true, nil
+}
+
+func (fakeService) GifCatalog(context.Context) ([]domain.GifCatalogEntry, error) { return nil, nil }
+func (fakeService) CreateGifCatalogEntry(_ context.Context, req admin.CreateGifCatalogEntryRequest) (admin.CommandResult, error) {
+	return admin.CommandResult{CommandID: req.CommandID, Status: "completed", DryRun: req.DryRun}, nil
+}
+func (fakeService) SetGifCatalogEnabled(_ context.Context, req admin.SetGifCatalogEnabledRequest) (admin.CommandResult, error) {
+	return admin.CommandResult{CommandID: req.CommandID, Status: "completed", DryRun: req.DryRun}, nil
+}
+func (fakeService) SetGifCatalogSortOrder(_ context.Context, req admin.SetGifCatalogSortOrderRequest) (admin.CommandResult, error) {
+	return admin.CommandResult{CommandID: req.CommandID, Status: "completed", DryRun: req.DryRun}, nil
+}
+func (fakeService) DeleteGifCatalogEntry(_ context.Context, req admin.DeleteGifCatalogEntryRequest) (admin.CommandResult, error) {
+	return admin.CommandResult{CommandID: req.CommandID, Status: "completed", DryRun: req.DryRun}, nil
+}
+func (fakeService) GifCatalogDocumentPreview(context.Context, int64) ([]byte, string, bool, error) {
+	return nil, "", false, nil
 }
 
 func (fakeService) StarGiftCollectibles(context.Context, int64) (domain.StarGiftUpgradePreview, bool, error) {

@@ -258,6 +258,8 @@ type Config struct {
 	StorageUsageRefreshInterval time.Duration
 	// StickerSeedDir 是 reaction / sticker 资源种子目录（导入到 documents/sticker_sets + blob）。
 	StickerSeedDir string
+	// GifSeedDir is an optional bounded .gif/.mp4 drop directory for @gif.
+	GifSeedDir string
 	// StickerSeedMaxSets 限制导入的常规贴纸集数量（避免启动时导入过多包），<=0 表示不限。
 	StickerSeedMaxSets int
 	// PremiumPromoSeedDir 是 help.getPremiumPromo 视频与缩略图导出目录。
@@ -798,6 +800,7 @@ func Load() (Config, error) {
 		StorageMaxTotalBytes:          envInt64Or("TELESRV_STORAGE_MAX_TOTAL_BYTES", 0),
 		StorageUsageRefreshInterval:   envDurationOr("TELESRV_STORAGE_USAGE_REFRESH_INTERVAL", time.Minute),
 		StickerSeedDir:                envOr("TELESRV_STICKER_SEED_DIR", "data/sticker-seed"),
+		GifSeedDir:                    envOr("TELESRV_GIF_SEED_DIR", "data/gifs"),
 		StickerSeedMaxSets:            envIntOr("TELESRV_STICKER_SEED_MAX_SETS", 300),
 		PremiumPromoSeedDir:           envOr("TELESRV_PREMIUM_PROMO_SEED_DIR", "data/premium-promo"),
 		MapboxToken:                   envOr("TELESRV_MAPBOX_TOKEN", ""),

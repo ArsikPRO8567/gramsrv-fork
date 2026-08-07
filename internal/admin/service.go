@@ -2,12 +2,14 @@ package admin
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"hash/fnv"
 	"math"
+	"net/http"
 	"net/url"
 	"reflect"
 	"sort"
@@ -48,6 +50,10 @@ const (
 	ActionGiveGift                = "gifts.give"
 	ActionCreateBot               = "bot.create"
 	ActionCreateBroadcast         = "broadcast.create"
+	ActionCreateGifCatalogEntry   = "gif_catalog.create"
+	ActionSetGifCatalogEnabled    = "gif_catalog.set_enabled"
+	ActionSetGifCatalogSortOrder  = "gif_catalog.set_sort_order"
+	ActionDeleteGifCatalogEntry   = "gif_catalog.delete"
 	ActionDeleteBot               = "bot.delete"
 	// Collectible (Fragment-style) username lifecycle.
 	ActionMintCollectibleUsername     = "usernames.collectible.mint"
@@ -295,6 +301,17 @@ type EmojiService interface {
 	DocumentAnimationJSON(ctx context.Context, documentID int64) ([]byte, bool, error)
 }
 
+type GifCatalogService interface {
+	ValidateGifUpload(fileName string, data []byte) (string, bool)
+	AdminUploadGifMaterial(ctx context.Context, fileName string, data []byte) (domain.Document, error)
+	AdminCreateGifCatalogEntry(ctx context.Context, title string, documentID int64) (domain.GifCatalogEntry, error)
+	AdminListGifCatalog(ctx context.Context) ([]domain.GifCatalogEntry, error)
+	AdminSetGifCatalogEnabled(ctx context.Context, id int64, enabled bool) (bool, error)
+	AdminSetGifCatalogSortOrder(ctx context.Context, id int64, order int) (bool, error)
+	AdminDeleteGifCatalogEntry(ctx context.Context, id int64) (bool, error)
+	GetFile(ctx context.Context, req domain.FileDownloadRequest) (domain.FileChunk, bool, error)
+}
+
 type ModerationService interface {
 	ListCases(ctx context.Context, filter domain.ModerationCaseFilter) ([]domain.ModerationCase, error)
 	Case(ctx context.Context, caseID int64) (domain.ModerationCaseDetail, bool, error)
@@ -379,6 +396,7 @@ type Dependencies struct {
 	Bots                   BotService
 	Broadcast              BroadcastService
 	Emoji                  EmojiService
+	GifCatalog             GifCatalogService
 	Moderation             ModerationService
 	Usernames              CollectibleUsernamesService
 	CollectiblePhones      CollectiblePhonesService
@@ -411,6 +429,7 @@ type Service struct {
 	bots                   BotService
 	broadcast              BroadcastService
 	emoji                  EmojiService
+	gifCatalog             GifCatalogService
 	moderation             ModerationService
 	usernames              CollectibleUsernamesService
 	collectiblePhones      CollectiblePhonesService
@@ -485,6 +504,9 @@ func (s *Service) Configure(deps Dependencies) *Service {
 	}
 	if deps.Emoji != nil {
 		s.emoji = deps.Emoji
+	}
+	if deps.GifCatalog != nil {
+		s.gifCatalog = deps.GifCatalog
 	}
 	if deps.Moderation != nil {
 		s.moderation = deps.Moderation
@@ -908,6 +930,31 @@ type CreateBroadcastRequest struct {
 	Message    string  `json:"message"`
 	TargetMode string  `json:"target_mode"`
 	UserIDs    []int64 `json:"user_ids,omitempty"`
+}
+
+type CreateGifCatalogEntryRequest struct {
+	CommandMeta
+	Title         string `json:"title"`
+	FileName      string `json:"file_name"`
+	Data          []byte `json:"-"`
+	ContentSHA256 string `json:"content_sha256,omitempty"`
+}
+
+type SetGifCatalogEnabledRequest struct {
+	CommandMeta
+	ID      int64 `json:"id,string"`
+	Enabled bool  `json:"enabled"`
+}
+
+type SetGifCatalogSortOrderRequest struct {
+	CommandMeta
+	ID        int64 `json:"id,string"`
+	SortOrder int   `json:"sort_order"`
+}
+
+type DeleteGifCatalogEntryRequest struct {
+	CommandMeta
+	ID int64 `json:"id,string"`
 }
 
 type DeleteBotRequest struct {
@@ -3372,6 +3419,114 @@ func (s *Service) EmojiAnimation(ctx context.Context, documentID int64) ([]byte,
 		return nil, false, nil
 	}
 	return s.emoji.DocumentAnimationJSON(ctx, documentID)
+}
+
+func (s *Service) GifCatalog(ctx context.Context) ([]domain.GifCatalogEntry, error) {
+	if s == nil || s.gifCatalog == nil {
+		return nil, domain.ErrGifCatalogUnavailable
+	}
+	return s.gifCatalog.AdminListGifCatalog(ctx)
+}
+
+func (s *Service) CreateGifCatalogEntry(ctx context.Context, req CreateGifCatalogEntryRequest) (CommandResult, error) {
+	if s == nil || s.gifCatalog == nil {
+		return CommandResult{}, domain.ErrGifCatalogUnavailable
+	}
+	if strings.TrimSpace(req.Title) == "" {
+		return CommandResult{}, domain.ErrGifCatalogEntryInvalid
+	}
+	mimeType, ok := s.gifCatalog.ValidateGifUpload(req.FileName, req.Data)
+	if !ok {
+		return CommandResult{}, domain.ErrGifCatalogFileInvalid
+	}
+	digest := sha256.Sum256(req.Data)
+	req.ContentSHA256 = hex.EncodeToString(digest[:])
+	return s.runCommand(ctx, req.CommandMeta, ActionCreateGifCatalogEntry, 0, domain.Peer{}, req, func() (CommandResult, error) {
+		details := map[string]any{"title": req.Title, "file_name": req.FileName, "mime_type": mimeType, "bytes": len(req.Data)}
+		entries, err := s.gifCatalog.AdminListGifCatalog(ctx)
+		if err != nil {
+			return CommandResult{Details: details}, err
+		}
+		if len(entries) >= domain.MaxGifCatalogEntries {
+			return CommandResult{Details: details}, domain.ErrGifCatalogFull
+		}
+		if req.DryRun {
+			return CommandResult{Message: "gif catalog entry validated", Details: details}, nil
+		}
+		doc, err := s.gifCatalog.AdminUploadGifMaterial(ctx, req.FileName, req.Data)
+		if err != nil {
+			return CommandResult{Details: details}, err
+		}
+		entry, err := s.gifCatalog.AdminCreateGifCatalogEntry(ctx, req.Title, doc.ID)
+		if err != nil {
+			return CommandResult{Details: details}, err
+		}
+		details["id"], details["document_id"] = strconv.FormatInt(entry.ID, 10), strconv.FormatInt(doc.ID, 10)
+		return CommandResult{Message: "gif catalog entry created", Details: details}, nil
+	})
+}
+
+func (s *Service) SetGifCatalogEnabled(ctx context.Context, req SetGifCatalogEnabledRequest) (CommandResult, error) {
+	if s == nil || s.gifCatalog == nil || req.ID <= 0 {
+		return CommandResult{}, domain.ErrGifCatalogEntryInvalid
+	}
+	return s.runCommand(ctx, req.CommandMeta, ActionSetGifCatalogEnabled, 0, domain.Peer{}, req, func() (CommandResult, error) {
+		details := map[string]any{"id": strconv.FormatInt(req.ID, 10), "enabled": req.Enabled}
+		if req.DryRun {
+			return CommandResult{Message: "gif catalog state validated", Details: details}, nil
+		}
+		changed, err := s.gifCatalog.AdminSetGifCatalogEnabled(ctx, req.ID, req.Enabled)
+		details["changed"] = changed
+		return CommandResult{Message: "gif catalog state updated", Details: details}, err
+	})
+}
+
+func (s *Service) SetGifCatalogSortOrder(ctx context.Context, req SetGifCatalogSortOrderRequest) (CommandResult, error) {
+	if s == nil || s.gifCatalog == nil || req.ID <= 0 {
+		return CommandResult{}, domain.ErrGifCatalogEntryInvalid
+	}
+	return s.runCommand(ctx, req.CommandMeta, ActionSetGifCatalogSortOrder, 0, domain.Peer{}, req, func() (CommandResult, error) {
+		details := map[string]any{"id": strconv.FormatInt(req.ID, 10), "sort_order": req.SortOrder}
+		if req.DryRun {
+			return CommandResult{Message: "gif catalog order validated", Details: details}, nil
+		}
+		changed, err := s.gifCatalog.AdminSetGifCatalogSortOrder(ctx, req.ID, req.SortOrder)
+		details["changed"] = changed
+		return CommandResult{Message: "gif catalog order updated", Details: details}, err
+	})
+}
+
+func (s *Service) DeleteGifCatalogEntry(ctx context.Context, req DeleteGifCatalogEntryRequest) (CommandResult, error) {
+	if s == nil || s.gifCatalog == nil || req.ID <= 0 {
+		return CommandResult{}, domain.ErrGifCatalogEntryInvalid
+	}
+	return s.runCommand(ctx, req.CommandMeta, ActionDeleteGifCatalogEntry, 0, domain.Peer{}, req, func() (CommandResult, error) {
+		details := map[string]any{"id": strconv.FormatInt(req.ID, 10)}
+		if req.DryRun {
+			return CommandResult{Message: "gif catalog deletion validated", Details: details}, nil
+		}
+		changed, err := s.gifCatalog.AdminDeleteGifCatalogEntry(ctx, req.ID)
+		details["changed"] = changed
+		return CommandResult{Message: "gif catalog entry deleted", Details: details}, err
+	})
+}
+
+func (s *Service) GifCatalogDocumentPreview(ctx context.Context, documentID int64) ([]byte, string, bool, error) {
+	if s == nil || s.gifCatalog == nil || documentID <= 0 {
+		return nil, "", false, nil
+	}
+	chunk, found, err := s.gifCatalog.GetFile(ctx, domain.FileDownloadRequest{LocationKey: fmt.Sprintf("doc:%d", documentID), Limit: domain.MaxGifCatalogDocumentSize + 1})
+	if err != nil || !found {
+		return nil, "", found, err
+	}
+	if chunk.Total <= 0 || chunk.Total > domain.MaxGifCatalogDocumentSize || int64(len(chunk.Bytes)) != chunk.Total {
+		return nil, "", false, nil
+	}
+	detected := http.DetectContentType(chunk.Bytes)
+	if detected != "video/mp4" && !strings.HasPrefix(detected, "video/") {
+		return nil, "", false, nil
+	}
+	return chunk.Bytes, detected, true, nil
 }
 
 func (s *Service) StarGiftCollectibles(ctx context.Context, giftID int64) (domain.StarGiftUpgradePreview, bool, error) {

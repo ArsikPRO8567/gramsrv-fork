@@ -62,6 +62,8 @@ func (s *server) routes() http.Handler {
 	mux.Handle("GET /api/premium/plans", s.premiumManage(s.handlePremiumPlansAPI))
 	mux.Handle("GET /api/emoji", s.requireAuthAPI(http.HandlerFunc(s.handleEmojiAPI)))
 	mux.Handle("GET /api/emoji/{id}/animation", s.requireAuthAPI(http.HandlerFunc(s.handleEmojiAnimationAPI)))
+	mux.Handle("GET /api/gif-catalog", s.requireAuthAPI(http.HandlerFunc(s.handleGifCatalogAPI)))
+	mux.Handle("GET /api/gif-catalog/documents/{id}/preview", s.requireAuthAPI(http.HandlerFunc(s.handleGifCatalogPreviewAPI)))
 	mux.Handle("GET /api/messages", s.requireAuthAPI(http.HandlerFunc(s.handleMessagesAPI)))
 	mux.Handle("GET /api/messages/detail", s.requireAuthAPI(http.HandlerFunc(s.handleMessageDetailAPI)))
 	mux.Handle("GET /api/messages/groups", s.requireAuthAPI(http.HandlerFunc(s.handleGroupMessagesAPI)))
@@ -102,6 +104,10 @@ func (s *server) routes() http.Handler {
 	mux.Handle("POST /api/actions/set-channel-emoji-status", s.requireAuthAPI(http.HandlerFunc(s.handleSetChannelEmojiStatusAPI)))
 	mux.Handle("POST /api/actions/create-bot", s.requireAuthAPI(http.HandlerFunc(s.handleCreateBotAPI)))
 	mux.Handle("POST /api/actions/create-broadcast", s.requireAuthAPI(http.HandlerFunc(s.handleCreateBroadcastAPI)))
+	mux.Handle("POST /api/actions/create-gif-catalog-entry", s.requireAuthAPI(http.HandlerFunc(s.handleCreateGifCatalogEntryAPI)))
+	mux.Handle("POST /api/actions/set-gif-catalog-enabled", s.requireAuthAPI(http.HandlerFunc(s.handleSetGifCatalogEnabledAPI)))
+	mux.Handle("POST /api/actions/set-gif-catalog-sort-order", s.requireAuthAPI(http.HandlerFunc(s.handleSetGifCatalogSortOrderAPI)))
+	mux.Handle("POST /api/actions/delete-gif-catalog-entry", s.requireAuthAPI(http.HandlerFunc(s.handleDeleteGifCatalogEntryAPI)))
 	mux.Handle("POST /api/actions/delete-bot", s.requireAuthAPI(http.HandlerFunc(s.handleDeleteBotAPI)))
 	mux.Handle("POST /api/actions/set-channel-verified", s.requireAuthAPI(http.HandlerFunc(s.handleSetChannelVerifiedAPI)))
 	mux.Handle("POST /api/actions/revoke-sessions", s.requireAuthAPI(http.HandlerFunc(s.handleRevokeSessionsAPI)))
@@ -355,6 +361,44 @@ func (s *server) handleEmojiAnimationAPI(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set("Cache-Control", "private, max-age=60")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(raw)
+}
+
+func (s *server) handleGifCatalogAPI(w http.ResponseWriter, r *http.Request) {
+	s.proxyAdminJSONNoStore(w, r, "/v1/gif-catalog", 1<<20)
+}
+
+func (s *server) handleGifCatalogPreviewAPI(w http.ResponseWriter, r *http.Request) {
+	documentID, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil || documentID <= 0 {
+		writeAPIError(w, http.StatusBadRequest, "invalid document id")
+		return
+	}
+	req, err := http.NewRequestWithContext(r.Context(), http.MethodGet,
+		fmt.Sprintf("%s/v1/gif-catalog/documents/%d/preview", s.cfg.AdminAPIURL, documentID), nil)
+	if err != nil {
+		writeAPIError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	req.Header.Set("Authorization", "Bearer "+s.cfg.AdminAPIToken)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		writeAPIError(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	defer resp.Body.Close()
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, domain.MaxGifCatalogDocumentSize+1))
+	if err != nil || len(raw) > domain.MaxGifCatalogDocumentSize {
+		writeAPIError(w, http.StatusBadGateway, "invalid gif preview response")
+		return
+	}
+	if resp.StatusCode != http.StatusOK {
+		writeAPIError(w, resp.StatusCode, string(raw))
+		return
+	}
+	w.Header().Set("Content-Type", resp.Header.Get("Content-Type"))
 	w.Header().Set("Cache-Control", "private, max-age=60")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(raw)
@@ -769,6 +813,85 @@ func (s *server) handleCreateBroadcastAPI(w http.ResponseWriter, r *http.Request
 		UserIDs:     body.UserIDs,
 	}
 	result, err := s.callAdminAPI(r.Context(), "/v1/broadcasts/create", req)
+	writeCommandResultAPI(w, result, err)
+}
+
+type gifCatalogActionMeta struct {
+	CommandID string `json:"command_id"`
+	Reason    string `json:"reason"`
+	Confirm   bool   `json:"confirm"`
+	Title     string `json:"title"`
+}
+
+func (s *server) handleCreateGifCatalogEntryAPI(w http.ResponseWriter, r *http.Request) {
+	defer r.Body.Close()
+	r.Body = http.MaxBytesReader(w, r.Body, domain.MaxGifCatalogUploadSize+(2<<20))
+	if err := r.ParseMultipartForm(1 << 20); err != nil {
+		writeAPIError(w, http.StatusBadRequest, "invalid multipart form: "+err.Error())
+		return
+	}
+	if r.MultipartForm != nil {
+		defer r.MultipartForm.RemoveAll()
+	}
+	var body gifCatalogActionMeta
+	dec := json.NewDecoder(strings.NewReader(r.FormValue("metadata")))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&body); err != nil {
+		writeAPIError(w, http.StatusBadRequest, "invalid metadata: "+err.Error())
+		return
+	}
+	file, header, err := r.FormFile("file")
+	if err != nil {
+		writeAPIError(w, http.StatusBadRequest, "gif file is required")
+		return
+	}
+	defer file.Close()
+	data, err := io.ReadAll(io.LimitReader(file, domain.MaxGifCatalogUploadSize+1))
+	if err != nil || len(data) == 0 || len(data) > domain.MaxGifCatalogUploadSize {
+		writeAPIError(w, http.StatusBadRequest, "gif file is empty or too large")
+		return
+	}
+	req := admin.CreateGifCatalogEntryRequest{CommandMeta: s.commandMetaFromAPI(r, body.CommandID, body.Reason, body.Confirm, "create-gif"), Title: body.Title}
+	result, err := s.callAdminMultipart(r.Context(), "/v1/gif-catalog/create", req, header.Filename, data)
+	writeCommandResultAPI(w, result, err)
+}
+
+type gifCatalogStateAPIRequest struct {
+	CommandID string `json:"command_id"`
+	Reason    string `json:"reason"`
+	Confirm   bool   `json:"confirm"`
+	ID        int64  `json:"id,string"`
+	Enabled   bool   `json:"enabled,omitempty"`
+	SortOrder int    `json:"sort_order,omitempty"`
+}
+
+func (s *server) handleSetGifCatalogEnabledAPI(w http.ResponseWriter, r *http.Request) {
+	var body gifCatalogStateAPIRequest
+	if !decodeAction(w, r, &body) {
+		return
+	}
+	req := admin.SetGifCatalogEnabledRequest{CommandMeta: s.commandMetaFromAPI(r, body.CommandID, body.Reason, body.Confirm, "set-gif-enabled"), ID: body.ID, Enabled: body.Enabled}
+	result, err := s.callAdminAPI(r.Context(), "/v1/gif-catalog/set-enabled", req)
+	writeCommandResultAPI(w, result, err)
+}
+
+func (s *server) handleSetGifCatalogSortOrderAPI(w http.ResponseWriter, r *http.Request) {
+	var body gifCatalogStateAPIRequest
+	if !decodeAction(w, r, &body) {
+		return
+	}
+	req := admin.SetGifCatalogSortOrderRequest{CommandMeta: s.commandMetaFromAPI(r, body.CommandID, body.Reason, body.Confirm, "set-gif-sort-order"), ID: body.ID, SortOrder: body.SortOrder}
+	result, err := s.callAdminAPI(r.Context(), "/v1/gif-catalog/set-sort-order", req)
+	writeCommandResultAPI(w, result, err)
+}
+
+func (s *server) handleDeleteGifCatalogEntryAPI(w http.ResponseWriter, r *http.Request) {
+	var body gifCatalogStateAPIRequest
+	if !decodeAction(w, r, &body) {
+		return
+	}
+	req := admin.DeleteGifCatalogEntryRequest{CommandMeta: s.commandMetaFromAPI(r, body.CommandID, body.Reason, body.Confirm, "delete-gif"), ID: body.ID}
+	result, err := s.callAdminAPI(r.Context(), "/v1/gif-catalog/delete", req)
 	writeCommandResultAPI(w, result, err)
 }
 

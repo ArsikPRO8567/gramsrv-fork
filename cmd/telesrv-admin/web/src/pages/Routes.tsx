@@ -12,6 +12,7 @@ import { BotDetailPage } from "./BotDetailPage";
 import { BotsPage } from "./BotsPage";
 import { BroadcastsPage } from "./BroadcastsPage";
 import { EmojiPage } from "./EmojiPage";
+import { GifCatalogPage } from "./GifCatalogPage";
 import { Dashboard } from "./Dashboard";
 import { GroupMessageDetailPage } from "./GroupMessageDetailPage";
 import { GroupMessagesPage } from "./GroupMessagesPage";
@@ -132,6 +133,9 @@ export function Routes({ route, navigate }: { route: RouteState; navigate: Navig
   if (route.path === "/emoji") {
     return <EmojiPage />;
   }
+	if (route.path === "/gif-catalog") {
+		return <GifCatalogPage />;
+	}
 	if (route.path === "/gifts") {
 		return <GiftsPage />;
 	}
