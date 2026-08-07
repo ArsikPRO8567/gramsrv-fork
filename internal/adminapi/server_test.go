@@ -704,6 +704,34 @@ func (fakeService) DeletePrivateHistory(context.Context, admin.DeletePrivateHist
 	return admin.CommandResult{}, nil
 }
 
+func (fakeService) SetStickerSetArchived(_ context.Context, req admin.SetStickerSetArchivedRequest) (admin.CommandResult, error) {
+	return admin.CommandResult{CommandID: req.CommandID, Status: "completed", DryRun: req.DryRun}, nil
+}
+
+func (fakeService) SetStickerSetSortOrder(_ context.Context, req admin.SetStickerSetSortOrderRequest) (admin.CommandResult, error) {
+	return admin.CommandResult{CommandID: req.CommandID, Status: "completed", DryRun: req.DryRun}, nil
+}
+
+func (fakeService) RenameStickerSet(_ context.Context, req admin.RenameStickerSetRequest) (admin.CommandResult, error) {
+	return admin.CommandResult{CommandID: req.CommandID, Status: "completed", DryRun: req.DryRun}, nil
+}
+
+func (fakeService) DeleteStickerSet(_ context.Context, req admin.DeleteStickerSetRequest) (admin.CommandResult, error) {
+	return admin.CommandResult{CommandID: req.CommandID, Status: "completed", DryRun: req.DryRun}, nil
+}
+
+func (fakeService) CreateStickerSet(_ context.Context, req admin.CreateStickerSetRequest) (admin.CommandResult, error) {
+	return admin.CommandResult{CommandID: req.CommandID, Status: "completed", DryRun: req.DryRun}, nil
+}
+
+func (fakeService) RemoveStickerFromSet(_ context.Context, req admin.RemoveStickerFromSetRequest) (admin.CommandResult, error) {
+	return admin.CommandResult{CommandID: req.CommandID, Status: "completed", DryRun: req.DryRun}, nil
+}
+
+func (fakeService) StickerDocumentAnimation(context.Context, int64) ([]byte, string, bool, error) {
+	return nil, "", false, nil
+}
+
 func (fakeService) ImportStarGift(_ context.Context, req admin.ImportStarGiftRequest) (admin.CommandResult, error) {
 	return admin.CommandResult{CommandID: req.CommandID, Status: "completed", DryRun: req.DryRun}, nil
 }
