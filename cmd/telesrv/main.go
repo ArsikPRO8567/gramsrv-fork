@@ -1395,6 +1395,7 @@ func run(logger *zap.Logger) error {
 		Bots:                   botsService,
 		Broadcast:              broadcastService,
 		Emoji:                  filesService,
+		StickerSets:            filesService,
 		GifCatalog:             filesService,
 		Moderation:             moderationService,
 		Usernames:              usernamesService,

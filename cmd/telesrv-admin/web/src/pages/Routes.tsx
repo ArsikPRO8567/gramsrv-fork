@@ -28,6 +28,7 @@ import { BotVerificationRequestPage } from "./BotVerificationRequestPage";
 import { VerificationDetailPage } from "./VerificationDetailPage";
 import { VerificationPage } from "./VerificationPage";
 import { StoragePage } from "./StoragePage";
+import { StickerSetsPage } from "./StickerSetsPage";
 import {
   PermissionGate,
   permissionBotVerificationReview,
@@ -132,6 +133,9 @@ export function Routes({ route, navigate }: { route: RouteState; navigate: Navig
   }
   if (route.path === "/emoji") {
     return <EmojiPage />;
+  }
+  if (route.path === "/stickers") {
+    return <StickerSetsPage kind="stickers" />;
   }
 	if (route.path === "/gif-catalog") {
 		return <GifCatalogPage />;

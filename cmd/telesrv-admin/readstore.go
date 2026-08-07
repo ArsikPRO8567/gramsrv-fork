@@ -110,6 +110,94 @@ LIMIT $2`, beforeID, limit+1)
 	return out, hasMore, nil
 }
 
+var systemAccountIDs = []int64{
+	domain.OfficialSystemUserID,
+	domain.BotFatherUserID,
+	domain.StickersBotUserID,
+	domain.ChatBotUserID,
+}
+
+func (s *readStore) CountAccounts(ctx context.Context) (int64, error) {
+	var n int64
+	if err := s.pool.QueryRow(ctx, `
+SELECT count(*) FROM users
+WHERE NOT is_bot
+  AND deleted_at IS NULL
+  AND id <> ALL($1::bigint[])`, systemAccountIDs).Scan(&n); err != nil {
+		return 0, fmt.Errorf("count accounts: %w", err)
+	}
+	return n, nil
+}
+
+// CountOnlineAccounts uses last_seen_at as the DB-side proxy for the live
+// server's in-process presence tracker. The server persists that field while a
+// session stays online, using the same five-minute window clients expect.
+func (s *readStore) CountOnlineAccounts(ctx context.Context) (int64, error) {
+	var n int64
+	if err := s.pool.QueryRow(ctx, `
+SELECT count(*)
+FROM users
+WHERE NOT is_bot
+  AND deleted_at IS NULL
+  AND id <> ALL($1::bigint[])
+  AND last_seen_at > extract(epoch FROM now() - interval '5 minutes')::bigint`,
+		systemAccountIDs).Scan(&n); err != nil {
+		return 0, fmt.Errorf("count online accounts: %w", err)
+	}
+	return n, nil
+}
+
+type DashboardCounts struct {
+	Users                int64
+	OnlineUsers          int64
+	Bots                 int64
+	BroadcastChannels    int64
+	Supergroups          int64
+	StickerSets          int64
+	EmojiSets            int64
+	Gifs                 int64
+	PendingReports       int64
+	PendingVerifications int64
+}
+
+func (s *readStore) DashboardCounts(ctx context.Context) (DashboardCounts, error) {
+	var out DashboardCounts
+	var err error
+	if out.Users, err = s.CountAccounts(ctx); err != nil {
+		return out, err
+	}
+	if out.OnlineUsers, err = s.CountOnlineAccounts(ctx); err != nil {
+		return out, err
+	}
+	if err := s.pool.QueryRow(ctx, `
+SELECT count(*) FROM users WHERE is_bot AND deleted_at IS NULL`).Scan(&out.Bots); err != nil {
+		return out, fmt.Errorf("count bots: %w", err)
+	}
+	if err := s.pool.QueryRow(ctx, `
+SELECT count(*) FILTER (WHERE broadcast), count(*) FILTER (WHERE megagroup)
+FROM channels WHERE NOT deleted AND NOT monoforum`).Scan(&out.BroadcastChannels, &out.Supergroups); err != nil {
+		return out, fmt.Errorf("count channels: %w", err)
+	}
+	if err := s.pool.QueryRow(ctx, `
+SELECT count(*) FILTER (WHERE set_kind = 'stickers'), count(*) FILTER (WHERE set_kind = 'emoji')
+FROM sticker_sets WHERE deleted = false`).Scan(&out.StickerSets, &out.EmojiSets); err != nil {
+		return out, fmt.Errorf("count sticker sets: %w", err)
+	}
+	if err := s.pool.QueryRow(ctx, `
+SELECT count(DISTINCT document_id) FROM user_sticker_collections WHERE kind = 'gif'`).Scan(&out.Gifs); err != nil {
+		return out, fmt.Errorf("count gifs: %w", err)
+	}
+	if err := s.pool.QueryRow(ctx, `
+SELECT count(*) FROM moderation_cases WHERE status NOT IN ('resolved', 'dismissed')`).Scan(&out.PendingReports); err != nil {
+		return out, fmt.Errorf("count pending moderation cases: %w", err)
+	}
+	if err := s.pool.QueryRow(ctx, `
+SELECT count(*) FROM verification_applications WHERE status IN ('submitted', 'in_review')`).Scan(&out.PendingVerifications); err != nil {
+		return out, fmt.Errorf("count pending verification applications: %w", err)
+	}
+	return out, nil
+}
+
 // StorageStats is deliberately read-only and derives physical usage from
 // content-addressed object keys. It does not claim that an unreferenced object
 // is safe to delete; the complete media-reference graph is not yet available.
@@ -1171,6 +1259,92 @@ func prettyJSON(raw []byte) string {
 		return string(raw)
 	}
 	return string(out)
+}
+
+type StickerSetRow struct {
+	// ID must round-trip through JSON as a string: these are Telegram-style
+	// snowflake ids, well past JS's 2^53 safe-integer limit.
+	ID        int64 `json:"ID,string"`
+	ShortName string
+	Title     string
+	Count     int
+	Kind      string
+	SystemKey string
+	Official  bool
+	Archived  bool
+	Installed bool
+	SortOrder int
+	CreatedAt time.Time
+	// CoverDocumentID is the first document in the set, used as a small
+	// thumbnail in the admin list. It is extracted from jsonb as text so it
+	// never passes through a JavaScript number.
+	CoverDocumentID string
+}
+
+// ListStickerSets lists non-system sticker/emoji sets. An empty kind lists all
+// non-system kinds; "system" packs stay hidden because dice/default/internal
+// resources are not hand-edited from this page.
+func (s *readStore) ListStickerSets(ctx context.Context, kind string) ([]StickerSetRow, error) {
+	kind = strings.TrimSpace(kind)
+	switch kind {
+	case "", string(domain.StickerSetKindStickers), string(domain.StickerSetKindEmoji), string(domain.StickerSetKindMasks):
+	default:
+		return nil, fmt.Errorf("invalid sticker set kind")
+	}
+	rows, err := s.pool.Query(ctx, `
+SELECT id, short_name, title, count, set_kind, system_key, official, archived, installed, sort_order, created_at,
+       COALESCE(document_ids->>0, '')
+FROM sticker_sets
+WHERE deleted = false AND set_kind <> 'system'
+  AND ($1 = '' OR set_kind = $1)
+ORDER BY set_kind, sort_order, id`, kind)
+	if err != nil {
+		return nil, fmt.Errorf("list sticker sets: %w", err)
+	}
+	defer rows.Close()
+	out := make([]StickerSetRow, 0)
+	for rows.Next() {
+		var item StickerSetRow
+		if err := rows.Scan(
+			&item.ID, &item.ShortName, &item.Title, &item.Count, &item.Kind, &item.SystemKey,
+			&item.Official, &item.Archived, &item.Installed, &item.SortOrder, &item.CreatedAt,
+			&item.CoverDocumentID,
+		); err != nil {
+			return nil, fmt.Errorf("scan sticker set: %w", err)
+		}
+		out = append(out, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate sticker sets: %w", err)
+	}
+	return out, nil
+}
+
+// StickerSetDocumentIDs returns document ids as strings, not int64, so the
+// browser cannot silently round 18-19 digit Telegram document ids.
+func (s *readStore) StickerSetDocumentIDs(ctx context.Context, setID int64) ([]string, error) {
+	var raw string
+	err := s.pool.QueryRow(ctx, `
+SELECT document_ids::text
+FROM sticker_sets
+WHERE id = $1 AND deleted = false`, setID).Scan(&raw)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("sticker set documents: %w", err)
+	}
+	var ids []int64
+	if raw != "" && raw != "[]" {
+		if err := json.Unmarshal([]byte(raw), &ids); err != nil {
+			return nil, fmt.Errorf("decode sticker set documents: %w", err)
+		}
+	}
+	out := make([]string, len(ids))
+	for i, id := range ids {
+		out[i] = strconv.FormatInt(id, 10)
+	}
+	return out, nil
 }
 
 // EmojiRow is a custom-emoji document projection for the admin emoji browser.

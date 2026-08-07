@@ -19,6 +19,7 @@ import (
 
 	"telesrv/internal/admin"
 	"telesrv/internal/domain"
+	"telesrv/internal/hoststats"
 )
 
 //go:embed web/dist
@@ -27,11 +28,12 @@ var webDist embed.FS
 type server struct {
 	cfg       uiConfig
 	read      *readStore
+	hostStats *hoststats.Poller
 	web       fs.FS
 	webServer http.Handler
 }
 
-func newServer(cfg uiConfig, read *readStore) (*server, error) {
+func newServer(cfg uiConfig, read *readStore, hostStats *hoststats.Poller) (*server, error) {
 	web, err := fs.Sub(webDist, "web/dist")
 	if err != nil {
 		return nil, err
@@ -39,6 +41,7 @@ func newServer(cfg uiConfig, read *readStore) (*server, error) {
 	return &server{
 		cfg:       cfg,
 		read:      read,
+		hostStats: hostStats,
 		web:       web,
 		webServer: http.FileServer(http.FS(web)),
 	}, nil
@@ -52,6 +55,7 @@ func (s *server) routes() http.Handler {
 	// itself, so nothing is stranded by protecting it.
 	mux.Handle("POST /api/logout", s.requireAuthAPI(http.HandlerFunc(s.handleAPILogout)))
 	mux.Handle("GET /api/session", s.requireAuthAPI(http.HandlerFunc(s.handleSession)))
+	mux.Handle("GET /api/dashboard", s.requireAuthAPI(http.HandlerFunc(s.handleDashboardAPI)))
 	mux.Handle("GET /api/accounts", s.requireAuthAPI(http.HandlerFunc(s.handleAccountsAPI)))
 	mux.Handle("GET /api/accounts/{id}", s.requireAuthAPI(http.HandlerFunc(s.handleAccountDetailAPI)))
 	mux.Handle("GET /api/accounts/{id}/avatar", s.requireAuthAPI(http.HandlerFunc(s.handleAccountAvatarAPI)))
@@ -64,6 +68,9 @@ func (s *server) routes() http.Handler {
 	mux.Handle("GET /api/premium/plans", s.premiumManage(s.handlePremiumPlansAPI))
 	mux.Handle("GET /api/emoji", s.requireAuthAPI(http.HandlerFunc(s.handleEmojiAPI)))
 	mux.Handle("GET /api/emoji/{id}/animation", s.requireAuthAPI(http.HandlerFunc(s.handleEmojiAnimationAPI)))
+	mux.Handle("GET /api/stickers", s.requireAuthAPI(http.HandlerFunc(s.handleStickerSetsAPI)))
+	mux.Handle("GET /api/stickers/{id}/documents", s.requireAuthAPI(http.HandlerFunc(s.handleStickerSetDocumentsAPI)))
+	mux.Handle("GET /api/stickers/documents/{id}/animation", s.requireAuthAPI(http.HandlerFunc(s.handleStickerDocumentAnimationAPI)))
 	mux.Handle("GET /api/gif-catalog", s.requireAuthAPI(http.HandlerFunc(s.handleGifCatalogAPI)))
 	mux.Handle("GET /api/gif-catalog/documents/{id}/preview", s.requireAuthAPI(http.HandlerFunc(s.handleGifCatalogPreviewAPI)))
 	mux.Handle("GET /api/messages", s.requireAuthAPI(http.HandlerFunc(s.handleMessagesAPI)))
@@ -111,6 +118,13 @@ func (s *server) routes() http.Handler {
 	mux.Handle("POST /api/actions/set-channel-avatar", s.requireAuthAPI(http.HandlerFunc(s.handleSetChannelAvatarAPI)))
 	mux.Handle("POST /api/actions/create-bot", s.requireAuthAPI(http.HandlerFunc(s.handleCreateBotAPI)))
 	mux.Handle("POST /api/actions/create-broadcast", s.requireAuthAPI(http.HandlerFunc(s.handleCreateBroadcastAPI)))
+	mux.Handle("POST /api/actions/set-sticker-set-archived", s.requireAuthAPI(http.HandlerFunc(s.handleSetStickerSetArchivedAPI)))
+	mux.Handle("POST /api/actions/set-sticker-set-sort-order", s.requireAuthAPI(http.HandlerFunc(s.handleSetStickerSetSortOrderAPI)))
+	mux.Handle("POST /api/actions/rename-sticker-set", s.requireAuthAPI(http.HandlerFunc(s.handleRenameStickerSetAPI)))
+	mux.Handle("POST /api/actions/delete-sticker-set", s.requireAuthAPI(http.HandlerFunc(s.handleDeleteStickerSetAPI)))
+	mux.Handle("POST /api/actions/create-sticker-set", s.requireAuthAPI(http.HandlerFunc(s.handleCreateStickerSetAPI)))
+	mux.Handle("POST /api/actions/add-sticker-to-set", s.requireAuthAPI(http.HandlerFunc(s.handleAddStickerToSetAPI)))
+	mux.Handle("POST /api/actions/remove-sticker-from-set", s.requireAuthAPI(http.HandlerFunc(s.handleRemoveStickerFromSetAPI)))
 	mux.Handle("POST /api/actions/create-gif-catalog-entry", s.requireAuthAPI(http.HandlerFunc(s.handleCreateGifCatalogEntryAPI)))
 	mux.Handle("POST /api/actions/set-gif-catalog-enabled", s.requireAuthAPI(http.HandlerFunc(s.handleSetGifCatalogEnabledAPI)))
 	mux.Handle("POST /api/actions/set-gif-catalog-sort-order", s.requireAuthAPI(http.HandlerFunc(s.handleSetGifCatalogSortOrderAPI)))
@@ -187,6 +201,31 @@ func (s *server) handleStorageStatsAPI(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, stats)
+}
+
+func (s *server) handleDashboardAPI(w http.ResponseWriter, r *http.Request) {
+	if s.read == nil {
+		writeAPIError(w, http.StatusServiceUnavailable, "read store is not configured")
+		return
+	}
+	counts, err := s.read.DashboardCounts(r.Context())
+	if err != nil {
+		writeAPIError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	storage, err := s.read.StorageStats(r.Context())
+	if err != nil {
+		writeAPIError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	resp := map[string]any{
+		"counts":  counts,
+		"storage": storage,
+	}
+	if s.hostStats != nil {
+		resp["host"] = s.hostStats.Snapshot()
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 type actorKey struct{}
@@ -370,6 +409,75 @@ func (s *server) handleEmojiAnimationAPI(w http.ResponseWriter, r *http.Request)
 	}
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.Header().Set("Cache-Control", "private, max-age=60")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(raw)
+}
+
+func (s *server) handleStickerSetsAPI(w http.ResponseWriter, r *http.Request) {
+	if s.read == nil {
+		writeAPIError(w, http.StatusServiceUnavailable, "read store is not configured")
+		return
+	}
+	rows, err := s.read.ListStickerSets(r.Context(), r.URL.Query().Get("kind"))
+	if err != nil {
+		writeAPIError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"rows": rows})
+}
+
+func (s *server) handleStickerSetDocumentsAPI(w http.ResponseWriter, r *http.Request) {
+	if s.read == nil {
+		writeAPIError(w, http.StatusServiceUnavailable, "read store is not configured")
+		return
+	}
+	setID, err := parseInt64(r.PathValue("id"))
+	if err != nil || setID <= 0 {
+		writeAPIError(w, http.StatusBadRequest, "invalid sticker set id")
+		return
+	}
+	ids, err := s.read.StickerSetDocumentIDs(r.Context(), setID)
+	if err != nil {
+		writeAPIError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"document_ids": ids})
+}
+
+func (s *server) handleStickerDocumentAnimationAPI(w http.ResponseWriter, r *http.Request) {
+	documentID, err := parseInt64(r.PathValue("id"))
+	if err != nil || documentID <= 0 {
+		writeAPIError(w, http.StatusBadRequest, "invalid document id")
+		return
+	}
+	req, err := http.NewRequestWithContext(r.Context(), http.MethodGet,
+		fmt.Sprintf("%s/v1/stickers/documents/%d/animation", s.cfg.AdminAPIURL, documentID), nil)
+	if err != nil {
+		writeAPIError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	req.Header.Set("Authorization", "Bearer "+s.cfg.AdminAPIToken)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		writeAPIError(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	defer resp.Body.Close()
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, domain.MaxStickerMaterialDocumentSize+1))
+	if err != nil || int64(len(raw)) > domain.MaxStickerMaterialDocumentSize {
+		writeAPIError(w, http.StatusBadGateway, "invalid sticker preview response")
+		return
+	}
+	if resp.StatusCode != http.StatusOK {
+		writeAPIError(w, resp.StatusCode, string(raw))
+		return
+	}
+	contentType := resp.Header.Get("Content-Type")
+	if contentType == "" {
+		contentType = "application/octet-stream"
+	}
+	w.Header().Set("Content-Type", contentType)
+	w.Header().Set("Cache-Control", "private, max-age=300")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(raw)
 }
@@ -866,6 +974,196 @@ func (s *server) handleCreateBroadcastAPI(w http.ResponseWriter, r *http.Request
 		UserIDs:     body.UserIDs,
 	}
 	result, err := s.callAdminAPI(r.Context(), "/v1/broadcasts/create", req)
+	writeCommandResultAPI(w, result, err)
+}
+
+type setStickerSetArchivedAPIRequest struct {
+	CommandID string    `json:"command_id"`
+	Reason    string    `json:"reason"`
+	Confirm   bool      `json:"confirm"`
+	SetID     flexInt64 `json:"set_id"`
+	Archived  bool      `json:"archived"`
+}
+
+func (s *server) handleSetStickerSetArchivedAPI(w http.ResponseWriter, r *http.Request) {
+	var body setStickerSetArchivedAPIRequest
+	if !decodeAction(w, r, &body) {
+		return
+	}
+	req := admin.SetStickerSetArchivedRequest{
+		CommandMeta: s.commandMetaFromAPI(r, body.CommandID, body.Reason, body.Confirm, "set-sticker-set-archived"),
+		SetID:       body.SetID.Int64(),
+		Archived:    body.Archived,
+	}
+	result, err := s.callAdminAPI(r.Context(), "/v1/stickers/set-archived", req)
+	writeCommandResultAPI(w, result, err)
+}
+
+type setStickerSetSortOrderAPIRequest struct {
+	CommandID string    `json:"command_id"`
+	Reason    string    `json:"reason"`
+	Confirm   bool      `json:"confirm"`
+	SetID     flexInt64 `json:"set_id"`
+	SortOrder int       `json:"sort_order"`
+}
+
+func (s *server) handleSetStickerSetSortOrderAPI(w http.ResponseWriter, r *http.Request) {
+	var body setStickerSetSortOrderAPIRequest
+	if !decodeAction(w, r, &body) {
+		return
+	}
+	req := admin.SetStickerSetSortOrderRequest{
+		CommandMeta: s.commandMetaFromAPI(r, body.CommandID, body.Reason, body.Confirm, "set-sticker-set-sort-order"),
+		SetID:       body.SetID.Int64(),
+		SortOrder:   body.SortOrder,
+	}
+	result, err := s.callAdminAPI(r.Context(), "/v1/stickers/set-sort-order", req)
+	writeCommandResultAPI(w, result, err)
+}
+
+type renameStickerSetAPIRequest struct {
+	CommandID string    `json:"command_id"`
+	Reason    string    `json:"reason"`
+	Confirm   bool      `json:"confirm"`
+	SetID     flexInt64 `json:"set_id"`
+	Title     string    `json:"title"`
+}
+
+func (s *server) handleRenameStickerSetAPI(w http.ResponseWriter, r *http.Request) {
+	var body renameStickerSetAPIRequest
+	if !decodeAction(w, r, &body) {
+		return
+	}
+	req := admin.RenameStickerSetRequest{
+		CommandMeta: s.commandMetaFromAPI(r, body.CommandID, body.Reason, body.Confirm, "rename-sticker-set"),
+		SetID:       body.SetID.Int64(),
+		Title:       body.Title,
+	}
+	result, err := s.callAdminAPI(r.Context(), "/v1/stickers/rename", req)
+	writeCommandResultAPI(w, result, err)
+}
+
+type deleteStickerSetAPIRequest struct {
+	CommandID string    `json:"command_id"`
+	Reason    string    `json:"reason"`
+	Confirm   bool      `json:"confirm"`
+	SetID     flexInt64 `json:"set_id"`
+}
+
+func (s *server) handleDeleteStickerSetAPI(w http.ResponseWriter, r *http.Request) {
+	var body deleteStickerSetAPIRequest
+	if !decodeAction(w, r, &body) {
+		return
+	}
+	req := admin.DeleteStickerSetRequest{
+		CommandMeta: s.commandMetaFromAPI(r, body.CommandID, body.Reason, body.Confirm, "delete-sticker-set"),
+		SetID:       body.SetID.Int64(),
+	}
+	result, err := s.callAdminAPI(r.Context(), "/v1/stickers/delete", req)
+	writeCommandResultAPI(w, result, err)
+}
+
+type stickerSetActionMeta struct {
+	CommandID string `json:"command_id"`
+	Reason    string `json:"reason"`
+	Confirm   bool   `json:"confirm"`
+	Title     string `json:"title,omitempty"`
+	ShortName string `json:"short_name,omitempty"`
+	Kind      string `json:"kind,omitempty"`
+	SetID     string `json:"set_id,omitempty"`
+	Emoji     string `json:"emoji"`
+	Keywords  string `json:"keywords,omitempty"`
+}
+
+func (s *server) handleCreateStickerSetAPI(w http.ResponseWriter, r *http.Request) {
+	body, header, data, ok := decodeStickerMultipart(w, r, "sticker file is required")
+	if !ok {
+		return
+	}
+	req := admin.CreateStickerSetRequest{
+		CommandMeta: s.commandMetaFromAPI(r, body.CommandID, body.Reason, body.Confirm, "create-sticker-set"),
+		Title:       body.Title,
+		ShortName:   body.ShortName,
+		Kind:        body.Kind,
+		Emoji:       body.Emoji,
+		Keywords:    body.Keywords,
+		FileName:    header.Filename,
+	}
+	result, err := s.callAdminMultipart(r.Context(), "/v1/stickers/create", req, header.Filename, data)
+	writeCommandResultAPI(w, result, err)
+}
+
+func (s *server) handleAddStickerToSetAPI(w http.ResponseWriter, r *http.Request) {
+	body, header, data, ok := decodeStickerMultipart(w, r, "sticker file is required")
+	if !ok {
+		return
+	}
+	setID, err := strconv.ParseInt(strings.TrimSpace(body.SetID), 10, 64)
+	if err != nil || setID <= 0 {
+		writeAPIError(w, http.StatusBadRequest, "invalid sticker set id")
+		return
+	}
+	req := admin.AddStickerToSetRequest{
+		CommandMeta: s.commandMetaFromAPI(r, body.CommandID, body.Reason, body.Confirm, "add-sticker-to-set"),
+		SetID:       setID,
+		Emoji:       body.Emoji,
+		Keywords:    body.Keywords,
+		FileName:    header.Filename,
+	}
+	result, err := s.callAdminMultipart(r.Context(), "/v1/stickers/add", req, header.Filename, data)
+	writeCommandResultAPI(w, result, err)
+}
+
+func decodeStickerMultipart(w http.ResponseWriter, r *http.Request, missingFileMessage string) (stickerSetActionMeta, *multipart.FileHeader, []byte, bool) {
+	defer r.Body.Close()
+	r.Body = http.MaxBytesReader(w, r.Body, domain.MaxStickerMaterialDocumentSize+(2<<20))
+	if err := r.ParseMultipartForm(1 << 20); err != nil {
+		writeAPIError(w, http.StatusBadRequest, "invalid multipart form: "+err.Error())
+		return stickerSetActionMeta{}, nil, nil, false
+	}
+	if r.MultipartForm != nil {
+		defer r.MultipartForm.RemoveAll()
+	}
+	var body stickerSetActionMeta
+	dec := json.NewDecoder(strings.NewReader(r.FormValue("metadata")))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&body); err != nil {
+		writeAPIError(w, http.StatusBadRequest, "invalid metadata: "+err.Error())
+		return stickerSetActionMeta{}, nil, nil, false
+	}
+	file, header, err := r.FormFile("file")
+	if err != nil {
+		writeAPIError(w, http.StatusBadRequest, missingFileMessage)
+		return stickerSetActionMeta{}, nil, nil, false
+	}
+	defer file.Close()
+	data, err := io.ReadAll(io.LimitReader(file, domain.MaxStickerMaterialDocumentSize+1))
+	if err != nil || len(data) == 0 || int64(len(data)) > domain.MaxStickerMaterialDocumentSize {
+		writeAPIError(w, http.StatusBadRequest, "sticker file is empty or too large")
+		return stickerSetActionMeta{}, nil, nil, false
+	}
+	return body, header, data, true
+}
+
+type removeStickerFromSetAPIRequest struct {
+	CommandID  string    `json:"command_id"`
+	Reason     string    `json:"reason"`
+	Confirm    bool      `json:"confirm"`
+	SetID      flexInt64 `json:"set_id"`
+	DocumentID flexInt64 `json:"document_id"`
+}
+
+func (s *server) handleRemoveStickerFromSetAPI(w http.ResponseWriter, r *http.Request) {
+	var body removeStickerFromSetAPIRequest
+	if !decodeAction(w, r, &body) {
+		return
+	}
+	req := admin.RemoveStickerFromSetRequest{
+		CommandMeta: s.commandMetaFromAPI(r, body.CommandID, body.Reason, body.Confirm, "remove-sticker-from-set"),
+		SetID:       body.SetID.Int64(),
+		DocumentID:  body.DocumentID.Int64(),
+	}
+	result, err := s.callAdminAPI(r.Context(), "/v1/stickers/remove", req)
 	writeCommandResultAPI(w, result, err)
 }
 

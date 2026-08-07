@@ -17,6 +17,7 @@ import {
   ShieldCheck,
   Smile,
   Stamp,
+  Sticker,
   Trophy,
   Users,
 	Gift,
@@ -117,6 +118,7 @@ export function Shell({
 		  <NavLink icon={<Database size={16} />} href="/storage" route={route} navigate={navigate}>{t("layout.storage")}</NavLink>
 			<NavLink icon={<Gift size={16} />} href="/gifts" route={route} navigate={navigate}>{t("layout.gifts")}</NavLink>
           <NavLink icon={<Send size={16} />} href="/give-gifts" route={route} navigate={navigate}>{t("layout.giveGifts")}</NavLink>
+          <NavLink icon={<Sticker size={16} />} href="/stickers" route={route} navigate={navigate}>{t("layout.stickers")}</NavLink>
           <NavLink icon={<Smile size={16} />} href="/emoji" route={route} navigate={navigate}>{t("layout.emoji")}</NavLink>
 		  <NavLink icon={<Film size={16} />} href="/gif-catalog" route={route} navigate={navigate}>{t("layout.gifCatalog")}</NavLink>
           <div className={`nav-section ${messagesActive ? "active" : ""} ${messagesOpen ? "open" : ""}`}>

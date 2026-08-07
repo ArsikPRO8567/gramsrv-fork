@@ -17,9 +17,13 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"telesrv/internal/config"
+	"telesrv/internal/hoststats"
 )
 
-const defaultAdminAPIAddr = "127.0.0.1:2599"
+const (
+	defaultAdminAPIAddr   = "127.0.0.1:2599"
+	hostStatsPollInterval = 5 * time.Second
+)
 
 func main() {
 	if err := run(); err != nil {
@@ -41,7 +45,10 @@ func run() error {
 	}
 	defer pool.Close()
 
-	srv, err := newServer(cfg, newReadStore(pool))
+	hs := hoststats.NewPoller(cfg.DiskStatsPath)
+	go hs.Run(ctx, hostStatsPollInterval)
+
+	srv, err := newServer(cfg, newReadStore(pool), hs)
 	if err != nil {
 		return err
 	}
@@ -71,6 +78,10 @@ type uiConfig struct {
 	Password      string
 	Token         string
 	SessionKey    []byte
+	// DiskStatsPath points the dashboard host-disk sampler at the local path
+	// that matters for the selected blob backend: permanent localfs storage or
+	// the S3 upload spool.
+	DiskStatsPath string
 	// Permissions is the right set a panel session is issued with, from
 	// TELESRV_ADMIN_UI_PERMISSIONS. The shipped default is the single wildcard
 	// entry, so introducing the permission model never locks an operator out of a
@@ -110,8 +121,16 @@ func loadConfig() (uiConfig, error) {
 		Password:      appCfg.AdminUIPassword,
 		Token:         appCfg.AdminUIToken,
 		SessionKey:    sum[:],
+		DiskStatsPath: dashboardDiskPath(appCfg),
 		Permissions:   appCfg.AdminUIPermissions,
 	}, nil
+}
+
+func dashboardDiskPath(cfg config.Config) string {
+	if strings.EqualFold(strings.TrimSpace(cfg.BlobBackendKind), "s3") && strings.TrimSpace(cfg.BlobStagingDir) != "" {
+		return cfg.BlobStagingDir
+	}
+	return cfg.BlobDir
 }
 
 func adminAPIURL(addr string) string {

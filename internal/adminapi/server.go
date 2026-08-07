@@ -68,6 +68,14 @@ type Service interface {
 	RevokeSessions(ctx context.Context, req admin.RevokeSessionsRequest) (admin.CommandResult, error)
 	DeletePrivateMessages(ctx context.Context, req admin.DeletePrivateMessagesRequest) (admin.CommandResult, error)
 	DeletePrivateHistory(ctx context.Context, req admin.DeletePrivateHistoryRequest) (admin.CommandResult, error)
+	SetStickerSetArchived(ctx context.Context, req admin.SetStickerSetArchivedRequest) (admin.CommandResult, error)
+	SetStickerSetSortOrder(ctx context.Context, req admin.SetStickerSetSortOrderRequest) (admin.CommandResult, error)
+	RenameStickerSet(ctx context.Context, req admin.RenameStickerSetRequest) (admin.CommandResult, error)
+	DeleteStickerSet(ctx context.Context, req admin.DeleteStickerSetRequest) (admin.CommandResult, error)
+	CreateStickerSet(ctx context.Context, req admin.CreateStickerSetRequest) (admin.CommandResult, error)
+	AddStickerToSet(ctx context.Context, req admin.AddStickerToSetRequest) (admin.CommandResult, error)
+	RemoveStickerFromSet(ctx context.Context, req admin.RemoveStickerFromSetRequest) (admin.CommandResult, error)
+	StickerDocumentAnimation(ctx context.Context, documentID int64) ([]byte, string, bool, error)
 	ImportStarGift(ctx context.Context, req admin.ImportStarGiftRequest) (admin.CommandResult, error)
 	ImportOfficialStarGift(ctx context.Context, req admin.ImportOfficialStarGiftRequest) (admin.CommandResult, error)
 	OfficialStarGifts(ctx context.Context) ([]officialgifts.GiftSummary, error)
@@ -230,6 +238,14 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("POST /v1/bots/export-token", s.authorized(PermissionBotTokenRead, s.handleExportBotToken))
 	mux.HandleFunc("POST /v1/messages/delete", s.authenticated(s.handleDeleteMessages))
 	mux.HandleFunc("POST /v1/messages/delete-history", s.authenticated(s.handleDeleteHistory))
+	mux.HandleFunc("POST /v1/stickers/set-archived", s.authenticated(s.handleSetStickerSetArchived))
+	mux.HandleFunc("POST /v1/stickers/set-sort-order", s.authenticated(s.handleSetStickerSetSortOrder))
+	mux.HandleFunc("POST /v1/stickers/rename", s.authenticated(s.handleRenameStickerSet))
+	mux.HandleFunc("POST /v1/stickers/delete", s.authenticated(s.handleDeleteStickerSet))
+	mux.HandleFunc("POST /v1/stickers/create", s.authenticated(s.handleCreateStickerSet))
+	mux.HandleFunc("POST /v1/stickers/add", s.authenticated(s.handleAddStickerToSet))
+	mux.HandleFunc("POST /v1/stickers/remove", s.authenticated(s.handleRemoveStickerFromSet))
+	mux.HandleFunc("GET /v1/stickers/documents/{id}/animation", s.authenticated(s.handleStickerDocumentAnimation))
 	mux.HandleFunc("POST /v1/gifts/import", s.authenticated(s.handleImportStarGift))
 	mux.HandleFunc("GET /v1/official-gifts", s.authenticated(s.handleOfficialStarGifts))
 	mux.HandleFunc("GET /v1/official-gifts/{id}/animation", s.authenticated(s.handleOfficialStarGiftAnimation))
@@ -747,6 +763,138 @@ func (s *Server) handleDeleteHistory(w http.ResponseWriter, r *http.Request) {
 	}
 	result, err := s.svc.DeletePrivateHistory(r.Context(), req)
 	writeCommandResult(w, result, err)
+}
+
+func (s *Server) handleSetStickerSetArchived(w http.ResponseWriter, r *http.Request) {
+	var req admin.SetStickerSetArchivedRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	result, err := s.svc.SetStickerSetArchived(r.Context(), req)
+	writeCommandResult(w, result, err)
+}
+
+func (s *Server) handleSetStickerSetSortOrder(w http.ResponseWriter, r *http.Request) {
+	var req admin.SetStickerSetSortOrderRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	result, err := s.svc.SetStickerSetSortOrder(r.Context(), req)
+	writeCommandResult(w, result, err)
+}
+
+func (s *Server) handleRenameStickerSet(w http.ResponseWriter, r *http.Request) {
+	var req admin.RenameStickerSetRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	result, err := s.svc.RenameStickerSet(r.Context(), req)
+	writeCommandResult(w, result, err)
+}
+
+func (s *Server) handleDeleteStickerSet(w http.ResponseWriter, r *http.Request) {
+	var req admin.DeleteStickerSetRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	result, err := s.svc.DeleteStickerSet(r.Context(), req)
+	writeCommandResult(w, result, err)
+}
+
+func (s *Server) handleCreateStickerSet(w http.ResponseWriter, r *http.Request) {
+	defer r.Body.Close()
+	r.Body = http.MaxBytesReader(w, r.Body, domain.MaxStickerMaterialDocumentSize+(2<<20))
+	if err := r.ParseMultipartForm(1 << 20); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid multipart form: "+err.Error())
+		return
+	}
+	if r.MultipartForm != nil {
+		defer r.MultipartForm.RemoveAll()
+	}
+	var req admin.CreateStickerSetRequest
+	dec := json.NewDecoder(strings.NewReader(r.FormValue("metadata")))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid metadata: "+err.Error())
+		return
+	}
+	file, header, err := r.FormFile("file")
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "sticker file is required")
+		return
+	}
+	defer file.Close()
+	data, err := io.ReadAll(io.LimitReader(file, domain.MaxStickerMaterialDocumentSize+1))
+	if err != nil || len(data) == 0 || int64(len(data)) > domain.MaxStickerMaterialDocumentSize {
+		writeError(w, http.StatusBadRequest, "sticker file is empty or too large")
+		return
+	}
+	req.FileName, req.Data = header.Filename, data
+	result, err := s.svc.CreateStickerSet(r.Context(), req)
+	writeCommandResult(w, result, err)
+}
+
+func (s *Server) handleAddStickerToSet(w http.ResponseWriter, r *http.Request) {
+	defer r.Body.Close()
+	r.Body = http.MaxBytesReader(w, r.Body, domain.MaxStickerMaterialDocumentSize+(2<<20))
+	if err := r.ParseMultipartForm(1 << 20); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid multipart form: "+err.Error())
+		return
+	}
+	if r.MultipartForm != nil {
+		defer r.MultipartForm.RemoveAll()
+	}
+	var req admin.AddStickerToSetRequest
+	dec := json.NewDecoder(strings.NewReader(r.FormValue("metadata")))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid metadata: "+err.Error())
+		return
+	}
+	file, header, err := r.FormFile("file")
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "sticker file is required")
+		return
+	}
+	defer file.Close()
+	data, err := io.ReadAll(io.LimitReader(file, domain.MaxStickerMaterialDocumentSize+1))
+	if err != nil || len(data) == 0 || int64(len(data)) > domain.MaxStickerMaterialDocumentSize {
+		writeError(w, http.StatusBadRequest, "sticker file is empty or too large")
+		return
+	}
+	req.FileName, req.Data = header.Filename, data
+	result, err := s.svc.AddStickerToSet(r.Context(), req)
+	writeCommandResult(w, result, err)
+}
+
+func (s *Server) handleRemoveStickerFromSet(w http.ResponseWriter, r *http.Request) {
+	var req admin.RemoveStickerFromSetRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	result, err := s.svc.RemoveStickerFromSet(r.Context(), req)
+	writeCommandResult(w, result, err)
+}
+
+func (s *Server) handleStickerDocumentAnimation(w http.ResponseWriter, r *http.Request) {
+	documentID, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil || documentID <= 0 {
+		writeError(w, http.StatusBadRequest, "invalid document id")
+		return
+	}
+	raw, contentType, found, err := s.svc.StickerDocumentAnimation(r.Context(), documentID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if !found {
+		writeError(w, http.StatusNotFound, "document animation not found")
+		return
+	}
+	w.Header().Set("Content-Type", contentType)
+	w.Header().Set("Cache-Control", "private, max-age=300")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(raw)
 }
 
 func (s *Server) handleImportStarGift(w http.ResponseWriter, r *http.Request) {

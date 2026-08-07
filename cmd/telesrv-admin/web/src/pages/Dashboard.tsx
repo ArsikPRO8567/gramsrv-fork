@@ -1,61 +1,266 @@
-import { CheckCircle2, ChevronRight, Clock3, FileJson, KeyRound, MessageSquareText, ShieldCheck, Users } from "lucide-react";
-import type { ReactNode } from "react";
-import { AppLink } from "../components/AppLink";
-import { StatusItem } from "../components/ui";
-import { useI18n } from "../i18n";
+import {
+  Activity,
+  AlertTriangle,
+  BadgeCheck,
+  Bot,
+  Cpu,
+  Database,
+  Film,
+  Flag,
+  HardDrive,
+  MemoryStick,
+  Radio,
+  Smile,
+  Sticker,
+  Users,
+  UsersRound
+} from "lucide-react";
+import { type ReactNode, useEffect, useState } from "react";
+import { api } from "../api";
+import { Alert } from "../components/ui";
+import { formatBytes, formatQuantity } from "../lib/format";
 import type { Navigate } from "../routing";
+import type { DashboardResponse, StorageStatsResponse } from "../types";
 
 export function Dashboard({ navigate }: { navigate: Navigate }) {
-  const { t } = useI18n();
+  const [data, setData] = useState<DashboardResponse | null>(null);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    let cancelled = false;
+    async function load() {
+      try {
+        const res = await api.dashboard();
+        if (!cancelled) {
+          setData(res);
+          setError("");
+        }
+      } catch (err) {
+        if (!cancelled) setError(err instanceof Error ? err.message : "Failed to load dashboard");
+      }
+    }
+    void load();
+    const timer = window.setInterval(() => void load(), 15000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, []);
+
+  const counts = data?.counts;
+  const storage = data?.storage;
+  const host = data?.host;
+
   return (
     <div className="dashboard-layout">
-      <section className="overview-band">
-        <div>
-          <div className="eyebrow">{t("dashboard.eyebrow")}</div>
-          <h2>{t("dashboard.title")}</h2>
-        </div>
-        <div className="overview-metrics">
-          <StatusItem label={t("dashboard.readPath")} value={t("dashboard.readPathValue")} tone="neutral" />
-          <StatusItem label={t("dashboard.writePath")} value="Admin API" tone="good" />
-          <StatusItem label={t("dashboard.executionPolicy")} value={t("dashboard.dryRunFirst")} tone="warn" />
-        </div>
-      </section>
-      <div className="command-grid">
-        <Launcher icon={<Users />} title={t("route.accounts")} text={t("dashboard.accountsText")} href="/accounts" navigate={navigate} />
-        <Launcher icon={<ShieldCheck />} title={t("route.channels")} text={t("dashboard.channelsText")} href="/channels" navigate={navigate} />
-        <Launcher icon={<MessageSquareText />} title={t("route.messages")} text={t("dashboard.messagesText")} href="/messages" navigate={navigate} />
-      </div>
-      <section className="work-strip">
-        <div className="strip-item"><CheckCircle2 size={16} /><span>{t("dashboard.strip.dryRun")}</span></div>
-        <div className="strip-item"><KeyRound size={16} /><span>{t("dashboard.strip.token")}</span></div>
-        <div className="strip-item"><Clock3 size={16} /><span>{t("dashboard.strip.pagination")}</span></div>
-        <div className="strip-item"><FileJson size={16} /><span>{t("dashboard.strip.snapshot")}</span></div>
-      </section>
+      {error && <Alert>{error}</Alert>}
+
+      <Section title="Needs attention">
+        <StatTile
+          icon={<Flag />}
+          label="Pending reports"
+          value={counts ? formatQuantity(String(counts.PendingReports)) : "…"}
+          tone={counts && counts.PendingReports > 0 ? "warn" : "good"}
+          href="/moderation"
+          navigate={navigate}
+        />
+        <StatTile
+          icon={<BadgeCheck />}
+          label="Verification requests"
+          value={counts ? formatQuantity(String(counts.PendingVerifications)) : "…"}
+          tone={counts && counts.PendingVerifications > 0 ? "warn" : "good"}
+          href="/verification"
+          navigate={navigate}
+        />
+      </Section>
+
+      <Section title="People & chats">
+        <StatTile icon={<Users />} label="Users" value={counts ? formatQuantity(String(counts.Users)) : "…"} href="/accounts" navigate={navigate} />
+        <StatTile
+          icon={<Activity />}
+          label="Online now"
+          value={counts ? formatQuantity(String(counts.OnlineUsers)) : "…"}
+          sub="last 5 min"
+          href="/accounts"
+          navigate={navigate}
+        />
+        <StatTile icon={<Bot />} label="Bots" value={counts ? formatQuantity(String(counts.Bots)) : "…"} href="/bots" navigate={navigate} />
+        <StatTile
+          icon={<Radio />}
+          label="Channels"
+          value={counts ? formatQuantity(String(counts.BroadcastChannels)) : "…"}
+          href="/channels"
+          navigate={navigate}
+        />
+        <StatTile
+          icon={<UsersRound />}
+          label="Supergroups"
+          value={counts ? formatQuantity(String(counts.Supergroups)) : "…"}
+          href="/channels"
+          navigate={navigate}
+        />
+      </Section>
+
+      <Section title="Content">
+        <StatTile
+          icon={<Sticker />}
+          label="Sticker packs"
+          value={counts ? formatQuantity(String(counts.StickerSets)) : "…"}
+          href="/stickers"
+          navigate={navigate}
+        />
+        <StatTile
+          icon={<Smile />}
+          label="Emoji packs"
+          value={counts ? formatQuantity(String(counts.EmojiSets)) : "…"}
+          href="/emoji"
+          navigate={navigate}
+        />
+        <StatTile
+          icon={<Film />}
+          label="GIFs"
+          value={counts ? formatQuantity(String(counts.Gifs)) : "…"}
+          sub="saved by users"
+          href="/gif-catalog"
+          navigate={navigate}
+        />
+        <StatTile
+          icon={<Database />}
+          label="Media storage used"
+          value={storage ? formatBytes(storage.PhysicalBytes) : "…"}
+          sub={storage ? storageBackendLabel(storage) : undefined}
+          href="/storage"
+          navigate={navigate}
+        />
+      </Section>
+
+      <Section title="Server health" hint={host?.Ready ? undefined : "waiting for first sample…"}>
+        <UsageTile
+          icon={<Cpu />}
+          label="CPU load"
+          percent={host?.Ready ? host.CPUPercent : undefined}
+          valueText={host?.Ready ? `${host.CPUPercent.toFixed(0)}%` : "…"}
+        />
+        <UsageTile
+          icon={<MemoryStick />}
+          label="RAM used"
+          percent={host?.Ready && host.MemTotalBytes > 0 ? (host.MemUsedBytes / host.MemTotalBytes) * 100 : undefined}
+          valueText={host?.Ready ? formatBytes(String(host.MemUsedBytes)) : "…"}
+          sub={host?.Ready ? `of ${formatBytes(String(host.MemTotalBytes))}` : undefined}
+        />
+        <UsageTile
+          icon={<HardDrive />}
+          label="Disk free"
+          percent={
+            host?.Ready && host.DiskTotalBytes > 0
+              ? ((host.DiskTotalBytes - host.DiskFreeBytes) / host.DiskTotalBytes) * 100
+              : undefined
+          }
+          valueText={host?.Ready ? formatBytes(String(host.DiskFreeBytes)) : "…"}
+          sub={host?.Ready ? `of ${formatBytes(String(host.DiskTotalBytes))}` : undefined}
+          warnAbove={85}
+        />
+      </Section>
     </div>
   );
 }
 
-function Launcher({
+function storageBackendLabel(storage: StorageStatsResponse): string {
+  const backends = storage.Backends ?? [];
+  if (backends.length === 1) return `${backends[0].Backend} backend`;
+  if (backends.length > 1) return `${backends.length} backends`;
+  return "no media objects";
+}
+
+function Section({ title, hint, children }: { title: string; hint?: string; children: ReactNode }) {
+  return (
+    <div className="dashboard-section">
+      <div className="dashboard-section-title">
+        {title}
+        {hint && <span>{hint}</span>}
+      </div>
+      <div className="dashboard-grid">{children}</div>
+    </div>
+  );
+}
+
+type Tone = "neutral" | "good" | "warn" | "danger";
+
+function StatTile({
   icon,
-  title,
-  text,
+  label,
+  value,
+  sub,
+  tone = "neutral",
   href,
   navigate
 }: {
   icon: ReactNode;
-  title: string;
-  text: string;
-  href: string;
-  navigate: Navigate;
+  label: string;
+  value: string;
+  sub?: string;
+  tone?: Tone;
+  href?: string;
+  navigate?: Navigate;
 }) {
+  const toneClass = tone === "neutral" ? "" : ` ${tone}`;
+  const body = (
+    <>
+      <div className="stat-tile-head">
+        <span className="stat-tile-icon">{icon}</span>
+        {tone === "warn" && <AlertTriangle size={15} className="stat-tile-open" />}
+      </div>
+      <div className="stat-tile-value">{value}</div>
+      <div className="stat-tile-label">{label}</div>
+      {sub && <div className="stat-tile-sub">{sub}</div>}
+    </>
+  );
+  if (href && navigate) {
+    return (
+      <a
+        className={`stat-tile clickable${toneClass}`}
+        href={href}
+        onClick={(event) => {
+          event.preventDefault();
+          navigate(href);
+        }}
+      >
+        {body}
+      </a>
+    );
+  }
+  return <div className={`stat-tile${toneClass}`}>{body}</div>;
+}
+
+function UsageTile({
+  icon,
+  label,
+  percent,
+  valueText,
+  sub,
+  warnAbove = 90
+}: {
+  icon: ReactNode;
+  label: string;
+  percent?: number;
+  valueText: string;
+  sub?: string;
+  warnAbove?: number;
+}) {
+  const clamped = percent === undefined ? 0 : Math.max(0, Math.min(100, percent));
+  const tone: Tone = percent === undefined ? "neutral" : percent >= warnAbove ? "danger" : percent >= warnAbove - 15 ? "warn" : "neutral";
+  const toneClass = tone === "neutral" ? "" : ` ${tone}`;
   return (
-    <AppLink className="launcher" href={href} navigate={navigate}>
-      <span className="launcher-icon">{icon}</span>
-      <span className="launcher-copy">
-        <strong>{title}</strong>
-        <span>{text}</span>
-      </span>
-      <ChevronRight size={16} />
-    </AppLink>
+    <div className={`stat-tile${toneClass}`}>
+      <div className="stat-tile-head">
+        <span className="stat-tile-icon">{icon}</span>
+      </div>
+      <div className="stat-tile-value">{valueText}</div>
+      <div className="stat-tile-label">{label}</div>
+      {sub && <div className="stat-tile-sub">{sub}</div>}
+      <div className="stat-tile-bar">
+        <span style={{ width: `${clamped}%` }} />
+      </div>
+    </div>
   );
 }

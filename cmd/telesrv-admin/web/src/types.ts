@@ -798,6 +798,53 @@ export type StorageStatsResponse = {
   Backends: StorageBackendRow[] | null;
 };
 
+export type DashboardCounts = {
+  Users: number;
+  OnlineUsers: number;
+  Bots: number;
+  BroadcastChannels: number;
+  Supergroups: number;
+  StickerSets: number;
+  EmojiSets: number;
+  Gifs: number;
+  PendingReports: number;
+  PendingVerifications: number;
+};
+
+export type HostStatsSnapshot = {
+  CPUPercent: number;
+  MemUsedBytes: number;
+  MemTotalBytes: number;
+  DiskFreeBytes: number;
+  DiskTotalBytes: number;
+  Ready: boolean;
+};
+
+export type DashboardResponse = {
+  counts: DashboardCounts;
+  storage: StorageStatsResponse;
+  host?: HostStatsSnapshot;
+};
+
+export type StickerSetRow = {
+  // Telegram snowflake ids exceed JavaScript's safe-integer range, so the BFF
+  // returns them as decimal strings.
+  ID: string;
+  ShortName: string;
+  Title: string;
+  Count: number;
+  Kind: string;
+  SystemKey: string;
+  Official: boolean;
+  Archived: boolean;
+  Installed: boolean;
+  SortOrder: number;
+  CreatedAt: string;
+  CoverDocumentID: string;
+};
+
+export type StickerSetListResponse = { rows: StickerSetRow[] };
+
 export type AccountListResponse = {
   query: string;
   limit: number;
