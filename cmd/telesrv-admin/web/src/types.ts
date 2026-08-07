@@ -778,6 +778,24 @@ export type CommandResult = {
   error?: string;
 };
 
+export type StorageBackendRow = {
+  Backend: string;
+  PhysicalBytes: string;
+  LogicalBytes: string;
+  ObjectCount: string;
+  ReferenceCount: string;
+};
+
+export type StorageStatsResponse = {
+  PhysicalBytes: string;
+  LogicalBytes: string;
+  ObjectCount: string;
+  ReferenceCount: string;
+  DocumentCount: string;
+  PhotoCount: string;
+  Backends: StorageBackendRow[] | null;
+};
+
 export type AccountListResponse = {
   query: string;
   limit: number;

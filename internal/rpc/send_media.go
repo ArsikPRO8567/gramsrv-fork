@@ -1145,6 +1145,8 @@ func mediaUploadErr(err error) error {
 		return photoInvalidErr()
 	case errors.Is(err, domain.ErrDocumentInvalid):
 		return mediaInvalidErr()
+	case errors.Is(err, domain.ErrStorageFull):
+		return storageFullErr()
 	default:
 		return internalErr()
 	}

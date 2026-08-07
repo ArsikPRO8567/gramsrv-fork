@@ -42,6 +42,86 @@ func TestLoadDefaultsAdvertiseIPToLoopback(t *testing.T) {
 	if cfg.PremiumPromoSeedDir != "data/premium-promo" {
 		t.Fatalf("PremiumPromoSeedDir = %q, want data/premium-promo", cfg.PremiumPromoSeedDir)
 	}
+	if cfg.BlobBackendKind != string(domain.MediaBackendLocalFS) {
+		t.Fatalf("BlobBackendKind = %q, want localfs", cfg.BlobBackendKind)
+	}
+	if cfg.BlobDir != "data/blobs" {
+		t.Fatalf("BlobDir = %q, want data/blobs", cfg.BlobDir)
+	}
+	if !cfg.StorageLowSpaceGuardEnable || cfg.StorageMinFreeBytes != 1<<30 || cfg.StorageMaxTotalBytes != 0 || cfg.StorageUsageRefreshInterval != time.Minute {
+		t.Fatalf("unexpected storage capacity defaults: enabled=%v min=%d max=%d interval=%v", cfg.StorageLowSpaceGuardEnable, cfg.StorageMinFreeBytes, cfg.StorageMaxTotalBytes, cfg.StorageUsageRefreshInterval)
+	}
+}
+
+func TestLoadS3BlobStorageConfig(t *testing.T) {
+	disableDefaultConfigFile(t)
+	t.Setenv("TELESRV_BLOB_BACKEND", "s3")
+	t.Setenv("TELESRV_BLOB_STAGING_DIR", `D:\staging\telesrv`)
+	t.Setenv("TELESRV_S3_ENDPOINT", "minio.example.test:9000")
+	t.Setenv("TELESRV_S3_BUCKET", "telesrv-media")
+	t.Setenv("TELESRV_S3_ACCESS_KEY_ID", "access")
+	t.Setenv("TELESRV_S3_SECRET_ACCESS_KEY", "secret")
+	t.Setenv("TELESRV_S3_USE_SSL", "false")
+	t.Setenv("TELESRV_S3_PATH_STYLE", "true")
+	t.Setenv("TELESRV_S3_CREATE_BUCKET", "true")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.BlobBackendKind != "s3" || cfg.S3Endpoint != "minio.example.test:9000" || cfg.S3Bucket != "telesrv-media" {
+		t.Fatalf("unexpected s3 config: backend=%q endpoint=%q bucket=%q", cfg.BlobBackendKind, cfg.S3Endpoint, cfg.S3Bucket)
+	}
+	if cfg.S3UseSSL || !cfg.S3PathStyle || !cfg.S3CreateBucket {
+		t.Fatalf("unexpected s3 flags: ssl=%v path_style=%v create=%v", cfg.S3UseSSL, cfg.S3PathStyle, cfg.S3CreateBucket)
+	}
+}
+
+func TestLoadRejectsInvalidBlobStorageConfig(t *testing.T) {
+	tests := []struct {
+		name     string
+		backend  string
+		endpoint string
+		bucket   string
+		access   string
+		secret   string
+	}{
+		{name: "unknown backend", backend: "mirror"},
+		{name: "missing s3 endpoint", backend: "s3", bucket: "media", access: "access", secret: "secret"},
+		{name: "endpoint has scheme", backend: "s3", endpoint: "http://minio:9000", bucket: "media", access: "access", secret: "secret"},
+		{name: "missing s3 bucket", backend: "s3", endpoint: "minio:9000", access: "access", secret: "secret"},
+		{name: "missing s3 credentials", backend: "s3", endpoint: "minio:9000", bucket: "media"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			disableDefaultConfigFile(t)
+			t.Setenv("TELESRV_BLOB_BACKEND", tt.backend)
+			t.Setenv("TELESRV_S3_ENDPOINT", tt.endpoint)
+			t.Setenv("TELESRV_S3_BUCKET", tt.bucket)
+			t.Setenv("TELESRV_S3_ACCESS_KEY_ID", tt.access)
+			t.Setenv("TELESRV_S3_SECRET_ACCESS_KEY", tt.secret)
+			if _, err := Load(); err == nil {
+				t.Fatal("invalid blob storage config accepted")
+			}
+		})
+	}
+}
+
+func TestLoadRejectsInvalidStorageCapacityConfig(t *testing.T) {
+	for _, item := range []struct{ key, value string }{
+		{"TELESRV_STORAGE_MIN_FREE_BYTES", "-1"},
+		{"TELESRV_STORAGE_MAX_TOTAL_BYTES", "-1"},
+		{"TELESRV_STORAGE_USAGE_REFRESH_INTERVAL", "0s"},
+		{"TELESRV_STORAGE_USAGE_REFRESH_INTERVAL", "-1s"},
+	} {
+		t.Run(item.key+"="+item.value, func(t *testing.T) {
+			disableDefaultConfigFile(t)
+			t.Setenv(item.key, item.value)
+			if _, err := Load(); err == nil {
+				t.Fatalf("Load accepted invalid %s=%s", item.key, item.value)
+			}
+		})
+	}
 }
 
 func TestLoadUpdateServiceConfig(t *testing.T) {

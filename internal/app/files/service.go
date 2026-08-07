@@ -116,6 +116,15 @@ func WithUploadPartQuota(quota domain.UploadPartQuota) Option {
 	}
 }
 
+// WithUploadPartBackend separates transient upload staging from permanent blob
+// storage. S3 mode uses a local implementation here without making localfs a
+// permanent read/write fallback.
+func WithUploadPartBackend(backend UploadPartBackend) Option {
+	return func(s *Service) {
+		s.uploadParts = backend
+	}
+}
+
 // NewService 创建 files 服务。dc 是本 server 的 DC id，写入新建 document/photo 的 dc_id。
 func NewService(media store.MediaStore, blobs BlobBackend, dc int, opts ...Option) *Service {
 	s := &Service{
@@ -353,6 +362,12 @@ func (s *Service) GetFile(ctx context.Context, req domain.FileDownloadRequest) (
 			return domain.FileChunk{}, false, nil
 		}
 		blob = res.blob
+	}
+	if blob.Backend != domain.MediaBackend(s.blobs.Name()) {
+		return domain.FileChunk{}, false, fmt.Errorf(
+			"blob backend mismatch for %q: stored=%q configured=%q",
+			blob.LocationKey, blob.Backend, s.blobs.Name(),
+		)
 	}
 	if blob.Size > 0 && blob.Size <= blobBytesCacheMaxEntryBytes {
 		cacheLog.byteCacheEligible = true

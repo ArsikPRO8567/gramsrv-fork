@@ -25,6 +25,7 @@ import { BotVerificationPage } from "./BotVerificationPage";
 import { BotVerificationRequestPage } from "./BotVerificationRequestPage";
 import { VerificationDetailPage } from "./VerificationDetailPage";
 import { VerificationPage } from "./VerificationPage";
+import { StoragePage } from "./StoragePage";
 import {
   PermissionGate,
   permissionBotVerificationReview,
@@ -89,6 +90,9 @@ export function Routes({ route, navigate }: { route: RouteState; navigate: Navig
   }
   if (route.path === "/account-ratings") {
     return <AccountRatingsPage navigate={navigate} />;
+  }
+  if (route.path === "/storage") {
+    return <StoragePage />;
   }
   if (route.path === "/monetization" || route.path === "/premium") {
     return (

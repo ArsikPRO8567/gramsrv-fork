@@ -377,12 +377,28 @@ active key。不要手工编辑 manifest 或 PEM，不要在各实例上分别�
 | `TELESRV_REDIS_DB` | int / `0` | Redis 逻辑库编号。 |
 | `TELESRV_LANGPACK_SEED_DIR` | path / `data/langpack` | TDesktop `.strings` 语言包 seed 目录。 |
 | `TELESRV_OFFICIAL_GIFTS_DIR` | path / `data/official-gifts` | `cmd/giftfetch` 生成的只读官方礼物快照；供管理后台选择、验哈希并显式导入。 |
-| `TELESRV_BLOB_DIR` | path / `data/blobs` | 本地开发 blob backend 的媒体字节根目录。 |
+| `TELESRV_BLOB_BACKEND` | enum / `localfs` | 唯一永久媒体后端：`localfs` 或 `s3`。不会跨后端回退、双读或双写；库内已有另一 backend 的 `file_blobs` 时启动失败。 |
+| `TELESRV_BLOB_DIR` | path / `data/blobs` | `localfs` 永久媒体与临时上传分片根目录；`s3` 模式不会从此目录回退读取。 |
+| `TELESRV_BLOB_STAGING_DIR` | path / `data/blob-staging` | `s3` 模式的本地临时上传分片与写入 spool；不是永久后端。 |
+| `TELESRV_S3_ENDPOINT` | host[:port] / 空 | `s3` 模式必填，不含 `http://`/`https://`。 |
+| `TELESRV_S3_REGION` | string / `us-east-1` | S3 region。 |
+| `TELESRV_S3_BUCKET` | string / 空 | `s3` 模式必填的永久媒体 bucket。 |
+| `TELESRV_S3_ACCESS_KEY_ID` | secret / 空 | `s3` 模式必填；无弱默认凭据。 |
+| `TELESRV_S3_SECRET_ACCESS_KEY` | secret / 空 | `s3` 模式必填；不得写入日志。 |
+| `TELESRV_S3_USE_SSL` | bool / `true` | S3 endpoint 使用 TLS。 |
+| `TELESRV_S3_PATH_STYLE` | bool / `false` | 强制 path-style bucket 地址；本地 MinIO 常设为 `true`。 |
+| `TELESRV_S3_CREATE_BUCKET` | bool / `false` | 仅显式为 `true` 时允许启动创建缺失 bucket；否则缺桶即失败。 |
+| `TELESRV_STORAGE_LOW_SPACE_GUARD_ENABLE` | bool / `true` | 启用存储容量门禁；启动时必须先取得有效快照，运行期刷新失败保留最后一个有效快照并告警。 |
+| `TELESRV_STORAGE_MIN_FREE_BYTES` | int64 / `1073741824` | 本地文件系统最小剩余字节。`localfs` 保护永久文件与分片；`s3` 保护本地分片和 S3 写入 spool。`0` 关闭该维度。 |
+| `TELESRV_STORAGE_MAX_TOTAL_BYTES` | int64 / `0` | S3 永久后端预算，按 `file_blobs` 中去重后的唯一 `object_key` 字节统计；`0` 不限制。它不是 bucket 实际账单用量。 |
+| `TELESRV_STORAGE_USAGE_REFRESH_INTERVAL` | duration / `1m` | 容量快照刷新周期；容量门禁启用时必须为正数。 |
 | `TELESRV_STICKER_SEED_DIR` | path / `data/sticker-seed` | 导入 documents、sticker sets、blob 的贴纸/reaction seed 目录。 |
 | `TELESRV_STICKER_SEED_MAX_SETS` | int / `300` | 启动时导入的常规贴纸集上限；`<=0` 表示不限。 |
 | `TELESRV_PREMIUM_PROMO_SEED_DIR` | path / `data/premium-promo` | `help.getPremiumPromo` 导出的 manifest、MP4 视频与 JPEG 缩略图目录。目录缺失时保留无视频兼容响应；目录存在但内容非法或不完整时启动失败。 |
 
 语言包 seed 以文件 manifest 为事实源。新增语言时放入 `data/langpack/<pack>/<pack>_<lang>_v<version>.strings` 并重启 `telesrv`；`pack` 必须与所在一级目录一致，允许 Telegram 已使用的字母、数字、`-` 与 `_`（例如 `android_x`），`lang` 会统一为小写、连字符形式（例如 `pt_BR` 归一为 `pt-br`）。同一语言存在多个文件时只读取最高版本。修改已有语言的有效内容必须提高版本；同版本有效内容变化或版本倒退会阻止启动。删除语言文件或整个 pack 子目录后，下次重启会原子移除对应数据库目录和字符串。启动先流式计算源文件 SHA-256；未变化文件复用上次原子 manifest，不解析字符串也不写库，只有新增或变化文件才解析并通过 PostgreSQL `COPY` 整包替换。
+
+对象存储的运行不变量、参考审计、切换门禁与验证矩阵见 [object-storage.md](object-storage.md)。在显式迁移工具完成复制、验 hash 并更新 `file_blobs.backend` 之前，不得直接翻转 `TELESRV_BLOB_BACKEND`。
 
 ## 5. 登录、OTP Provider、SMTP 与 passkey
 

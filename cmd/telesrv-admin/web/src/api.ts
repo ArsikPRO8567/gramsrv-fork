@@ -32,6 +32,7 @@ import type {
   PremiumPlansResponse,
   StarGiftCollectiblePreview,
   StarGiftListResponse,
+  StorageStatsResponse,
   VerificationApplicationDetail,
   VerificationApplicationListResponse,
   VerificationCountsResponse
@@ -169,6 +170,7 @@ export const api = {
     request<AccountRatingListResponse>(`/api/account-ratings?${params.toString()}`),
   accountRating: (userID: string) =>
     request<AccountRatingDetail>(`/api/account-ratings/${encodeURIComponent(userID)}`),
+  storageStats: () => request<StorageStatsResponse>("/api/storage/stats"),
   verificationApplications: (params: URLSearchParams) =>
     request<VerificationApplicationListResponse>(`/api/verification/applications?${params.toString()}`),
   // The application id is an int64 decimal string end to end, so it is never

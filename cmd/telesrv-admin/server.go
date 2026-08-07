@@ -77,6 +77,7 @@ func (s *server) routes() http.Handler {
 	mux.Handle("GET /api/collectible-phones/{id}", s.requireAuthAPI(http.HandlerFunc(s.handleCollectiblePhoneDetailAPI)))
 	mux.Handle("GET /api/account-ratings", s.requireAuthAPI(http.HandlerFunc(s.handleAccountRatingsAPI)))
 	mux.Handle("GET /api/account-ratings/{user_id}", s.requireAuthAPI(http.HandlerFunc(s.handleAccountRatingDetailAPI)))
+	mux.Handle("GET /api/storage/stats", s.requireAuthAPI(http.HandlerFunc(s.handleStorageStatsAPI)))
 	mux.Handle("GET /api/moderation/cases", s.requireAuthAPI(http.HandlerFunc(s.handleModerationCasesAPI)))
 	mux.Handle("GET /api/moderation/cases/{id}", s.requireAuthAPI(http.HandlerFunc(s.handleModerationCaseAPI)))
 	mux.Handle("GET /api/moderation/reports/{id}", s.requireAuthAPI(http.HandlerFunc(s.handleModerationReportAPI)))
@@ -157,6 +158,19 @@ func (s *server) routes() http.Handler {
 	})
 	mux.HandleFunc("/", s.handleApp)
 	return mux
+}
+
+func (s *server) handleStorageStatsAPI(w http.ResponseWriter, r *http.Request) {
+	if s.read == nil {
+		writeAPIError(w, http.StatusServiceUnavailable, "read store is not configured")
+		return
+	}
+	stats, err := s.read.StorageStats(r.Context())
+	if err != nil {
+		writeAPIError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, stats)
 }
 
 type actorKey struct{}

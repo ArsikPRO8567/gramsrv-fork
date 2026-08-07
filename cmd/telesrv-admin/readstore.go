@@ -42,6 +42,78 @@ const (
 	botVerificationListMaxLimit     = 200
 )
 
+type StorageBackendRow struct {
+	Backend        string
+	PhysicalBytes  int64 `json:"PhysicalBytes,string"`
+	LogicalBytes   int64 `json:"LogicalBytes,string"`
+	ObjectCount    int64 `json:"ObjectCount,string"`
+	ReferenceCount int64 `json:"ReferenceCount,string"`
+}
+
+type StorageStatsRow struct {
+	PhysicalBytes  int64 `json:"PhysicalBytes,string"`
+	LogicalBytes   int64 `json:"LogicalBytes,string"`
+	ObjectCount    int64 `json:"ObjectCount,string"`
+	ReferenceCount int64 `json:"ReferenceCount,string"`
+	DocumentCount  int64 `json:"DocumentCount,string"`
+	PhotoCount     int64 `json:"PhotoCount,string"`
+	Backends       []StorageBackendRow
+}
+
+// StorageStats is deliberately read-only and derives physical usage from
+// content-addressed object keys. It does not claim that an unreferenced object
+// is safe to delete; the complete media-reference graph is not yet available.
+func (s *readStore) StorageStats(ctx context.Context) (StorageStatsRow, error) {
+	rows, err := s.pool.Query(ctx, `
+WITH objects AS (
+    SELECT backend, object_key,
+           MIN(size)::bigint AS min_size,
+           MAX(size)::bigint AS max_size,
+           COUNT(*)::bigint AS reference_count
+    FROM file_blobs
+    GROUP BY backend, object_key
+)
+SELECT backend,
+       COALESCE(SUM(max_size), 0)::bigint AS physical_bytes,
+       COALESCE(SUM(max_size * reference_count), 0)::bigint AS logical_bytes,
+       COUNT(*)::bigint AS object_count,
+       COALESCE(SUM(reference_count), 0)::bigint AS reference_count,
+       COALESCE(bool_and(min_size = max_size), true) AS sizes_consistent
+FROM objects
+GROUP BY backend
+ORDER BY backend`)
+	if err != nil {
+		return StorageStatsRow{}, fmt.Errorf("query storage backend stats: %w", err)
+	}
+	defer rows.Close()
+	stats := StorageStatsRow{Backends: make([]StorageBackendRow, 0, 2)}
+	for rows.Next() {
+		var item StorageBackendRow
+		var consistent bool
+		if err := rows.Scan(&item.Backend, &item.PhysicalBytes, &item.LogicalBytes, &item.ObjectCount, &item.ReferenceCount, &consistent); err != nil {
+			return StorageStatsRow{}, fmt.Errorf("scan storage backend stats: %w", err)
+		}
+		if !consistent {
+			return StorageStatsRow{}, fmt.Errorf("file_blobs contains inconsistent sizes for shared %s object keys", item.Backend)
+		}
+		stats.PhysicalBytes += item.PhysicalBytes
+		stats.LogicalBytes += item.LogicalBytes
+		stats.ObjectCount += item.ObjectCount
+		stats.ReferenceCount += item.ReferenceCount
+		stats.Backends = append(stats.Backends, item)
+	}
+	if err := rows.Err(); err != nil {
+		return StorageStatsRow{}, fmt.Errorf("iterate storage backend stats: %w", err)
+	}
+	if err := s.pool.QueryRow(ctx, `SELECT count(*)::bigint FROM documents`).Scan(&stats.DocumentCount); err != nil {
+		return StorageStatsRow{}, fmt.Errorf("count storage documents: %w", err)
+	}
+	if err := s.pool.QueryRow(ctx, `SELECT count(*)::bigint FROM photos`).Scan(&stats.PhotoCount); err != nil {
+		return StorageStatsRow{}, fmt.Errorf("count storage photos: %w", err)
+	}
+	return stats, nil
+}
+
 // errReadNotFound reports a detail row that does not exist, so the API layer can
 // answer 404 without importing the driver's sentinel.
 var errReadNotFound = errors.New("read row not found")

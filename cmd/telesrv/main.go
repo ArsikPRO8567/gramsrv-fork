@@ -576,6 +576,15 @@ func run(logger *zap.Logger) error {
 		zap.Bool("schema_dirty", migrationStatus.Dirty),
 		zap.Bool("schema_empty", migrationStatus.Empty),
 	)
+	blobRuntimeLock, err := postgres.AcquireBlobRuntimeLock(ctx, cfg.PostgresDSN)
+	if err != nil {
+		return fmt.Errorf("acquire blob runtime lock: %w", err)
+	}
+	defer func() {
+		if err := blobRuntimeLock.Close(); err != nil {
+			logger.Error("release blob runtime lock", zap.Error(err))
+		}
+	}()
 	pool, err := postgres.Open(ctx, cfg.PostgresDSN,
 		postgres.WithMaxConns(cfg.PostgresMaxConns),
 		postgres.WithMinConns(cfg.PostgresMinConns),
@@ -716,16 +725,38 @@ func run(logger *zap.Logger) error {
 	cachedPhotos := userprojection.NewCachedPhotoProvider(mediaStore, userprojection.DefaultPhotoCacheTTL)
 	privacyStore := privacyapp.NewCachedPrivacyStore(postgres.NewPrivacyStore(pool), 0)
 	storyStore := postgres.NewStoryStore(pool)
-	blobBackend, err := filesapp.NewLocalFS(cfg.BlobDir)
+	if err := requireConfiguredBlobBackend(ctx, mediaStore, cfg.BlobBackendKind); err != nil {
+		return fmt.Errorf("validate configured blob backend: %w", err)
+	}
+	blobStorage, err := newBlobStorageRuntime(ctx, cfg)
 	if err != nil {
 		return fmt.Errorf("init blob backend: %w", err)
 	}
-	logger.Info("blob backend 就绪",
-		zap.String("backend", "localfs"),
-		zap.String("dir", cfg.BlobDir),
-	)
+	capacity, err := newBlobCapacityRuntime(ctx, cfg, mediaStore)
+	if err != nil {
+		return fmt.Errorf("init blob capacity guard: %w", err)
+	}
+	for _, guard := range capacity.workers {
+		go filesapp.NewDiskUsageWorker(guard, cfg.StorageUsageRefreshInterval, logger.Named("files").Named("capacity")).Run(ctx)
+	}
+	blobBackend := filesapp.BlobBackend(filesapp.NewGuardedBlobBackend(blobStorage.permanent, capacity.permanentWrite))
+	uploadPartBackend := filesapp.UploadPartBackend(filesapp.NewGuardedUploadPartBackend(blobStorage.uploadPart, capacity.stagingWrite))
+	if cfg.BlobBackendKind == string(domain.MediaBackendS3) {
+		logger.Info("blob backend 就绪",
+			zap.String("backend", blobBackend.Name()),
+			zap.String("endpoint", cfg.S3Endpoint),
+			zap.String("bucket", cfg.S3Bucket),
+			zap.String("upload_staging_dir", cfg.BlobStagingDir),
+		)
+	} else {
+		logger.Info("blob backend 就绪",
+			zap.String("backend", blobBackend.Name()),
+			zap.String("dir", cfg.BlobDir),
+		)
+	}
 	filesService := filesapp.NewService(mediaStore, blobBackend, cfg.DC,
 		filesapp.WithLogger(logger),
+		filesapp.WithUploadPartBackend(uploadPartBackend),
 		filesapp.WithUploadPartQuota(domain.UploadPartQuota{
 			MaxBytes: cfg.UploadInFlightMaxBytes,
 			MaxParts: cfg.UploadInFlightMaxParts,
