@@ -302,6 +302,10 @@ type SendPrivateTextRequest struct {
 	Date            int
 	OriginAuthKeyID [8]byte
 	OriginSessionID int64
+	// OriginClientSession carries the exact request's initConnection language
+	// into an in-process bot responder. Stores and idempotency fingerprints
+	// intentionally ignore this ephemeral metadata.
+	OriginClientSession ClientSessionMetadata
 	// OriginUserID identifies the authenticated initiator when a server-generated
 	// service message is authored by another user. Zero preserves the ordinary
 	// send path where the sender is the initiator.

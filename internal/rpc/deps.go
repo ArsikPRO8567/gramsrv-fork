@@ -11,6 +11,7 @@ import (
 	"telesrv/internal/sfu"
 	"telesrv/internal/store"
 	"telesrv/internal/turnsrv"
+	"telesrv/internal/updatecdn"
 )
 
 // 本文件按「消费者定义接口」惯例，在 rpc 包定义 Router 依赖的业务服务接口。
@@ -257,6 +258,10 @@ type UsersService interface {
 	Self(ctx context.Context, userID int64) (domain.User, error)
 	ByID(ctx context.Context, currentUserID, userID int64) (domain.User, bool, error)
 	ByIDs(ctx context.Context, currentUserID int64, userIDs []int64) ([]domain.User, error)
+}
+
+type CollectiblePhoneService interface {
+	CollectiblePhone(ctx context.Context, phone string) (domain.CollectiblePhone, error)
 }
 
 // TelegramLoginService is the domain-only boundary shared by the MTProto RPC
@@ -1041,6 +1046,7 @@ type Deps struct {
 	Account              AccountService
 	Privacy              PrivacyService
 	Help                 HelpService
+	AppUpdates           updatecdn.Resolver
 	AccountFreeze        AccountFreezeService
 	AICompose            AIComposeService
 	Ephemeral            EphemeralService
@@ -1048,6 +1054,7 @@ type Deps struct {
 	Moderation           ModerationService
 	Users                UsersService
 	Usernames            UsernameRegistryService
+	CollectiblePhones    CollectiblePhoneService
 	AccountRatings       AccountRatingService
 	BotVerifications     BotVerificationService
 	TelegramLogin        TelegramLoginService
@@ -1065,6 +1072,7 @@ type Deps struct {
 	Communities          CommunitiesService
 	Files                FilesService
 	PremiumPromo         PremiumPromoService
+	Premium              PremiumService
 	Bots                 BotsService
 	ServiceBotCallbacks  ServiceBotCallbacks
 	Polls                PollsService
@@ -1173,6 +1181,23 @@ type StarsService interface {
 	Credit(ctx context.Context, userID, amount int64, reason domain.StarsTransactionReason, peer domain.Peer, title, desc string) (domain.StarsBalance, error)
 	Debit(ctx context.Context, userID, amount int64, reason domain.StarsTransactionReason, peer domain.Peer, title, desc string) (domain.StarsBalance, error)
 	ListTransactions(ctx context.Context, userID int64, query domain.StarsTransactionQuery) (domain.StarsTransactionPage, error)
+}
+
+// PremiumService is the domain-only boundary for catalog reads, payment form
+// issuance and atomic Stars-backed settlement.
+type PremiumService interface {
+	BotUserID() int64
+	BotUsername() string
+	Plans(ctx context.Context) ([]domain.PremiumPlan, error)
+	Plan(ctx context.Context, months int) (domain.PremiumPlan, error)
+	IssuePaymentForm(ctx context.Context, form domain.PremiumPaymentForm) (domain.PremiumPaymentForm, error)
+	Purchase(ctx context.Context, req domain.PremiumPurchaseRequest) (domain.PremiumPurchaseResult, error)
+	ActiveEntitlements(ctx context.Context, userID int64, now int) ([]domain.PremiumEntitlement, error)
+	PurchaseHistory(ctx context.Context, userID int64, limit int) ([]domain.PremiumEntitlement, error)
+	SweepExpired(ctx context.Context, now, limit int) ([]domain.User, error)
+	Grant(ctx context.Context, req domain.PremiumAdminGrantRequest) (domain.PremiumEntitlement, domain.User, error)
+	Revoke(ctx context.Context, req domain.PremiumAdminRevokeRequest) (domain.User, error)
+	Refund(ctx context.Context, req domain.PremiumRefundRequest) (domain.PremiumPurchaseResult, error)
 }
 
 // SecretChatService 抽象私聊端对端加密（Secret Chat）握手状态机（app/secretchat）。

@@ -80,12 +80,16 @@ type botReply struct {
 	Text        string
 	Entities    []domain.MessageEntity
 	ReplyMarkup *domain.MessageReplyMarkup
+	Media       *domain.MessageMedia
 }
 
 // HandlesBot 报告该收件人是否为内置应答 bot（messages.BotResponder 实现）。
 func (s *Service) HandlesBot(botUserID int64) bool {
 	if s == nil {
 		return false
+	}
+	if s.premium != nil && botUserID == s.premium.BotUserID() {
+		return true
 	}
 	switch botUserID {
 	case domain.BotFatherUserID, domain.StickersBotUserID, domain.ChatBotUserID,
@@ -99,7 +103,7 @@ func (s *Service) HandlesBot(botUserID int64) bool {
 // OnPrivateMessage 处理投递给内置 bot 的私聊消息（messages.BotResponder 实现）。
 // msg 是 bot 视角的收件 box 行。回复异步生成（不占用户 sendMessage 的 RPC
 // goroutine——官方 bot 回复本就异步到达），失败只记日志，绝不影响用户消息本身。
-func (s *Service) OnPrivateMessage(ctx context.Context, botUserID int64, msg domain.Message) {
+func (s *Service) OnPrivateMessage(ctx context.Context, botUserID int64, msg domain.Message, session domain.ClientSessionMetadata) {
 	if s == nil || s.messages == nil || !s.HandlesBot(botUserID) {
 		return
 	}
@@ -118,6 +122,10 @@ func (s *Service) OnPrivateMessage(ctx context.Context, botUserID int64, msg dom
 		go s.respondAsVerify(userID, msg)
 	case domain.VerifierBotUserID:
 		go s.respondAsVerifier(userID, msg)
+	default:
+		if s.premium != nil && botUserID == s.premium.BotUserID() {
+			go s.respondAsPremium(botUserID, userID, msg, session)
+		}
 	}
 }
 
@@ -157,7 +165,7 @@ func (s *Service) serviceBotRecipientBlocked(ctx context.Context, botUserID, use
 }
 
 func (s *Service) sendServiceBotReplyResult(ctx context.Context, botUserID, userID int64, reply botReply) (domain.SendPrivateTextResult, bool) {
-	if s == nil || s.messages == nil || reply.Text == "" {
+	if s == nil || s.messages == nil || (reply.Text == "" && reply.Media.IsZero()) {
 		return domain.SendPrivateTextResult{}, false
 	}
 	markup := reply.ReplyMarkup
@@ -177,6 +185,7 @@ func (s *Service) sendServiceBotReplyResult(ctx context.Context, botUserID, user
 		RandomID:         s.botReplyRandomID(),
 		Message:          reply.Text,
 		Entities:         serviceBotReplyEntities(reply.Text, reply.Entities),
+		Media:            reply.Media,
 		ReplyMarkup:      markup,
 		Date:             int(s.now().Unix()),
 		RecipientBlocked: s.serviceBotRecipientBlocked(ctx, botUserID, userID),

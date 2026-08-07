@@ -122,6 +122,19 @@ type Service interface {
 	CustomVerificationMarkActive(ctx context.Context, verifierBotID int64, peer domain.Peer) (bool, error)
 }
 
+// collectiblePhoneService is optional so lightweight admin API test doubles
+// and deployments without migration 0171 keep their existing contract.
+type collectiblePhoneService interface {
+	MintCollectiblePhone(context.Context, admin.MintCollectiblePhoneRequest) (admin.CommandResult, error)
+	UpdateCollectiblePhonePrice(context.Context, admin.UpdateCollectiblePhonePriceRequest) (admin.CommandResult, error)
+	TransferCollectiblePhone(context.Context, admin.TransferCollectiblePhoneRequest) (admin.CommandResult, error)
+	RevokeCollectiblePhone(context.Context, admin.RevokeCollectiblePhoneRequest) (admin.CommandResult, error)
+	DeleteCollectiblePhone(context.Context, admin.DeleteCollectiblePhoneRequest) (admin.CommandResult, error)
+	CollectiblePhones(context.Context, domain.CollectiblePhoneFilter) ([]domain.CollectiblePhone, error)
+	CollectiblePhoneByID(context.Context, int64) (domain.CollectiblePhone, error)
+	CollectiblePhoneTransfers(context.Context, int64, int) ([]domain.CollectiblePhoneTransfer, error)
+}
+
 func Start(ctx context.Context, cfg Config, svc Service, log *zap.Logger) (*http.Server, error) {
 	cfg.Addr = strings.TrimSpace(cfg.Addr)
 	if cfg.Addr == "" {
@@ -170,7 +183,12 @@ func (s *Server) routes() http.Handler {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	})
 	mux.HandleFunc("POST /v1/accounts/set-frozen", s.authenticated(s.handleSetAccountFrozen))
-	mux.HandleFunc("POST /v1/accounts/grant-premium", s.authenticated(s.handleGrantPremium))
+	mux.HandleFunc("POST /v1/accounts/grant-premium", s.authorized(PermissionPremiumManage, s.handleGrantPremium))
+	mux.HandleFunc("POST /v1/accounts/refund-premium", s.authorized(PermissionPremiumManage, s.handleRefundPremium))
+	mux.HandleFunc("GET /v1/premium/plans", s.authorized(PermissionPremiumManage, s.handlePremiumPlans))
+	mux.HandleFunc("POST /v1/premium/plans/upsert", s.authorized(PermissionPremiumManage, s.handleUpsertPremiumPlan))
+	mux.HandleFunc("GET /v1/premium/users/{id}/entitlements", s.authorized(PermissionPremiumManage, s.handlePremiumEntitlements))
+	mux.HandleFunc("GET /v1/premium/payments/{id}", s.authorized(PermissionPremiumManage, s.handlePremiumPayment))
 	mux.HandleFunc("POST /v1/accounts/grant-stars", s.authenticated(s.handleGrantStars))
 	mux.HandleFunc("POST /v1/accounts/set-verified", s.authenticated(s.handleSetVerified))
 	mux.HandleFunc("POST /v1/accounts/set-flags", s.authenticated(s.handleSetUserFlags))
@@ -214,6 +232,13 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("POST /v1/collectible-usernames/delete", s.authenticated(s.handleDeleteCollectibleUsername))
 	mux.HandleFunc("GET /v1/collectible-usernames", s.authenticated(s.handleCollectibleUsernames))
 	mux.HandleFunc("GET /v1/collectible-usernames/{id}", s.authenticated(s.handleCollectibleUsername))
+	mux.HandleFunc("POST /v1/collectible-phones/mint", s.authenticated(s.handleMintCollectiblePhone))
+	mux.HandleFunc("POST /v1/collectible-phones/update-price", s.authenticated(s.handleUpdateCollectiblePhonePrice))
+	mux.HandleFunc("POST /v1/collectible-phones/transfer", s.authenticated(s.handleTransferCollectiblePhone))
+	mux.HandleFunc("POST /v1/collectible-phones/revoke", s.authenticated(s.handleRevokeCollectiblePhone))
+	mux.HandleFunc("POST /v1/collectible-phones/delete", s.authenticated(s.handleDeleteCollectiblePhone))
+	mux.HandleFunc("GET /v1/collectible-phones", s.authenticated(s.handleCollectiblePhones))
+	mux.HandleFunc("GET /v1/collectible-phones/{id}", s.authenticated(s.handleCollectiblePhone))
 	mux.HandleFunc("POST /v1/account-ratings/recompute", s.authenticated(s.handleRecomputeAccountRating))
 	mux.HandleFunc("POST /v1/account-ratings/adjust", s.authenticated(s.handleAdjustAccountRating))
 	mux.HandleFunc("GET /v1/account-ratings", s.authenticated(s.handleAccountRatings))
@@ -266,8 +291,116 @@ func (s *Server) handleGrantPremium(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &req) {
 		return
 	}
+	s.applyVerificationPrincipal(r, &req.CommandMeta)
 	result, err := s.svc.GrantPremium(r.Context(), req)
 	writeCommandResult(w, result, err)
+}
+
+type premiumRefundService interface {
+	RefundPremium(ctx context.Context, req admin.RefundPremiumRequest) (admin.CommandResult, error)
+}
+
+type premiumReadService interface {
+	PremiumEntitlements(ctx context.Context, userID int64, limit int) ([]domain.PremiumEntitlement, error)
+	PremiumPayment(ctx context.Context, paymentIntentID int64) (domain.PremiumPaymentDetails, bool, error)
+}
+
+type premiumPlanService interface {
+	PremiumPlans(ctx context.Context) ([]domain.PremiumPlan, error)
+	UpsertPremiumPlan(ctx context.Context, req admin.UpsertPremiumPlanRequest) (admin.CommandResult, error)
+}
+
+func (s *Server) handleRefundPremium(w http.ResponseWriter, r *http.Request) {
+	var req admin.RefundPremiumRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	s.applyVerificationPrincipal(r, &req.CommandMeta)
+	service, ok := s.svc.(premiumRefundService)
+	if !ok {
+		writeCommandResult(w, admin.CommandResult{}, fmt.Errorf("premium refund is not configured"))
+		return
+	}
+	result, err := service.RefundPremium(r.Context(), req)
+	writeCommandResult(w, result, err)
+}
+
+func (s *Server) handlePremiumEntitlements(w http.ResponseWriter, r *http.Request) {
+	userID, ok := moderationPathID(w, r, "id")
+	if !ok {
+		return
+	}
+	service, ok := s.svc.(premiumReadService)
+	if !ok {
+		writeError(w, http.StatusNotImplemented, "premium reads are not configured")
+		return
+	}
+	limit := 50
+	if raw := strings.TrimSpace(r.URL.Query().Get("limit")); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil || parsed <= 0 || parsed > 100 {
+			writeError(w, http.StatusBadRequest, "invalid limit")
+			return
+		}
+		limit = parsed
+	}
+	items, err := service.PremiumEntitlements(r.Context(), userID, limit)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"entitlements": items})
+}
+
+func (s *Server) handlePremiumPlans(w http.ResponseWriter, r *http.Request) {
+	service, ok := s.svc.(premiumPlanService)
+	if !ok {
+		writeError(w, http.StatusNotImplemented, "premium plan management is not configured")
+		return
+	}
+	plans, err := service.PremiumPlans(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"plans": plans})
+}
+
+func (s *Server) handleUpsertPremiumPlan(w http.ResponseWriter, r *http.Request) {
+	var req admin.UpsertPremiumPlanRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	s.applyVerificationPrincipal(r, &req.CommandMeta)
+	service, ok := s.svc.(premiumPlanService)
+	if !ok {
+		writeError(w, http.StatusNotImplemented, "premium plan management is not configured")
+		return
+	}
+	result, err := service.UpsertPremiumPlan(r.Context(), req)
+	writeCommandResult(w, result, err)
+}
+
+func (s *Server) handlePremiumPayment(w http.ResponseWriter, r *http.Request) {
+	paymentIntentID, ok := moderationPathID(w, r, "id")
+	if !ok {
+		return
+	}
+	service, ok := s.svc.(premiumReadService)
+	if !ok {
+		writeError(w, http.StatusNotImplemented, "premium reads are not configured")
+		return
+	}
+	details, found, err := service.PremiumPayment(r.Context(), paymentIntentID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if !found {
+		writeError(w, http.StatusNotFound, "premium payment not found")
+		return
+	}
+	writeJSON(w, http.StatusOK, details)
 }
 
 func (s *Server) handleGrantStars(w http.ResponseWriter, r *http.Request) {
@@ -488,7 +621,8 @@ func officialStarGiftListItem(item officialgifts.GiftSummary) map[string]any {
 		"source_gift_id": strconv.FormatInt(item.ID, 10), "title": item.Title,
 		"stars": strconv.FormatInt(item.Stars, 10), "convert_stars": strconv.FormatInt(item.ConvertStars, 10),
 		"upgrade_stars":      strconv.FormatInt(item.UpgradeStars, 10),
-		"availability_total": item.AvailabilityTotal, "limited": item.Limited, "sold_out": item.SoldOut,
+		"availability_total": item.AvailabilityTotal, "upgrade_variants": item.UpgradeVariants,
+		"limited": item.Limited, "sold_out": item.SoldOut,
 		"model_count": item.ModelCount, "pattern_count": item.PatternCount, "backdrop_count": item.BackdropCount,
 		"crafted_model_count": item.CraftedModelCount, "can_upgrade": item.CanUpgrade(), "can_craft": item.CanCraft(),
 		"document_id": strconv.FormatInt(item.DocumentID, 10), "animation_validated": item.AnimationValidated,
@@ -1142,6 +1276,167 @@ func (s *Server) handleCollectibleUsername(w http.ResponseWriter, r *http.Reques
 	writeJSON(w, http.StatusOK, map[string]any{
 		"asset": collectibleUsernameResponse(asset), "transfers": log,
 	})
+}
+
+func (s *Server) collectiblePhonesService(w http.ResponseWriter) (collectiblePhoneService, bool) {
+	svc, ok := s.svc.(collectiblePhoneService)
+	if !ok {
+		writeError(w, http.StatusNotImplemented, "collectible phones are not configured")
+	}
+	return svc, ok
+}
+
+func (s *Server) handleMintCollectiblePhone(w http.ResponseWriter, r *http.Request) {
+	var req admin.MintCollectiblePhoneRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	svc, ok := s.collectiblePhonesService(w)
+	if !ok {
+		return
+	}
+	result, err := svc.MintCollectiblePhone(r.Context(), req)
+	writeCommandResult(w, result, err)
+}
+func (s *Server) handleUpdateCollectiblePhonePrice(w http.ResponseWriter, r *http.Request) {
+	var req admin.UpdateCollectiblePhonePriceRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	svc, ok := s.collectiblePhonesService(w)
+	if !ok {
+		return
+	}
+	result, err := svc.UpdateCollectiblePhonePrice(r.Context(), req)
+	writeCommandResult(w, result, err)
+}
+func (s *Server) handleTransferCollectiblePhone(w http.ResponseWriter, r *http.Request) {
+	var req admin.TransferCollectiblePhoneRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	svc, ok := s.collectiblePhonesService(w)
+	if !ok {
+		return
+	}
+	result, err := svc.TransferCollectiblePhone(r.Context(), req)
+	writeCommandResult(w, result, err)
+}
+func (s *Server) handleRevokeCollectiblePhone(w http.ResponseWriter, r *http.Request) {
+	var req admin.RevokeCollectiblePhoneRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	svc, ok := s.collectiblePhonesService(w)
+	if !ok {
+		return
+	}
+	result, err := svc.RevokeCollectiblePhone(r.Context(), req)
+	writeCommandResult(w, result, err)
+}
+func (s *Server) handleDeleteCollectiblePhone(w http.ResponseWriter, r *http.Request) {
+	var req admin.DeleteCollectiblePhoneRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	svc, ok := s.collectiblePhonesService(w)
+	if !ok {
+		return
+	}
+	result, err := svc.DeleteCollectiblePhone(r.Context(), req)
+	writeCommandResult(w, result, err)
+}
+
+func (s *Server) handleCollectiblePhones(w http.ResponseWriter, r *http.Request) {
+	svc, ok := s.collectiblePhonesService(w)
+	if !ok {
+		return
+	}
+	q := r.URL.Query()
+	f := domain.CollectiblePhoneFilter{Status: domain.CollectibleUsernameStatus(strings.TrimSpace(q.Get("status"))), Tier: domain.CollectiblePhoneTier(strings.TrimSpace(q.Get("tier"))), Query: q.Get("q")}
+	if f.Status != "" && !f.Status.Valid() {
+		writeError(w, http.StatusBadRequest, "invalid status")
+		return
+	}
+	if f.Tier != "" && !f.Tier.Valid() {
+		writeError(w, http.StatusBadRequest, "invalid tier")
+		return
+	}
+	var parseOK bool
+	f.OwnerUserID, parseOK = optionalQueryInt64(w, q, "owner_user_id")
+	if !parseOK {
+		return
+	}
+	f.BeforeID, parseOK = optionalQueryInt64(w, q, "before_id")
+	if !parseOK {
+		return
+	}
+	f.Limit, parseOK = optionalQueryInt(w, q, "limit")
+	if !parseOK {
+		return
+	}
+	items, err := svc.CollectiblePhones(r.Context(), f)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	assets := make([]map[string]any, 0, len(items))
+	for _, a := range items {
+		assets = append(assets, collectiblePhoneResponse(a))
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"assets": assets})
+}
+
+func (s *Server) handleCollectiblePhone(w http.ResponseWriter, r *http.Request) {
+	svc, ok := s.collectiblePhonesService(w)
+	if !ok {
+		return
+	}
+	id, ok := moderationPathID(w, r, "id")
+	if !ok {
+		return
+	}
+	a, err := svc.CollectiblePhoneByID(r.Context(), id)
+	if err != nil {
+		status := http.StatusInternalServerError
+		if errors.Is(err, domain.ErrCollectiblePhoneNotFound) {
+			status = http.StatusNotFound
+		}
+		writeError(w, status, err.Error())
+		return
+	}
+	limit, ok := optionalQueryInt(w, r.URL.Query(), "limit")
+	if !ok {
+		return
+	}
+	items, err := svc.CollectiblePhoneTransfers(r.Context(), id, limit)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	log := make([]map[string]any, 0, len(items))
+	for _, v := range items {
+		log = append(log, collectiblePhoneTransferResponse(v))
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"asset": collectiblePhoneResponse(a), "transfers": log})
+}
+
+func collectiblePhoneResponse(a domain.CollectiblePhone) map[string]any {
+	out := map[string]any{"id": strconv.FormatInt(a.ID, 10), "phone": a.Phone, "tier": string(a.Tier), "status": string(a.Status), "owner_user_id": strconv.FormatInt(a.OwnerUserID, 10), "purchase_date": a.Info().PurchaseDate, "currency": a.Currency, "amount": strconv.FormatInt(a.Amount, 10), "crypto_currency": a.CryptoCurrency, "crypto_amount": strconv.FormatInt(a.CryptoAmount, 10), "url": a.URL, "original_owner_user_id": strconv.FormatInt(a.OriginalOwnerUserID, 10), "transfer_count": a.TransferCount, "version": strconv.FormatInt(a.Version, 10)}
+	if !a.CreatedAt.IsZero() {
+		out["created_at"] = a.CreatedAt.UTC().Format(time.RFC3339)
+	}
+	if !a.UpdatedAt.IsZero() {
+		out["updated_at"] = a.UpdatedAt.UTC().Format(time.RFC3339)
+	}
+	return out
+}
+func collectiblePhoneTransferResponse(v domain.CollectiblePhoneTransfer) map[string]any {
+	out := map[string]any{"id": strconv.FormatInt(v.ID, 10), "collectible_id": strconv.FormatInt(v.CollectibleID, 10), "kind": string(v.Kind), "from_user_id": strconv.FormatInt(v.FromUserID, 10), "to_user_id": strconv.FormatInt(v.ToUserID, 10), "currency": v.Currency, "amount": strconv.FormatInt(v.Amount, 10), "actor": v.Actor, "reason": v.Reason, "command_key": v.CommandKey}
+	if !v.CreatedAt.IsZero() {
+		out["created_at"] = v.CreatedAt.UTC().Format(time.RFC3339)
+	}
+	return out
 }
 
 func (s *Server) handleAccountRatings(w http.ResponseWriter, r *http.Request) {

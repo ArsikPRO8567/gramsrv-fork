@@ -275,6 +275,23 @@ func tgMessageServiceAction(msg domain.Message) tg.MessageActionClass {
 		}
 		return &tg.MessageActionStarGiftPurchaseOfferDeclined{Expired: action.Expired,
 			Gift: tgUniqueStarGift(action.Gift), Price: tgStarGiftAmount(action.Price)}
+	case domain.MessageServiceActionGiftPremium:
+		action := m.ServiceAction.GiftPremium
+		if action == nil || action.Currency == "" || action.Amount <= 0 || action.Days <= 0 {
+			return &tg.MessageActionEmpty{}
+		}
+		out := &tg.MessageActionGiftPremium{
+			Currency: action.Currency,
+			Amount:   action.Amount,
+			Days:     action.Days,
+		}
+		if action.Message.Text != "" {
+			out.SetMessage(tg.TextWithEntities{
+				Text:     action.Message.Text,
+				Entities: tgMessageEntities(action.Message.Entities),
+			})
+		}
+		return out
 	default:
 		return &tg.MessageActionEmpty{}
 	}

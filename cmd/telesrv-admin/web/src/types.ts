@@ -82,6 +82,26 @@ export type AccountDetail = {
   AuditLogs: AuditLogRow[];
 };
 
+export type PremiumPlan = {
+  Months: number;
+  DurationDays: number;
+  AmountStars: number;
+  FiatCurrency: string;
+  FiatAmount: number;
+  StoreProduct: string;
+  StoreQuantity: number;
+  Enabled: boolean;
+  SortOrder: number;
+  Label: string;
+  ManagedBy: "config" | "admin";
+  Version: number;
+  UpdatedAt: number;
+};
+
+export type PremiumPlansResponse = {
+  plans: PremiumPlan[] | null;
+};
+
 export type ChannelRow = {
   ID: number;
   AccessHash: number;
@@ -235,6 +255,7 @@ export type OfficialStarGiftRow = {
   convert_stars: string;
   upgrade_stars: string;
   availability_total: number;
+  upgrade_variants: number;
   limited: boolean;
   sold_out: boolean;
   model_count: number;
@@ -423,6 +444,34 @@ export type CollectibleUsernameDetail = {
   asset: CollectibleUsernameRow;
   transfers: CollectibleUsernameTransferRow[] | null;
 };
+
+export type CollectiblePhoneTier = "standard" | "exclusive";
+export type CollectiblePhoneStatus = "vault" | "owned" | "burned";
+export type CollectiblePhoneRow = {
+  id: string;
+  phone: string;
+  tier: CollectiblePhoneTier;
+  status: CollectiblePhoneStatus;
+  owner_user_id: string;
+  purchase_date: number;
+  currency: string;
+  amount: string;
+  crypto_currency: string;
+  crypto_amount: string;
+  url: string;
+  original_owner_user_id: string;
+  transfer_count: number;
+  version: string;
+  created_at?: string;
+  updated_at?: string;
+};
+export type CollectiblePhoneTransfer = {
+  id: string; collectible_id: string; kind: CollectibleUsernameTransferKind;
+  from_user_id: string; to_user_id: string; currency: string; amount: string;
+  actor: string; reason: string; command_key: string; created_at?: string;
+};
+export type CollectiblePhoneListResponse = { assets: CollectiblePhoneRow[] | null };
+export type CollectiblePhoneDetail = { asset: CollectiblePhoneRow; transfers: CollectiblePhoneTransfer[] | null };
 
 export type AccountRatingRow = {
   UserID: string;

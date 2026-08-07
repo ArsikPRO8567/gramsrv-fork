@@ -43,6 +43,120 @@ func TestAdminAPISetAccountFrozen(t *testing.T) {
 	}
 }
 
+type premiumReadCaptureService struct {
+	fakeService
+	userID    int64
+	limit     int
+	paymentID int64
+	plansRead bool
+	planReq   admin.UpsertPremiumPlanRequest
+}
+
+func (s *premiumReadCaptureService) PremiumEntitlements(
+	_ context.Context,
+	userID int64,
+	limit int,
+) ([]domain.PremiumEntitlement, error) {
+	s.userID, s.limit = userID, limit
+	return []domain.PremiumEntitlement{{ID: 11, UserID: userID}}, nil
+}
+
+func (s *premiumReadCaptureService) PremiumPayment(
+	_ context.Context,
+	paymentIntentID int64,
+) (domain.PremiumPaymentDetails, bool, error) {
+	s.paymentID = paymentIntentID
+	return domain.PremiumPaymentDetails{
+		Intent: domain.PremiumPaymentIntent{ID: paymentIntentID, Currency: domain.PremiumCurrencyStars},
+	}, true, nil
+}
+
+func (s *premiumReadCaptureService) PremiumPlans(
+	context.Context,
+) ([]domain.PremiumPlan, error) {
+	s.plansRead = true
+	return []domain.PremiumPlan{{
+		Months: 3, DurationDays: 90, AmountStars: 750, Enabled: true,
+		SortOrder: 10, Label: "3 months", ManagedBy: domain.PremiumPlanManagedByAdmin,
+		Version: 4,
+	}}, nil
+}
+
+func (s *premiumReadCaptureService) UpsertPremiumPlan(
+	_ context.Context,
+	req admin.UpsertPremiumPlanRequest,
+) (admin.CommandResult, error) {
+	s.planReq = req
+	return admin.CommandResult{
+		CommandID: req.CommandID, Action: admin.ActionUpsertPremiumPlan,
+		Status: "completed", DryRun: req.DryRun,
+	}, nil
+}
+
+func TestAdminAPIPremiumReadsRequirePremiumManage(t *testing.T) {
+	svc := &premiumReadCaptureService{}
+	srv := &Server{
+		token: "master",
+		scoped: []ScopedToken{
+			{Name: "premium-ops", Token: "premium-token", Permissions: []string{PermissionPremiumManage}},
+			{Name: "reviewer", Token: "review-token", Permissions: []string{PermissionVerificationReview}},
+		},
+		svc: svc,
+	}
+	entitlements := httptest.NewRequest(http.MethodGet, "/v1/premium/users/2002/entitlements?limit=25", nil)
+	entitlements.Header.Set("Authorization", "Bearer premium-token")
+	entitlementResponse := httptest.NewRecorder()
+	srv.routes().ServeHTTP(entitlementResponse, entitlements)
+	if entitlementResponse.Code != http.StatusOK || svc.userID != 2002 || svc.limit != 25 ||
+		!strings.Contains(entitlementResponse.Body.String(), `"id":11`) {
+		t.Fatalf("entitlements status=%d capture=%+v body=%s",
+			entitlementResponse.Code, svc, entitlementResponse.Body.String())
+	}
+
+	payment := httptest.NewRequest(http.MethodGet, "/v1/premium/payments/44", nil)
+	payment.Header.Set("Authorization", "Bearer premium-token")
+	paymentResponse := httptest.NewRecorder()
+	srv.routes().ServeHTTP(paymentResponse, payment)
+	if paymentResponse.Code != http.StatusOK || svc.paymentID != 44 ||
+		!strings.Contains(paymentResponse.Body.String(), `"id":44`) {
+		t.Fatalf("payment status=%d capture=%+v body=%s",
+			paymentResponse.Code, svc, paymentResponse.Body.String())
+	}
+
+	plans := httptest.NewRequest(http.MethodGet, "/v1/premium/plans", nil)
+	plans.Header.Set("Authorization", "Bearer premium-token")
+	plansResponse := httptest.NewRecorder()
+	srv.routes().ServeHTTP(plansResponse, plans)
+	if plansResponse.Code != http.StatusOK || !svc.plansRead ||
+		!strings.Contains(plansResponse.Body.String(), `"AmountStars":750`) ||
+		!strings.Contains(plansResponse.Body.String(), `"ManagedBy":"admin"`) {
+		t.Fatalf("plans status=%d capture=%+v body=%s",
+			plansResponse.Code, svc, plansResponse.Body.String())
+	}
+
+	upsert := httptest.NewRequest(http.MethodPost, "/v1/premium/plans/upsert", strings.NewReader(
+		`{"command_id":"premium-plan-1","reason":"new price","months":3,"duration_days":90,"amount_stars":800,"enabled":true,"sort_order":10,"label":"Quarter","expected_version":4}`,
+	))
+	upsert.Header.Set("Authorization", "Bearer premium-token")
+	upsertResponse := httptest.NewRecorder()
+	srv.routes().ServeHTTP(upsertResponse, upsert)
+	if upsertResponse.Code != http.StatusOK || svc.planReq.Months != 3 ||
+		svc.planReq.AmountStars != 800 || svc.planReq.ExpectedVersion != 4 ||
+		svc.planReq.Actor != "premium-ops" {
+		t.Fatalf("upsert status=%d req=%+v body=%s",
+			upsertResponse.Code, svc.planReq, upsertResponse.Body.String())
+	}
+
+	forbidden := httptest.NewRequest(http.MethodGet, "/v1/premium/plans", nil)
+	forbidden.Header.Set("Authorization", "Bearer review-token")
+	forbiddenResponse := httptest.NewRecorder()
+	srv.routes().ServeHTTP(forbiddenResponse, forbidden)
+	if forbiddenResponse.Code != http.StatusForbidden ||
+		!strings.Contains(forbiddenResponse.Body.String(), PermissionPremiumManage) {
+		t.Fatalf("forbidden status=%d body=%s", forbiddenResponse.Code, forbiddenResponse.Body.String())
+	}
+}
+
 type captureModerationService struct {
 	fakeService
 	filter       domain.ModerationCaseFilter
@@ -405,10 +519,10 @@ func TestCollectiblePreviewResponsePreservesInt64AsDecimalStrings(t *testing.T) 
 func TestOfficialStarGiftListItemExposesExplicitCapabilities(t *testing.T) {
 	item := officialStarGiftListItem(officialgifts.GiftSummary{
 		ID: 9223372036854775807, Title: "Fresh Socks", Stars: 25, ConvertStars: 10, UpgradeStars: 50,
-		ModelCount: 10, PatternCount: 20, BackdropCount: 30, CraftedModelCount: 2,
+		UpgradeVariants: 6000, ModelCount: 10, PatternCount: 20, BackdropCount: 30, CraftedModelCount: 2,
 	})
 	if item["source_gift_id"] != "9223372036854775807" || item["title"] != "Fresh Socks" ||
-		item["can_upgrade"] != true || item["can_craft"] != true {
+		item["upgrade_variants"] != 6000 || item["can_upgrade"] != true || item["can_craft"] != true {
 		t.Fatalf("official gift item = %#v", item)
 	}
 	item = officialStarGiftListItem(officialgifts.GiftSummary{

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"math"
 	"net/url"
 	"reflect"
@@ -21,6 +22,8 @@ import (
 const (
 	ActionSetAccountFrozen        = "account.set_frozen"
 	ActionGrantPremium            = "account.grant_premium"
+	ActionRefundPremium           = "account.refund_premium"
+	ActionUpsertPremiumPlan       = "premium.plan.upsert"
 	ActionGrantStars              = "account.grant_stars"
 	ActionSetVerified             = "account.set_verified"
 	ActionSetUserFlags            = "account.set_flags"
@@ -50,6 +53,11 @@ const (
 	ActionTransferCollectibleUsername = "usernames.collectible.transfer"
 	ActionRevokeCollectibleUsername   = "usernames.collectible.revoke"
 	ActionDeleteCollectibleUsername   = "usernames.collectible.delete"
+	ActionMintCollectiblePhone        = "phones.collectible.mint"
+	ActionUpdateCollectiblePhonePrice = "phones.collectible.update_price"
+	ActionTransferCollectiblePhone    = "phones.collectible.transfer"
+	ActionRevokeCollectiblePhone      = "phones.collectible.revoke"
+	ActionDeleteCollectiblePhone      = "phones.collectible.delete"
 	// Composite account rating.
 	ActionRecomputeAccountRating = "rating.recompute"
 	ActionAdjustAccountRating    = "rating.adjust"
@@ -200,6 +208,17 @@ type StarsService interface {
 	Credit(ctx context.Context, userID, amount int64, reason domain.StarsTransactionReason, peer domain.Peer, title, desc string) (domain.StarsBalance, error)
 }
 
+type PremiumService interface {
+	Plan(ctx context.Context, months int) (domain.PremiumPlan, error)
+	Catalog(ctx context.Context) ([]domain.PremiumPlan, error)
+	UpsertPlan(ctx context.Context, req domain.PremiumPlanUpsertRequest) (domain.PremiumPlan, error)
+	Entitlements(ctx context.Context, userID int64, limit int) ([]domain.PremiumEntitlement, error)
+	Payment(ctx context.Context, paymentIntentID int64) (domain.PremiumPaymentDetails, bool, error)
+	Grant(ctx context.Context, req domain.PremiumAdminGrantRequest) (domain.PremiumEntitlement, domain.User, error)
+	Revoke(ctx context.Context, req domain.PremiumAdminRevokeRequest) (domain.User, error)
+	Refund(ctx context.Context, req domain.PremiumRefundRequest) (domain.PremiumPurchaseResult, error)
+}
+
 type StarsNotifier interface {
 	NotifyStarsBalanceChanged(ctx context.Context, balance domain.StarsBalance) error
 }
@@ -295,6 +314,18 @@ type CollectibleUsernamesService interface {
 	Transfers(ctx context.Context, collectibleID int64, limit int) ([]domain.CollectibleUsernameTransfer, error)
 }
 
+type CollectiblePhonesService interface {
+	MintCollectiblePhone(context.Context, domain.MintCollectiblePhoneRequest) (domain.CollectiblePhone, bool, error)
+	UpdateCollectiblePhonePrice(context.Context, domain.UpdateCollectiblePhonePriceRequest) (domain.CollectiblePhone, bool, error)
+	TransferCollectiblePhone(context.Context, domain.TransferCollectiblePhoneRequest) (domain.CollectiblePhone, bool, error)
+	RevokeCollectiblePhone(context.Context, domain.RevokeCollectiblePhoneRequest) (domain.CollectiblePhone, bool, error)
+	DeleteCollectiblePhone(context.Context, domain.DeleteCollectiblePhoneRequest) (bool, error)
+	CollectiblePhone(context.Context, string) (domain.CollectiblePhone, error)
+	CollectiblePhoneByID(context.Context, int64) (domain.CollectiblePhone, error)
+	ListCollectiblePhones(context.Context, domain.CollectiblePhoneFilter) ([]domain.CollectiblePhone, error)
+	CollectiblePhoneTransfers(context.Context, int64, int) ([]domain.CollectiblePhoneTransfer, error)
+}
+
 // collectibleUsernameByIDLookup is the optional by-identity read. Stores that
 // expose it answer a detail request in one round trip; the keyset fallback in
 // CollectibleUsernameByID keeps a service without it correct.
@@ -328,6 +359,7 @@ type Dependencies struct {
 	Revoker                AuthKeyRevoker
 	Users                  UsersService
 	Stars                  StarsService
+	Premium                PremiumService
 	StarsNotifier          StarsNotifier
 	UserNotifier           UserNotifier
 	UserModerationNotifier UserModerationNotifier
@@ -342,6 +374,7 @@ type Dependencies struct {
 	Emoji                  EmojiService
 	Moderation             ModerationService
 	Usernames              CollectibleUsernamesService
+	CollectiblePhones      CollectiblePhonesService
 	Rating                 AccountRatingService
 	Verification           VerificationService
 	// BotVerification is the third-party mechanism, wired separately from
@@ -357,6 +390,7 @@ type Service struct {
 	revoker                AuthKeyRevoker
 	users                  UsersService
 	stars                  StarsService
+	premium                PremiumService
 	starsNotifier          StarsNotifier
 	userNotifier           UserNotifier
 	userModerationNotifier UserModerationNotifier
@@ -371,6 +405,7 @@ type Service struct {
 	emoji                  EmojiService
 	moderation             ModerationService
 	usernames              CollectibleUsernamesService
+	collectiblePhones      CollectiblePhonesService
 	rating                 AccountRatingService
 	verification           VerificationService
 	botVerification        BotVerificationService
@@ -400,6 +435,9 @@ func (s *Service) Configure(deps Dependencies) *Service {
 	}
 	if deps.Stars != nil {
 		s.stars = deps.Stars
+	}
+	if deps.Premium != nil {
+		s.premium = deps.Premium
 	}
 	if deps.StarsNotifier != nil {
 		s.starsNotifier = deps.StarsNotifier
@@ -442,6 +480,9 @@ func (s *Service) Configure(deps Dependencies) *Service {
 	}
 	if deps.Usernames != nil {
 		s.usernames = deps.Usernames
+	}
+	if deps.CollectiblePhones != nil {
+		s.collectiblePhones = deps.CollectiblePhones
 	}
 	if deps.Rating != nil {
 		s.rating = deps.Rating
@@ -726,6 +767,26 @@ type GrantPremiumRequest struct {
 	Months int   `json:"months"`
 }
 
+type RefundPremiumRequest struct {
+	CommandMeta
+	PaymentIntentID int64 `json:"payment_intent_id"`
+}
+
+type UpsertPremiumPlanRequest struct {
+	CommandMeta
+	Months          int    `json:"months"`
+	DurationDays    int    `json:"duration_days"`
+	AmountStars     int64  `json:"amount_stars"`
+	FiatCurrency    string `json:"fiat_currency"`
+	FiatAmount      int64  `json:"fiat_amount"`
+	StoreProduct    string `json:"store_product"`
+	StoreQuantity   int    `json:"store_quantity"`
+	Enabled         bool   `json:"enabled"`
+	SortOrder       int    `json:"sort_order"`
+	Label           string `json:"label"`
+	ExpectedVersion int64  `json:"expected_version"`
+}
+
 type GrantStarsRequest struct {
 	CommandMeta
 	UserID int64 `json:"user_id"`
@@ -879,6 +940,43 @@ type RevokeCollectibleUsernameRequest struct {
 type DeleteCollectibleUsernameRequest struct {
 	CommandMeta
 	Username string `json:"username"`
+}
+
+type MintCollectiblePhoneRequest struct {
+	CommandMeta
+	Phone          string                      `json:"phone"`
+	Tier           domain.CollectiblePhoneTier `json:"tier"`
+	OwnerUserID    int64                       `json:"owner_user_id,string,omitempty"`
+	Currency       string                      `json:"currency"`
+	Amount         int64                       `json:"amount,string"`
+	CryptoCurrency string                      `json:"crypto_currency,omitempty"`
+	CryptoAmount   int64                       `json:"crypto_amount,string,omitempty"`
+	URL            string                      `json:"url,omitempty"`
+	PurchaseDate   int64                       `json:"purchase_date,omitempty"`
+}
+
+type UpdateCollectiblePhonePriceRequest struct {
+	CommandMeta
+	Phone          string `json:"phone"`
+	Currency       string `json:"currency"`
+	Amount         int64  `json:"amount,string"`
+	CryptoCurrency string `json:"crypto_currency"`
+	CryptoAmount   int64  `json:"crypto_amount,string"`
+}
+
+type TransferCollectiblePhoneRequest struct {
+	CommandMeta
+	Phone    string `json:"phone"`
+	ToUserID int64  `json:"to_user_id,string"`
+}
+type RevokeCollectiblePhoneRequest struct {
+	CommandMeta
+	Phone string `json:"phone"`
+	Burn  bool   `json:"burn"`
+}
+type DeleteCollectiblePhoneRequest struct {
+	CommandMeta
+	Phone string `json:"phone"`
 }
 
 // RecomputeAccountRatingRequest forces one user's composite rating to be
@@ -1150,7 +1248,30 @@ func (s *Service) GrantPremium(ctx context.Context, req GrantPremiumRequest) (Co
 		if req.DryRun {
 			return CommandResult{Message: "dry-run completed", Details: details}, nil
 		}
-		updated, err := s.users.GrantPremium(ctx, req.UserID, req.Months)
+		var updated domain.User
+		if s.premium != nil {
+			actorID := premiumAdminActorID(req.Actor)
+			if req.Months == 0 {
+				updated, err = s.premium.Revoke(ctx, domain.PremiumAdminRevokeRequest{
+					UserID: req.UserID, ActorUserID: actorID, Date: int(s.now().Unix()),
+					Reason: req.Reason, CommandKey: strings.TrimSpace(req.CommandID),
+				})
+			} else {
+				durationDays := req.Months * 30
+				if plan, planErr := s.premium.Plan(ctx, req.Months); planErr == nil {
+					durationDays = plan.DurationDays
+				} else if !errors.Is(planErr, domain.ErrPremiumPlanUnavailable) {
+					return CommandResult{}, planErr
+				}
+				_, updated, err = s.premium.Grant(ctx, domain.PremiumAdminGrantRequest{
+					UserID: req.UserID, ActorUserID: actorID, Months: req.Months,
+					DurationDays: durationDays, Date: int(s.now().Unix()),
+					Reason: req.Reason, CommandKey: strings.TrimSpace(req.CommandID),
+				})
+			}
+		} else {
+			updated, err = s.users.GrantPremium(ctx, req.UserID, req.Months)
+		}
 		if err != nil {
 			return CommandResult{}, err
 		}
@@ -1165,6 +1286,127 @@ func (s *Service) GrantPremium(ctx context.Context, req GrantPremiumRequest) (Co
 		}
 		return CommandResult{Message: msg, Details: details}, nil
 	})
+}
+
+func (s *Service) RefundPremium(ctx context.Context, req RefundPremiumRequest) (CommandResult, error) {
+	if req.PaymentIntentID <= 0 {
+		return CommandResult{}, fmt.Errorf("payment_intent_id is required")
+	}
+	if s == nil || s.premium == nil {
+		return CommandResult{}, fmt.Errorf("admin premium dependency is not configured")
+	}
+	return s.runCommand(ctx, req.CommandMeta, ActionRefundPremium, 0, domain.Peer{}, req, func() (CommandResult, error) {
+		details := map[string]any{"payment_intent_id": req.PaymentIntentID}
+		if req.DryRun {
+			return CommandResult{Message: "dry-run completed", Details: details}, nil
+		}
+		result, err := s.premium.Refund(ctx, domain.PremiumRefundRequest{
+			PaymentIntentID: req.PaymentIntentID,
+			ActorUserID:     premiumAdminActorID(req.Actor),
+			Date:            int(s.now().Unix()),
+			Reason:          req.Reason,
+			CommandKey:      strings.TrimSpace(req.CommandID),
+		})
+		if err != nil {
+			return CommandResult{}, err
+		}
+		details["buyer_user_id"] = result.Form.BuyerUserID
+		details["recipient_user_id"] = result.Form.RecipientUserID
+		details["amount_stars"] = result.Form.AmountStars
+		details["months"] = result.Form.Months
+		details["updated_premium_until"] = result.User.PremiumUntil
+		details["updated_stars_balance"] = result.Balance.Balance
+		if err := s.notifyUserChanged(ctx, result.User); err != nil {
+			details["user_notify_error"] = err.Error()
+		}
+		if err := s.notifyStarsBalanceChanged(ctx, result.Balance); err != nil {
+			details["stars_notify_error"] = err.Error()
+		}
+		return CommandResult{Message: "premium payment refunded", Details: details}, nil
+	})
+}
+
+func (s *Service) PremiumEntitlements(
+	ctx context.Context,
+	userID int64,
+	limit int,
+) ([]domain.PremiumEntitlement, error) {
+	if userID <= 0 {
+		return nil, fmt.Errorf("user_id is required")
+	}
+	if s == nil || s.premium == nil {
+		return nil, fmt.Errorf("admin premium dependency is not configured")
+	}
+	return s.premium.Entitlements(ctx, userID, limit)
+}
+
+func (s *Service) PremiumPayment(
+	ctx context.Context,
+	paymentIntentID int64,
+) (domain.PremiumPaymentDetails, bool, error) {
+	if paymentIntentID <= 0 {
+		return domain.PremiumPaymentDetails{}, false, fmt.Errorf("payment_intent_id is required")
+	}
+	if s == nil || s.premium == nil {
+		return domain.PremiumPaymentDetails{}, false, fmt.Errorf("admin premium dependency is not configured")
+	}
+	return s.premium.Payment(ctx, paymentIntentID)
+}
+
+func (s *Service) PremiumPlans(ctx context.Context) ([]domain.PremiumPlan, error) {
+	if s == nil || s.premium == nil {
+		return nil, fmt.Errorf("admin premium dependency is not configured")
+	}
+	return s.premium.Catalog(ctx)
+}
+
+func (s *Service) UpsertPremiumPlan(
+	ctx context.Context,
+	req UpsertPremiumPlanRequest,
+) (CommandResult, error) {
+	req.Label = strings.TrimSpace(req.Label)
+	if s == nil || s.premium == nil {
+		return CommandResult{}, fmt.Errorf("admin premium dependency is not configured")
+	}
+	validation := domain.PremiumPlanUpsertRequest{
+		Months: req.Months, DurationDays: req.DurationDays, AmountStars: req.AmountStars,
+		FiatCurrency: req.FiatCurrency, FiatAmount: req.FiatAmount,
+		StoreProduct: req.StoreProduct, StoreQuantity: req.StoreQuantity,
+		Enabled: req.Enabled, SortOrder: req.SortOrder, Label: req.Label,
+		ExpectedVersion: req.ExpectedVersion, ActorUserID: 1, Date: 1,
+		Reason: strings.TrimSpace(req.Reason), CommandKey: strings.TrimSpace(req.CommandID),
+	}
+	if !validation.Valid() {
+		return CommandResult{}, domain.ErrPremiumPlanInvalid
+	}
+	return s.runCommand(ctx, req.CommandMeta, ActionUpsertPremiumPlan, 0, domain.Peer{}, req,
+		func() (CommandResult, error) {
+			details := map[string]any{
+				"months": req.Months, "duration_days": req.DurationDays,
+				"amount_stars": req.AmountStars, "enabled": req.Enabled,
+				"fiat_currency": req.FiatCurrency, "fiat_amount": req.FiatAmount,
+				"store_product": req.StoreProduct, "store_quantity": req.StoreQuantity,
+				"sort_order": req.SortOrder, "label": req.Label,
+				"expected_version": req.ExpectedVersion,
+			}
+			if req.DryRun {
+				return CommandResult{Message: "premium plan validated", Details: details}, nil
+			}
+			updated, err := s.premium.UpsertPlan(ctx, domain.PremiumPlanUpsertRequest{
+				Months: req.Months, DurationDays: req.DurationDays, AmountStars: req.AmountStars,
+				FiatCurrency: req.FiatCurrency, FiatAmount: req.FiatAmount,
+				StoreProduct: req.StoreProduct, StoreQuantity: req.StoreQuantity,
+				Enabled: req.Enabled, SortOrder: req.SortOrder, Label: req.Label,
+				ExpectedVersion: req.ExpectedVersion,
+				ActorUserID:     premiumAdminActorID(req.Actor), Date: int(s.now().Unix()),
+				Reason: req.Reason, CommandKey: req.CommandID,
+			})
+			if err != nil {
+				return CommandResult{Details: details}, err
+			}
+			details["plan"] = updated
+			return CommandResult{Message: "premium plan saved", Details: details}, nil
+		})
 }
 
 func (s *Service) GrantStars(ctx context.Context, req GrantStarsRequest) (CommandResult, error) {
@@ -1210,6 +1452,9 @@ func (s *Service) GrantStars(ctx context.Context, req GrantStarsRequest) (Comman
 func (s *Service) SetVerified(ctx context.Context, req SetVerifiedRequest) (CommandResult, error) {
 	if req.UserID <= 0 {
 		return CommandResult{}, fmt.Errorf("user_id is required")
+	}
+	if domain.IsSystemUserID(req.UserID) && !req.Verified {
+		return CommandResult{}, fmt.Errorf("system user verification cannot be removed")
 	}
 	if s == nil || s.users == nil {
 		return CommandResult{}, fmt.Errorf("admin user dependency is not configured")
@@ -1854,6 +2099,207 @@ func (s *Service) DeleteCollectibleUsername(ctx context.Context, req DeleteColle
 		}
 		return CommandResult{Message: "collectible username deleted", Details: details}, nil
 	})
+}
+
+func (s *Service) CollectiblePhones(ctx context.Context, filter domain.CollectiblePhoneFilter) ([]domain.CollectiblePhone, error) {
+	if s == nil || s.collectiblePhones == nil {
+		return nil, fmt.Errorf("collectible phone dependency is not configured")
+	}
+	return s.collectiblePhones.ListCollectiblePhones(ctx, filter)
+}
+
+func (s *Service) CollectiblePhoneByID(ctx context.Context, id int64) (domain.CollectiblePhone, error) {
+	if s == nil || s.collectiblePhones == nil {
+		return domain.CollectiblePhone{}, fmt.Errorf("collectible phone dependency is not configured")
+	}
+	return s.collectiblePhones.CollectiblePhoneByID(ctx, id)
+}
+
+func (s *Service) CollectiblePhoneTransfers(ctx context.Context, id int64, limit int) ([]domain.CollectiblePhoneTransfer, error) {
+	if s == nil || s.collectiblePhones == nil {
+		return nil, fmt.Errorf("collectible phone dependency is not configured")
+	}
+	return s.collectiblePhones.CollectiblePhoneTransfers(ctx, id, limit)
+}
+
+func (s *Service) MintCollectiblePhone(ctx context.Context, req MintCollectiblePhoneRequest) (CommandResult, error) {
+	if s == nil || s.collectiblePhones == nil {
+		return CommandResult{}, fmt.Errorf("collectible phone dependency is not configured")
+	}
+	req.Phone = domain.NormalizeCollectiblePhone(req.Phone)
+	if req.Tier == "" {
+		req.Tier = domain.CollectiblePhoneTierStandard
+	}
+	req.Currency = strings.ToUpper(strings.TrimSpace(req.Currency))
+	if req.Currency == "" {
+		req.Currency = domain.CollectibleCurrencyUSD
+	}
+	req.CryptoCurrency = strings.ToUpper(strings.TrimSpace(req.CryptoCurrency))
+	purchase, err := collectiblePurchaseDate(req.PurchaseDate, s.now)
+	if err != nil {
+		return CommandResult{}, err
+	}
+	domainReq := domain.MintCollectiblePhoneRequest{Phone: req.Phone, Tier: req.Tier, OwnerUserID: req.OwnerUserID, PurchaseDate: purchase,
+		Currency: req.Currency, Amount: req.Amount, CryptoCurrency: req.CryptoCurrency, CryptoAmount: req.CryptoAmount, URL: strings.TrimSpace(req.URL), Actor: req.Actor, Reason: req.Reason}
+	if err := domainReq.Validate(); err != nil {
+		return CommandResult{}, err
+	}
+	return s.runCommand(ctx, req.CommandMeta, ActionMintCollectiblePhone, req.OwnerUserID, domain.Peer{Type: domain.PeerTypeUser, ID: req.OwnerUserID}, req, func() (CommandResult, error) {
+		details := map[string]any{"phone": req.Phone, "tier": string(req.Tier), "owner_user_id": strconv.FormatInt(req.OwnerUserID, 10), "currency": req.Currency, "amount": strconv.FormatInt(req.Amount, 10)}
+		if _, err := s.collectiblePhones.CollectiblePhone(ctx, req.Phone); err == nil {
+			return CommandResult{Details: details}, domain.ErrCollectiblePhoneInvalid
+		} else if !errors.Is(err, domain.ErrCollectiblePhoneNotFound) {
+			return CommandResult{Details: details}, err
+		}
+		if req.DryRun {
+			return CommandResult{Message: "collectible phone mint validated", Details: details}, nil
+		}
+		domainReq.CommandKey = "admin-collectible-phone-mint:" + req.CommandID
+		a, created, err := s.collectiblePhones.MintCollectiblePhone(ctx, domainReq)
+		if err != nil {
+			return CommandResult{Details: details}, err
+		}
+		details["collectible_id"] = strconv.FormatInt(a.ID, 10)
+		details["created"] = created
+		details["status"] = string(a.Status)
+		s.notifyCollectiblePhoneOwners(ctx, 0, a.OwnerUserID)
+		return CommandResult{Message: "collectible phone minted", Details: details}, nil
+	})
+}
+
+func (s *Service) UpdateCollectiblePhonePrice(ctx context.Context, req UpdateCollectiblePhonePriceRequest) (CommandResult, error) {
+	if s == nil || s.collectiblePhones == nil {
+		return CommandResult{}, fmt.Errorf("collectible phone dependency is not configured")
+	}
+	req.Phone = domain.NormalizeCollectiblePhone(req.Phone)
+	req.Currency = strings.ToUpper(strings.TrimSpace(req.Currency))
+	req.CryptoCurrency = strings.ToUpper(strings.TrimSpace(req.CryptoCurrency))
+	d := domain.UpdateCollectiblePhonePriceRequest{Phone: req.Phone, Currency: req.Currency, Amount: req.Amount,
+		CryptoCurrency: req.CryptoCurrency, CryptoAmount: req.CryptoAmount, Actor: req.Actor, Reason: req.Reason}
+	if err := d.Validate(); err != nil {
+		return CommandResult{}, err
+	}
+	return s.runCommand(ctx, req.CommandMeta, ActionUpdateCollectiblePhonePrice, 0, domain.Peer{}, req, func() (CommandResult, error) {
+		a, err := s.collectiblePhones.CollectiblePhone(ctx, req.Phone)
+		if err != nil {
+			return CommandResult{}, err
+		}
+		details := map[string]any{"phone": req.Phone, "owner_user_id": strconv.FormatInt(a.OwnerUserID, 10),
+			"currency": req.Currency, "amount": strconv.FormatInt(req.Amount, 10), "crypto_currency": req.CryptoCurrency,
+			"crypto_amount": strconv.FormatInt(req.CryptoAmount, 10)}
+		if req.DryRun {
+			return CommandResult{Message: "collectible phone price update validated", Details: details}, nil
+		}
+		u, changed, err := s.collectiblePhones.UpdateCollectiblePhonePrice(ctx, d)
+		if err != nil {
+			return CommandResult{Details: details}, err
+		}
+		details["changed"] = changed
+		s.notifyCollectiblePhoneOwners(ctx, u.OwnerUserID)
+		return CommandResult{Message: "collectible phone price updated", Details: details}, nil
+	})
+}
+
+func (s *Service) TransferCollectiblePhone(ctx context.Context, req TransferCollectiblePhoneRequest) (CommandResult, error) {
+	if s == nil || s.collectiblePhones == nil {
+		return CommandResult{}, fmt.Errorf("collectible phone dependency is not configured")
+	}
+	req.Phone = domain.NormalizeCollectiblePhone(req.Phone)
+	d := domain.TransferCollectiblePhoneRequest{Phone: req.Phone, ToUserID: req.ToUserID, Actor: req.Actor, Reason: req.Reason}
+	if err := d.Validate(); err != nil {
+		return CommandResult{}, err
+	}
+	return s.runCommand(ctx, req.CommandMeta, ActionTransferCollectiblePhone, req.ToUserID, domain.Peer{Type: domain.PeerTypeUser, ID: req.ToUserID}, req, func() (CommandResult, error) {
+		a, err := s.collectiblePhones.CollectiblePhone(ctx, req.Phone)
+		if err != nil {
+			return CommandResult{}, err
+		}
+		details := map[string]any{"phone": req.Phone, "from_user_id": strconv.FormatInt(a.OwnerUserID, 10), "to_user_id": strconv.FormatInt(req.ToUserID, 10)}
+		if req.DryRun {
+			return CommandResult{Message: "collectible phone transfer validated", Details: details}, nil
+		}
+		d.CommandKey = "admin-collectible-phone-transfer:" + req.CommandID
+		u, changed, err := s.collectiblePhones.TransferCollectiblePhone(ctx, d)
+		if err != nil {
+			return CommandResult{Details: details}, err
+		}
+		details["changed"] = changed
+		s.notifyCollectiblePhoneOwners(ctx, a.OwnerUserID, u.OwnerUserID)
+		return CommandResult{Message: "collectible phone transferred", Details: details}, nil
+	})
+}
+
+func (s *Service) RevokeCollectiblePhone(ctx context.Context, req RevokeCollectiblePhoneRequest) (CommandResult, error) {
+	if s == nil || s.collectiblePhones == nil {
+		return CommandResult{}, fmt.Errorf("collectible phone dependency is not configured")
+	}
+	req.Phone = domain.NormalizeCollectiblePhone(req.Phone)
+	d := domain.RevokeCollectiblePhoneRequest{Phone: req.Phone, Burn: req.Burn, Actor: req.Actor, Reason: req.Reason}
+	if err := d.Validate(); err != nil {
+		return CommandResult{}, err
+	}
+	return s.runCommand(ctx, req.CommandMeta, ActionRevokeCollectiblePhone, 0, domain.Peer{}, req, func() (CommandResult, error) {
+		a, err := s.collectiblePhones.CollectiblePhone(ctx, req.Phone)
+		if err != nil {
+			return CommandResult{}, err
+		}
+		details := map[string]any{"phone": req.Phone, "previous_owner_user_id": strconv.FormatInt(a.OwnerUserID, 10), "burn": req.Burn}
+		if req.DryRun {
+			return CommandResult{Message: "collectible phone revoke validated", Details: details}, nil
+		}
+		d.CommandKey = "admin-collectible-phone-revoke:" + req.CommandID
+		u, changed, err := s.collectiblePhones.RevokeCollectiblePhone(ctx, d)
+		if err != nil {
+			return CommandResult{Details: details}, err
+		}
+		details["changed"] = changed
+		details["status"] = string(u.Status)
+		s.notifyCollectiblePhoneOwners(ctx, a.OwnerUserID, 0)
+		return CommandResult{Message: "collectible phone revoked", Details: details}, nil
+	})
+}
+
+func (s *Service) DeleteCollectiblePhone(ctx context.Context, req DeleteCollectiblePhoneRequest) (CommandResult, error) {
+	if s == nil || s.collectiblePhones == nil {
+		return CommandResult{}, fmt.Errorf("collectible phone dependency is not configured")
+	}
+	req.Phone = domain.NormalizeCollectiblePhone(req.Phone)
+	if !domain.ValidCollectiblePhone(req.Phone) {
+		return CommandResult{}, domain.ErrCollectiblePhoneInvalid
+	}
+	return s.runCommand(ctx, req.CommandMeta, ActionDeleteCollectiblePhone, 0, domain.Peer{}, req, func() (CommandResult, error) {
+		a, err := s.collectiblePhones.CollectiblePhone(ctx, req.Phone)
+		if err != nil {
+			return CommandResult{}, err
+		}
+		details := map[string]any{"phone": req.Phone, "previous_owner_user_id": strconv.FormatInt(a.OwnerUserID, 10)}
+		if req.DryRun {
+			return CommandResult{Message: "collectible phone delete validated", Details: details}, nil
+		}
+		deleted, err := s.collectiblePhones.DeleteCollectiblePhone(ctx, domain.DeleteCollectiblePhoneRequest{Phone: req.Phone, Actor: req.Actor, Reason: req.Reason, CommandKey: "admin-collectible-phone-delete:" + req.CommandID})
+		if err != nil {
+			return CommandResult{Details: details}, err
+		}
+		details["deleted"] = deleted
+		s.notifyCollectiblePhoneOwners(ctx, a.OwnerUserID, 0)
+		return CommandResult{Message: "collectible phone deleted", Details: details}, nil
+	})
+}
+
+func (s *Service) notifyCollectiblePhoneOwners(ctx context.Context, ids ...int64) {
+	seen := map[int64]struct{}{}
+	for _, id := range ids {
+		if id <= 0 {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		if u, found, err := s.users.AdminUser(ctx, id); err == nil && found {
+			_ = s.notifyUserChanged(ctx, u)
+		}
+	}
 }
 
 // RecomputeAccountRating rebuilds one user's composite rating from the current
@@ -2573,6 +3019,14 @@ func (s *Service) ImportOfficialStarGift(ctx context.Context, req ImportOfficial
 	}
 	if req.SupplyTotal <= 0 {
 		req.SupplyTotal = bundle.Gift.AvailabilityTotal
+		if req.SupplyTotal <= 0 {
+			// Official unlimited gifts do not carry availability_total. Their
+			// upgrade_variants is the complete model/pattern/backdrop combination
+			// count and is the only finite capacity supplied by the snapshot.
+			// Falling back to one made the first collectible exhaust the entire
+			// locally imported pool.
+			req.SupplyTotal = bundle.Gift.UpgradeVariants
+		}
 	}
 	if req.SlugPrefix = strings.ToLower(strings.TrimSpace(req.SlugPrefix)); req.SlugPrefix == "" {
 		req.SlugPrefix = "official-" + req.SourceGiftID
@@ -3045,6 +3499,19 @@ func premiumCommandDetails(u domain.User, months int, now time.Time) map[string]
 		"new_premium_until":       projected,
 		"would_change":            months > 0 || u.PremiumUntil != 0,
 	}
+}
+
+// premiumAdminActorID gives the entitlement/audit tables a stable positive
+// identity for an operator name without pretending that the operator is a
+// Telegram user.
+func premiumAdminActorID(actor string) int64 {
+	h := fnv.New64a()
+	_, _ = h.Write([]byte(strings.TrimSpace(actor)))
+	id := int64(h.Sum64() & 0x7fffffffffffffff)
+	if id == 0 {
+		return 1
+	}
+	return id
 }
 
 func revokeTargets(items []domain.Authorization, req RevokeSessionsRequest) ([]domain.Authorization, domain.Authorization, error) {

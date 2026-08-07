@@ -170,6 +170,7 @@ func (r *Router) sendOutgoing(ctx context.Context, userID int64, peer domain.Pee
 		Date:                   int(r.clock.Now().Unix()),
 		OriginAuthKeyID:        authKeyID,
 		OriginSessionID:        sessionID,
+		OriginClientSession:    clientSessionMetadataFromContext(ctx),
 		RecipientBlocked:       recipientBlocked,
 		IdempotencyFingerprint: p.idempotencyFingerprint,
 		IdempotencyPreflighted: p.idempotencyPreflighted,

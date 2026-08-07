@@ -65,6 +65,7 @@ Telegram-compatible server 的用户。
 | ✅ | 媒体与文件 | upload、download、本地 blob 存储、照片、文档、缩略图、规范 GIFv 转换、外链媒体抓取、网页预览、地图缩略图缓存、用户/频道头像。 |
 | ✅ | Stickers 与 Reactions | sticker/reaction catalog、seed 支持、saved GIFs、recent reactions、top reactions、default reactions、reaction moderation 相关路径。 |
 | ✅ | Gifts 与 Stars | 动态 star gift catalog、后台导入、收藏品/唯一礼物升级流程、预付升级跟踪，以及本地 stars ledger 基础。 |
+| ✅ | Stars 购买 Premium | 内置 `@premiumbot`、Layer 228 自购/赠送 invoice、原子 Stars 结算、到期 entitlement、退款，以及 Bot API `giftPremiumSubscription`。详见 [docs/premium-stars.md](docs/premium-stars.md)。 |
 | ✅ | Bots 与 Mini Apps | bot 服务基础、callbacks、inline helpers、webview/mini-app 路径、适配 `python-telegram-bot` 等库的最小 Bot API gateway、持久化 `getUpdates` 投递队列和 demo 工具。 |
 | ✅ | 通话与直播 | 私聊通话信令基础、group call 状态、RTMP live stream、定时视频通话、频道 `join_as` 身份、SFU/TURN building blocks、liveness 与 expiry worker。 |
 | ✅ | 管理与运维 | Admin API/UI backend、PostgreSQL migrations、Redis 易失态、retention workers、pprof/debug hooks、load-test helpers。 |

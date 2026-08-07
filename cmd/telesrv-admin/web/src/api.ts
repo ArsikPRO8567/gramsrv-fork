@@ -18,6 +18,8 @@ import type {
   ChannelListResponse,
   CollectibleUsernameDetail,
   CollectibleUsernameListResponse,
+  CollectiblePhoneListResponse,
+  CollectiblePhoneDetail,
   CommandResult,
   GroupMessageDetail,
   GroupMessageListResponse,
@@ -27,6 +29,7 @@ import type {
   ModerationCaseRow,
   ModerationReport,
   OfficialStarGiftListResponse,
+  PremiumPlansResponse,
   StarGiftCollectiblePreview,
   StarGiftListResponse,
   VerificationApplicationDetail,
@@ -153,10 +156,15 @@ export const api = {
   channel: (id: number) => request<ChannelDetail>(`/api/channels/${id}`),
   bots: (params: URLSearchParams) => request<BotListResponse>(`/api/bots?${params.toString()}`),
   bot: (id: number) => request<BotDetail>(`/api/bots/${id}`),
+  premiumPlans: () => request<PremiumPlansResponse>("/api/premium/plans"),
   collectibleUsernames: (params: URLSearchParams) =>
     request<CollectibleUsernameListResponse>(`/api/collectible-usernames?${params.toString()}`),
   collectibleUsername: (id: string) =>
     request<CollectibleUsernameDetail>(`/api/collectible-usernames/${encodeURIComponent(id)}`),
+  collectiblePhones: (params: URLSearchParams) =>
+    request<CollectiblePhoneListResponse>(`/api/collectible-phones?${params.toString()}`),
+  collectiblePhone: (id: string) =>
+    request<CollectiblePhoneDetail>(`/api/collectible-phones/${encodeURIComponent(id)}`),
   accountRatings: (params: URLSearchParams) =>
     request<AccountRatingListResponse>(`/api/account-ratings?${params.toString()}`),
   accountRating: (userID: string) =>

@@ -65,6 +65,20 @@ func ensureOfficialSystemUserWithDB(ctx context.Context, db sqlcgen.DBTX, msg do
 	if !ok {
 		return nil
 	}
+	// Login-code delivery is a critical authentication path, not a branding
+	// migration. Once the official identity exists, never rewrite its unique
+	// phone/username from request-time code: a source update may change the
+	// compiled defaults while the old or new value is temporarily occupied,
+	// turning every auth.sendCode for an existing account into a generic 500.
+	// Explicit schema/data migrations own identity changes; this helper only
+	// seeds a missing row.
+	var exists bool
+	if err := db.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM users WHERE id = $1)`, u.ID).Scan(&exists); err != nil {
+		return fmt.Errorf("check official system user: %w", err)
+	}
+	if exists {
+		return nil
+	}
 	if _, err := db.Exec(ctx, `
 WITH desired (
 	id, access_hash, phone, first_name, last_name, username,

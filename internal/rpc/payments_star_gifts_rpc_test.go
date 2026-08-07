@@ -423,6 +423,123 @@ func TestCraftStarGiftAcceptsOfficialSlugAndCanonicalizesAliases(t *testing.T) {
 	}
 }
 
+func TestCraftStarGiftSuccessCarriesClientSafeCraftMessageOnWire(t *testing.T) {
+	r, _, ownerUser, _ := starGiftTestRouter(t)
+	owner := domain.Peer{Type: domain.PeerTypeUser, ID: ownerUser.ID}
+	model := collectibleRPCAttribute(domain.StarGiftCollectibleModel, 7801, "Crafted Model")
+	model.Crafted = true
+	model.RarityKind = domain.StarGiftRarityUncommon
+	model.RarityPermille = 0
+	pattern := collectibleRPCAttribute(domain.StarGiftCollectiblePattern, 7802, "Pattern")
+	backdrop := collectibleRPCAttribute(domain.StarGiftCollectibleBackdrop, 7803, "Backdrop")
+	unique := domain.UniqueStarGift{
+		ID: 9901, GiftID: 8001, SourceSavedGiftID: 51, Title: "Crafted Gift",
+		Slug: "crafted-gift-1", Num: 1, Owner: owner, Crafted: true,
+		Model: model, Pattern: pattern, Backdrop: backdrop,
+		AvailabilityIssued: 1, AvailabilityTotal: 100,
+	}
+	outputAction := &domain.MessageStarGiftUniqueAction{
+		Gift: unique, FromUserID: owner.ID, Saved: true, Craft: true,
+	}
+	outputMessage := domain.Message{
+		ID: 120, OwnerUserID: owner.ID, Peer: owner, From: owner, Out: true, Date: 1700000100,
+		Media: &domain.MessageMedia{Kind: domain.MessageMediaKindService, ServiceAction: &domain.MessageServiceAction{
+			Kind: domain.MessageServiceActionStarGiftUnique, StarGiftUnique: outputAction,
+		}},
+	}
+	outputEvent := domain.UpdateEvent{
+		UserID: owner.ID, Type: domain.UpdateEventNewMessage, Pts: 42, PtsCount: 1,
+		Date: outputMessage.Date, Message: outputMessage,
+	}
+	sourceMessage := outputMessage
+	sourceMessage.ID = 119
+	sourceMessage.Media = &domain.MessageMedia{Kind: domain.MessageMediaKindService, ServiceAction: &domain.MessageServiceAction{
+		Kind:           domain.MessageServiceActionStarGiftUnique,
+		StarGiftUnique: &domain.MessageStarGiftUniqueAction{Gift: unique, FromUserID: owner.ID, Saved: true},
+	}}
+	sourceEvent := domain.UpdateEvent{
+		UserID: owner.ID, Type: domain.UpdateEventEditMessage, Pts: 41, PtsCount: 1,
+		Date: outputMessage.Date, Message: sourceMessage,
+	}
+	service := &craftStarGiftRPCService{
+		uniques: map[string]domain.UniqueStarGift{unique.Slug: unique},
+		saved: map[int64]domain.SavedStarGift{
+			51: {ID: 51, Owner: owner, MsgID: 118, UpgradeMsgID: 119, UniqueGiftID: unique.ID},
+		},
+		result: domain.StarGiftCraftResult{
+			Success: true, Gift: &unique,
+			Send: domain.SendPrivateTextResult{
+				SenderMessage: outputMessage,
+				SenderEvent:   outputEvent,
+			},
+			SourceEdits: []domain.EditedMessageForUser{{
+				UserID: owner.ID, Message: sourceMessage, Event: sourceEvent,
+			}},
+		},
+	}
+	r.deps.Gifts = service
+	updatesClass, err := r.onPaymentsCraftStarGift(WithUserID(context.Background(), owner.ID),
+		&tg.PaymentsCraftStarGiftRequest{Stargift: []tg.InputSavedStarGiftClass{
+			&tg.InputSavedStarGiftSlug{Slug: unique.Slug},
+		}})
+	if err != nil {
+		t.Fatalf("craft success: %v", err)
+	}
+	updates, ok := updatesClass.(*tg.Updates)
+	if !ok || len(updates.Updates) != 2 {
+		t.Fatalf("craft success updates = %T %#v", updatesClass, updatesClass)
+	}
+	if edit, ok := updates.Updates[0].(*tg.UpdateEditMessage); !ok || edit.Pts != sourceEvent.Pts {
+		t.Fatalf("craft source update = %T %#v", updates.Updates[0], updates.Updates[0])
+	}
+	if created, ok := updates.Updates[1].(*tg.UpdateNewMessage); !ok || created.Pts != outputEvent.Pts {
+		t.Fatalf("craft result update = %T %#v", updates.Updates[1], updates.Updates[1])
+	}
+
+	wire := &bin.Buffer{}
+	if err := tlprofile.EncodeObject(tlprofile.Profile228, updates, wire); err != nil {
+		t.Fatalf("encode Layer 228 craft result: %v", err)
+	}
+	decodedObject, err := tlprofile.DecodeObject(tlprofile.Profile228, &bin.Buffer{Buf: wire.Copy()}, tlprofile.Limits{})
+	if err != nil {
+		t.Fatalf("decode Layer 228 craft result: %v", err)
+	}
+	decoded, ok := decodedObject.(*tg.Updates)
+	if !ok || len(decoded.Updates) != 2 {
+		t.Fatalf("decoded craft result = %T %#v", decodedObject, decodedObject)
+	}
+	created, ok := decoded.Updates[1].(*tg.UpdateNewMessage)
+	if !ok {
+		t.Fatalf("decoded terminal update = %T", decoded.Updates[1])
+	}
+	message, ok := created.Message.(*tg.MessageService)
+	if !ok {
+		t.Fatalf("decoded craft message = %T", created.Message)
+	}
+	action, ok := message.Action.(*tg.MessageActionStarGiftUnique)
+	if !ok || !action.Craft || !action.Saved {
+		t.Fatalf("decoded craft action = %T %#v", message.Action, message.Action)
+	}
+	gift, ok := action.Gift.(*tg.StarGiftUnique)
+	if !ok || !gift.Crafted || gift.ID != unique.ID || gift.Slug != unique.Slug || len(gift.Attributes) < 3 {
+		t.Fatalf("decoded crafted gift = %T %#v", action.Gift, action.Gift)
+	}
+	wireModel, ok := gift.Attributes[0].(*tg.StarGiftAttributeModel)
+	if !ok || !wireModel.Crafted {
+		t.Fatalf("decoded crafted model = %T %#v", gift.Attributes[0], gift.Attributes[0])
+	}
+	if _, ok := wireModel.Document.(*tg.Document); !ok {
+		t.Fatalf("decoded crafted model document = %T", wireModel.Document)
+	}
+	wirePattern, ok := gift.Attributes[1].(*tg.StarGiftAttributePattern)
+	if !ok {
+		t.Fatalf("decoded crafted pattern = %T", gift.Attributes[1])
+	}
+	if _, ok := wirePattern.Document.(*tg.Document); !ok {
+		t.Fatalf("decoded crafted pattern document = %T", wirePattern.Document)
+	}
+}
+
 type upgradeReplayRPCService struct {
 	GiftsService
 	saved        domain.SavedStarGift

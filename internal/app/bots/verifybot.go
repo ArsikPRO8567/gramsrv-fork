@@ -355,6 +355,9 @@ func (s *Service) OnCallbackQuery(ctx context.Context, query domain.BotCallbackQ
 		// (verifierbot.go).
 		return s.onVerifierCallback(ctx, query)
 	}
+	if s.premium != nil && query.BotUserID == s.premium.BotUserID() {
+		return s.onPremiumCallback(ctx, query)
+	}
 	if query.BotUserID != domain.VerifyBotUserID {
 		// The other built-in bots never attach an inline keyboard, so there is
 		// nothing to route. An empty answer still beats hanging the click for the

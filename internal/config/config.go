@@ -91,6 +91,13 @@ type Config struct {
 	// PublicBaseURL 是所有客户端可见 telesrv 链接的公开根 URL。
 	// 生产默认 https://telesrv.net；本地可设为 http://127.0.0.1:2401。
 	PublicBaseURL string
+	// UpdatePublicURL is advertised to native clients through
+	// help.getConfig.autoupdate_url_prefix. Empty disables desktop updates.
+	UpdatePublicURL string
+	// UpdateServiceURL is the internal HTTP endpoint used to resolve
+	// help.getAppUpdate responses. It defaults to UpdatePublicURL when enabled.
+	UpdateServiceURL     string
+	UpdateRequestTimeout time.Duration
 	// PublicAppScheme 是公开落地页自动唤起自建客户端时使用的 URL scheme。
 	// 必须与 TDesktop/Android 客户端构建时注册的 scheme 一致，且不能占用 tg/http/https。
 	PublicAppScheme string
@@ -354,6 +361,13 @@ type Config struct {
 	// PremiumGrantMonths 是新注册账号默认赠送的会员月数；0 关闭赠送。
 	// 存量账号的一次性赠送由迁移 0094 backfill，不受该配置影响。
 	PremiumGrantMonths int
+	// PremiumBotUsername is the public username advertised in app config and
+	// Premium deep links. The reserved bot id remains stable.
+	PremiumBotUsername string
+	PremiumBotUserID   int64
+	// PremiumPlans is the authoritative Stars catalog. Each entry carries a
+	// fixed month count, exact duration in days and Stars price.
+	PremiumPlans []domain.PremiumPlan
 
 	// PasskeyRPID 是 passkey(WebAuthn) relying-party id（域名）。服务端据此校验
 	// authData.rpIdHash；真机经 Android CredentialManager 时须与托管 assetlinks.json
@@ -577,6 +591,20 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, fmt.Errorf("TELESRV_PUBLIC_BASE_URL: %w", err)
 	}
+	updatePublicURL := strings.TrimSpace(envAllowEmptyOr("TELESRV_UPDATE_PUBLIC_URL", ""))
+	if updatePublicURL != "" {
+		updatePublicURL, err = links.ValidateBaseURL(updatePublicURL)
+		if err != nil {
+			return Config{}, fmt.Errorf("TELESRV_UPDATE_PUBLIC_URL: %w", err)
+		}
+	}
+	updateServiceURL := strings.TrimSpace(envOr("TELESRV_UPDATE_SERVICE_URL", updatePublicURL))
+	if updateServiceURL != "" {
+		updateServiceURL, err = links.ValidateBaseURL(updateServiceURL)
+		if err != nil {
+			return Config{}, fmt.Errorf("TELESRV_UPDATE_SERVICE_URL: %w", err)
+		}
+	}
 	publicAppScheme, err := links.ValidateAppScheme(envOr("TELESRV_PUBLIC_APP_SCHEME", links.DefaultAppScheme))
 	if err != nil {
 		return Config{}, fmt.Errorf("TELESRV_PUBLIC_APP_SCHEME: %w", err)
@@ -607,6 +635,18 @@ func Load() (Config, error) {
 	adminScopedTokens, err := parseAdminScopedTokens(envAllowEmptyOr("TELESRV_ADMIN_SCOPED_TOKENS", ""))
 	if err != nil {
 		return Config{}, err
+	}
+	premiumBotUsername := strings.TrimPrefix(strings.TrimSpace(envOr("TELESRV_PREMIUM_BOT_USERNAME", "premiumbot")), "@")
+	if !domain.ValidBotUsername(premiumBotUsername) {
+		return Config{}, fmt.Errorf("TELESRV_PREMIUM_BOT_USERNAME must be a valid username")
+	}
+	premiumBotUserID := envInt64Or("TELESRV_PREMIUM_BOT_USER_ID", domain.PremiumBotUserID)
+	if !domain.ValidPremiumBotUserID(premiumBotUserID) {
+		return Config{}, fmt.Errorf("TELESRV_PREMIUM_BOT_USER_ID must be positive and must not collide with another system account")
+	}
+	premiumPlans, err := parsePremiumPlans(envOr("TELESRV_PREMIUM_PLANS", "3:90:750,6:180:1300,12:365:2400"))
+	if err != nil {
+		return Config{}, fmt.Errorf("TELESRV_PREMIUM_PLANS: %w", err)
 	}
 
 	cfg := Config{
@@ -648,6 +688,9 @@ func Load() (Config, error) {
 		AdminAPIAddr:                         envAllowEmptyOr("TELESRV_ADMIN_API_ADDR", ""),
 		AdminAPIToken:                        envOr("TELESRV_ADMIN_API_TOKEN", ""),
 		PublicBaseURL:                        publicBaseURL,
+		UpdatePublicURL:                      updatePublicURL,
+		UpdateServiceURL:                     updateServiceURL,
+		UpdateRequestTimeout:                 envDurationOr("TELESRV_UPDATE_REQUEST_TIMEOUT", 2*time.Second),
 		PublicAppScheme:                      publicAppScheme,
 		PublicAppLinkBase:                    publicAppLinkBase,
 		PublicWebBaseURL:                     publicWebBaseURL,
@@ -777,6 +820,9 @@ func Load() (Config, error) {
 		CallExpiryInterval:     envDurationOr("TELESRV_CALL_EXPIRY_INTERVAL", time.Second),
 
 		PremiumGrantMonths:               envIntOr("TELESRV_PREMIUM_GRANT_MONTHS", 3),
+		PremiumBotUsername:               premiumBotUsername,
+		PremiumBotUserID:                 premiumBotUserID,
+		PremiumPlans:                     premiumPlans,
 		PasskeyRPID:                      envOr("TELESRV_PASSKEY_RP_ID", "telesrv.net"),
 		PasskeyAllowedOrigins:            envListOr("TELESRV_PASSKEY_ALLOWED_ORIGINS", nil),
 		StarsStartingGrant:               int64(envIntOr("TELESRV_STARS_STARTING_GRANT", 1000)),
@@ -884,7 +930,46 @@ func Load() (Config, error) {
 	if err := validateTelegramLoginConfig(cfg); err != nil {
 		return Config{}, err
 	}
+	if cfg.UpdateRequestTimeout <= 0 || cfg.UpdateRequestTimeout > 30*time.Second {
+		return Config{}, fmt.Errorf("TELESRV_UPDATE_REQUEST_TIMEOUT must be greater than zero and at most 30s")
+	}
 	return cfg, nil
+}
+
+func parsePremiumPlans(raw string) ([]domain.PremiumPlan, error) {
+	parts := strings.Split(strings.TrimSpace(raw), ",")
+	if len(parts) == 0 {
+		return nil, fmt.Errorf("at least one plan is required")
+	}
+	plans := make([]domain.PremiumPlan, 0, len(parts))
+	seen := make(map[int]struct{}, len(parts))
+	for index, item := range parts {
+		fields := strings.Split(strings.TrimSpace(item), ":")
+		if len(fields) != 3 {
+			return nil, fmt.Errorf("plan %q must use months:days:stars", item)
+		}
+		months, errMonths := strconv.Atoi(strings.TrimSpace(fields[0]))
+		days, errDays := strconv.Atoi(strings.TrimSpace(fields[1]))
+		amount, errAmount := strconv.ParseInt(strings.TrimSpace(fields[2]), 10, 64)
+		if errMonths != nil || errDays != nil || errAmount != nil ||
+			months <= 0 || days <= 0 || amount <= 0 {
+			return nil, fmt.Errorf("plan %q contains a non-positive integer", item)
+		}
+		if _, exists := seen[months]; exists {
+			return nil, fmt.Errorf("duplicate %d-month plan", months)
+		}
+		seen[months] = struct{}{}
+		plan := domain.PremiumPlan{
+			Months: months, DurationDays: days, AmountStars: amount,
+			Enabled: true, SortOrder: (index + 1) * 10,
+			Label: fmt.Sprintf("%d months", months), Version: 1,
+		}
+		if !plan.Valid() {
+			return nil, fmt.Errorf("plan %q exceeds Premium catalog bounds", item)
+		}
+		plans = append(plans, plan)
+	}
+	return plans, nil
 }
 
 func normalizeDefaultCountryCode(raw string) (string, error) {
