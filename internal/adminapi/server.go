@@ -49,8 +49,16 @@ type Service interface {
 	SetChannelFlags(ctx context.Context, req admin.SetChannelFlagsRequest) (admin.CommandResult, error)
 	CreateBot(ctx context.Context, req admin.CreateBotRequest) (admin.CommandResult, error)
 	DeleteBot(ctx context.Context, req admin.DeleteBotRequest) (admin.CommandResult, error)
+	ExportBotToken(ctx context.Context, req admin.ExportBotTokenRequest) (admin.CommandResult, error)
 	SetSupport(ctx context.Context, req admin.SetSupportRequest) (admin.CommandResult, error)
 	SetUsername(ctx context.Context, req admin.SetUsernameRequest) (admin.CommandResult, error)
+	SetProfile(ctx context.Context, req admin.SetProfileRequest) (admin.CommandResult, error)
+	SetPhone(ctx context.Context, req admin.SetPhoneRequest) (admin.CommandResult, error)
+	SetLoginEmail(ctx context.Context, req admin.SetLoginEmailRequest) (admin.CommandResult, error)
+	AccountAvatar(ctx context.Context, userID int64) ([]byte, string, bool, error)
+	SetAccountAvatar(ctx context.Context, req admin.SetAccountAvatarRequest) (admin.CommandResult, error)
+	ChannelAvatar(ctx context.Context, channelID int64) ([]byte, string, bool, error)
+	SetChannelAvatar(ctx context.Context, req admin.SetChannelAvatarRequest) (admin.CommandResult, error)
 	SetUserColor(ctx context.Context, req admin.SetUserColorRequest) (admin.CommandResult, error)
 	SetUserEmojiStatus(ctx context.Context, req admin.SetUserEmojiStatusRequest) (admin.CommandResult, error)
 	SetChannelSettings(ctx context.Context, req admin.SetChannelSettingsRequest) (admin.CommandResult, error)
@@ -200,6 +208,11 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("POST /v1/accounts/set-flags", s.authenticated(s.handleSetUserFlags))
 	mux.HandleFunc("POST /v1/accounts/set-support", s.authenticated(s.handleSetSupport))
 	mux.HandleFunc("POST /v1/accounts/set-username", s.authenticated(s.handleSetUsername))
+	mux.HandleFunc("GET /v1/accounts/{id}/avatar", s.authenticated(s.handleAccountAvatar))
+	mux.HandleFunc("POST /v1/accounts/set-profile", s.authenticated(s.handleSetProfile))
+	mux.HandleFunc("POST /v1/accounts/set-phone", s.authenticated(s.handleSetPhone))
+	mux.HandleFunc("POST /v1/accounts/set-login-email", s.authenticated(s.handleSetLoginEmail))
+	mux.HandleFunc("POST /v1/accounts/set-avatar", s.authenticated(s.handleSetAccountAvatar))
 	mux.HandleFunc("POST /v1/accounts/set-color", s.authenticated(s.handleSetUserColor))
 	mux.HandleFunc("POST /v1/accounts/set-emoji-status", s.authenticated(s.handleSetUserEmojiStatus))
 	mux.HandleFunc("POST /v1/accounts/revoke-sessions", s.authenticated(s.handleRevokeSessions))
@@ -209,9 +222,12 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("POST /v1/channels/set-username", s.authenticated(s.handleSetChannelUsername))
 	mux.HandleFunc("POST /v1/channels/set-color", s.authenticated(s.handleSetChannelColor))
 	mux.HandleFunc("POST /v1/channels/set-emoji-status", s.authenticated(s.handleSetChannelEmojiStatus))
+	mux.HandleFunc("GET /v1/channels/{id}/avatar", s.authenticated(s.handleChannelAvatar))
+	mux.HandleFunc("POST /v1/channels/set-avatar", s.authenticated(s.handleSetChannelAvatar))
 	mux.HandleFunc("POST /v1/bots/create", s.authenticated(s.handleCreateBot))
 	mux.HandleFunc("POST /v1/broadcasts/create", s.authenticated(s.handleCreateBroadcast))
 	mux.HandleFunc("POST /v1/bots/delete", s.authenticated(s.handleDeleteBot))
+	mux.HandleFunc("POST /v1/bots/export-token", s.authorized(PermissionBotTokenRead, s.handleExportBotToken))
 	mux.HandleFunc("POST /v1/messages/delete", s.authenticated(s.handleDeleteMessages))
 	mux.HandleFunc("POST /v1/messages/delete-history", s.authenticated(s.handleDeleteHistory))
 	mux.HandleFunc("POST /v1/gifts/import", s.authenticated(s.handleImportStarGift))
@@ -479,6 +495,136 @@ func (s *Server) handleSetUsername(w http.ResponseWriter, r *http.Request) {
 	writeCommandResult(w, result, err)
 }
 
+func (s *Server) handleAccountAvatar(w http.ResponseWriter, r *http.Request) {
+	userID, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil || userID <= 0 {
+		http.NotFound(w, r)
+		return
+	}
+	data, mimeType, found, err := s.svc.AccountAvatar(r.Context(), userID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if !found {
+		http.NotFound(w, r)
+		return
+	}
+	w.Header().Set("Content-Type", mimeType)
+	w.Header().Set("Content-Length", strconv.Itoa(len(data)))
+	w.Header().Set("Cache-Control", "private, max-age=300")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(data)
+}
+
+func (s *Server) handleSetProfile(w http.ResponseWriter, r *http.Request) {
+	var req admin.SetProfileRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	result, err := s.svc.SetProfile(r.Context(), req)
+	writeCommandResult(w, result, err)
+}
+
+func (s *Server) handleSetPhone(w http.ResponseWriter, r *http.Request) {
+	var req admin.SetPhoneRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	result, err := s.svc.SetPhone(r.Context(), req)
+	writeCommandResult(w, result, err)
+}
+
+func (s *Server) handleSetLoginEmail(w http.ResponseWriter, r *http.Request) {
+	var req admin.SetLoginEmailRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	result, err := s.svc.SetLoginEmail(r.Context(), req)
+	writeCommandResult(w, result, err)
+}
+
+func (s *Server) handleSetAccountAvatar(w http.ResponseWriter, r *http.Request) {
+	var req admin.SetAccountAvatarRequest
+	if !s.decodeAvatarUpload(w, r, &req.FileName, &req.Data) {
+		return
+	}
+	if !decodeMultipartMetadata(w, r, &req) {
+		return
+	}
+	result, err := s.svc.SetAccountAvatar(r.Context(), req)
+	writeCommandResult(w, result, err)
+}
+
+func (s *Server) handleChannelAvatar(w http.ResponseWriter, r *http.Request) {
+	channelID, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil || channelID <= 0 {
+		http.NotFound(w, r)
+		return
+	}
+	data, mimeType, found, err := s.svc.ChannelAvatar(r.Context(), channelID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if !found {
+		http.NotFound(w, r)
+		return
+	}
+	w.Header().Set("Content-Type", mimeType)
+	w.Header().Set("Content-Length", strconv.Itoa(len(data)))
+	w.Header().Set("Cache-Control", "private, max-age=300")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(data)
+}
+
+func (s *Server) handleSetChannelAvatar(w http.ResponseWriter, r *http.Request) {
+	var req admin.SetChannelAvatarRequest
+	if !s.decodeAvatarUpload(w, r, &req.FileName, &req.Data) {
+		return
+	}
+	if !decodeMultipartMetadata(w, r, &req) {
+		return
+	}
+	result, err := s.svc.SetChannelAvatar(r.Context(), req)
+	writeCommandResult(w, result, err)
+}
+
+func (s *Server) decodeAvatarUpload(w http.ResponseWriter, r *http.Request, fileName *string, data *[]byte) bool {
+	r.Body = http.MaxBytesReader(w, r.Body, admin.MaxAccountAvatarBytes+(1<<20))
+	if err := r.ParseMultipartForm(1 << 20); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid multipart form: "+err.Error())
+		return false
+	}
+	if r.MultipartForm != nil {
+		defer r.MultipartForm.RemoveAll()
+	}
+	file, header, err := r.FormFile("file")
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "avatar file is required")
+		return false
+	}
+	defer file.Close()
+	raw, err := io.ReadAll(io.LimitReader(file, admin.MaxAccountAvatarBytes+1))
+	if err != nil || len(raw) == 0 || int64(len(raw)) > admin.MaxAccountAvatarBytes {
+		writeError(w, http.StatusBadRequest, "avatar file is empty or too large")
+		return false
+	}
+	*fileName = header.Filename
+	*data = raw
+	return true
+}
+
+func decodeMultipartMetadata(w http.ResponseWriter, r *http.Request, dst any) bool {
+	dec := json.NewDecoder(strings.NewReader(r.FormValue("metadata")))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(dst); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid metadata: "+err.Error())
+		return false
+	}
+	return true
+}
+
 func (s *Server) handleSetUserColor(w http.ResponseWriter, r *http.Request) {
 	var req admin.SetUserColorRequest
 	if !decodeJSON(w, r, &req) {
@@ -564,6 +710,15 @@ func (s *Server) handleDeleteBot(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	result, err := s.svc.DeleteBot(r.Context(), req)
+	writeCommandResult(w, result, err)
+}
+
+func (s *Server) handleExportBotToken(w http.ResponseWriter, r *http.Request) {
+	var req admin.ExportBotTokenRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	result, err := s.svc.ExportBotToken(r.Context(), req)
 	writeCommandResult(w, result, err)
 }
 

@@ -3,6 +3,7 @@ import { useEffect, useState } from "react";
 import { api, errorMessage } from "../api";
 import { Alert, Badge, EmptyRow, Metric, PageFrame, QueryPanel } from "../components/ui";
 import { ScamFakeBadges } from "../components/flags";
+import { Avatar } from "../components/Avatar";
 import { useI18n } from "../i18n";
 import { displayUsername, formatDate } from "../lib/format";
 import type { Navigate } from "../routing";
@@ -136,7 +137,7 @@ export function BotsPage({ navigate }: { navigate: Navigate }) {
               <tr key={row.ID}>
                 <td className="mono">{row.ID}</td>
                 <td>{displayUsername(row.Username) || "-"}</td>
-                <td>{row.FirstName || "-"}</td>
+                <td><span className="table-identity"><Avatar id={row.ID} label={`${row.FirstName} ${row.LastName}`.trim() || row.Username} />{`${row.FirstName} ${row.LastName}`.trim() || "-"}</span></td>
                 <td className="mono">{row.OwnerUserID > 0 ? row.OwnerUserID : "-"}</td>
                 <td>{row.Verified ? <Badge tone="good"><BadgeCheck size={12} /> {t("common.verified")}</Badge> : <Badge>{t("account.notVerified")}</Badge>} <ScamFakeBadges scam={row.Scam} fake={row.Fake} /></td>
                 <td>{row.System ? <Badge tone="warn">{t("bots.system")}</Badge> : <Badge>{t("bots.user")}</Badge>}</td>

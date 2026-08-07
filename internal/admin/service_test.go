@@ -629,6 +629,10 @@ func (f *fakeBotService) DeleteBot(_ context.Context, botUserID int64) (domain.U
 	return domain.User{ID: botUserID, Bot: true, Deleted: true}, nil
 }
 
+func (f *fakeBotService) AdminExportBotToken(_ context.Context, _ int64) (string, error) {
+	return f.token, nil
+}
+
 type fakeRestrictionStore struct {
 	items    map[int64]domain.AccountFreeze
 	setCalls int
@@ -858,6 +862,31 @@ func (f *fakeUsersService) UpdateEmojiStatus(_ context.Context, userID int64, st
 	return u, nil
 }
 
+func (f *fakeUsersService) UpdateProfile(_ context.Context, userID int64, update domain.UserProfileUpdate) (domain.User, error) {
+	u, ok := f.users[userID]
+	if !ok {
+		return domain.User{}, domain.ErrUserNotFound
+	}
+	if update.HasFirstName {
+		u.FirstName = update.FirstName
+	}
+	if update.HasLastName {
+		u.LastName = update.LastName
+	}
+	f.users[userID] = u
+	return u, nil
+}
+
+func (f *fakeUsersService) SetPhone(_ context.Context, userID int64, phone string) (domain.User, error) {
+	u, ok := f.users[userID]
+	if !ok {
+		return domain.User{}, domain.ErrUserNotFound
+	}
+	u.Phone = phone
+	f.users[userID] = u
+	return u, nil
+}
+
 type fakeStarsService struct {
 	balances    map[int64]domain.StarsBalance
 	creditCalls int
@@ -997,6 +1026,17 @@ func (f *fakeChannelsService) AdminSetEmojiStatus(_ context.Context, channelID i
 		return domain.Channel{}, domain.ErrChannelInvalid
 	}
 	ch.EmojiStatus = status
+	f.channels[channelID] = ch
+	return ch, nil
+}
+
+func (f *fakeChannelsService) AdminSetPhoto(_ context.Context, channelID int64, photo domain.Photo) (domain.Channel, error) {
+	ch, ok := f.channels[channelID]
+	if !ok {
+		return domain.Channel{}, domain.ErrChannelInvalid
+	}
+	ch.PhotoID = photo.ID
+	ch.PhotoDCID = photo.DCID
 	f.channels[channelID] = ch
 	return ch, nil
 }

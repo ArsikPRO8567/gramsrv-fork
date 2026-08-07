@@ -243,6 +243,7 @@ type AccountDetail struct {
 	Fake           bool
 	Support        bool
 	Bot            bool
+	LoginEmail     string
 	StarsBalance   int64
 	StarsGranted   bool
 	Restriction    RestrictionRow
@@ -433,6 +434,7 @@ type BotRow struct {
 	ID          int64
 	Username    string
 	FirstName   string
+	LastName    string
 	Verified    bool
 	Scam        bool
 	Fake        bool
@@ -461,7 +463,7 @@ func (s *readStore) ListBots(ctx context.Context, beforeID int64, limit int) ([]
 		limit = accountListMaxLimit
 	}
 	rows, err := s.pool.Query(ctx, `
-SELECT u.id, COALESCE(NULLIF(u.username, ''), p.username_lower, ''), u.first_name, u.verified, u.scam, u.fake,
+SELECT u.id, COALESCE(NULLIF(u.username, ''), p.username_lower, ''), u.first_name, u.last_name, u.verified, u.scam, u.fake,
 	COALESCE(b.owner_user_id, 0), u.created_at, u.updated_at
 FROM users u
 LEFT JOIN bots b ON b.bot_user_id = u.id
@@ -476,7 +478,7 @@ LIMIT $2`, beforeID, limit+1)
 	out := make([]BotRow, 0, limit+1)
 	for rows.Next() {
 		var item BotRow
-		if err := rows.Scan(&item.ID, &item.Username, &item.FirstName, &item.Verified, &item.Scam, &item.Fake, &item.OwnerUserID, &item.CreatedAt, &item.UpdatedAt); err != nil {
+		if err := rows.Scan(&item.ID, &item.Username, &item.FirstName, &item.LastName, &item.Verified, &item.Scam, &item.Fake, &item.OwnerUserID, &item.CreatedAt, &item.UpdatedAt); err != nil {
 			return nil, false, err
 		}
 		item.System = domain.IsSystemUserID(item.ID)
@@ -503,7 +505,7 @@ func (s *readStore) SearchBots(ctx context.Context, q string) ([]BotRow, error) 
 	}
 	username := strings.ToLower(strings.TrimPrefix(q, "@"))
 	rows, err := s.pool.Query(ctx, `
-SELECT u.id, COALESCE(NULLIF(u.username, ''), p.username_lower, ''), u.first_name, u.verified, u.scam, u.fake,
+SELECT u.id, COALESCE(NULLIF(u.username, ''), p.username_lower, ''), u.first_name, u.last_name, u.verified, u.scam, u.fake,
 	COALESCE(b.owner_user_id, 0), u.created_at, u.updated_at
 FROM users u
 LEFT JOIN bots b ON b.bot_user_id = u.id
@@ -518,7 +520,7 @@ LIMIT $3`, id, username, accountSearchLimit)
 	out := make([]BotRow, 0)
 	for rows.Next() {
 		var item BotRow
-		if err := rows.Scan(&item.ID, &item.Username, &item.FirstName, &item.Verified, &item.Scam, &item.Fake, &item.OwnerUserID, &item.CreatedAt, &item.UpdatedAt); err != nil {
+		if err := rows.Scan(&item.ID, &item.Username, &item.FirstName, &item.LastName, &item.Verified, &item.Scam, &item.Fake, &item.OwnerUserID, &item.CreatedAt, &item.UpdatedAt); err != nil {
 			return nil, err
 		}
 		item.System = domain.IsSystemUserID(item.ID)
@@ -530,14 +532,14 @@ LIMIT $3`, id, username, accountSearchLimit)
 func (s *readStore) BotDetail(ctx context.Context, botUserID int64) (BotDetail, error) {
 	var out BotDetail
 	err := s.pool.QueryRow(ctx, `
-SELECT u.id, COALESCE(NULLIF(u.username, ''), p.username_lower, ''), u.first_name, u.about, u.verified, u.scam, u.fake,
+SELECT u.id, COALESCE(NULLIF(u.username, ''), p.username_lower, ''), u.first_name, u.last_name, u.about, u.verified, u.scam, u.fake,
 	COALESCE(b.owner_user_id, 0), COALESCE(b.description, ''),
 	u.created_at, u.updated_at
 FROM users u
 LEFT JOIN bots b ON b.bot_user_id = u.id
 LEFT JOIN peer_usernames p ON p.peer_type = 'user' AND p.peer_id = u.id AND p.editable
 WHERE u.id = $1 AND u.is_bot AND u.deleted_at IS NULL`, botUserID).Scan(
-		&out.Bot.ID, &out.Bot.Username, &out.Bot.FirstName, &out.About, &out.Bot.Verified, &out.Bot.Scam, &out.Bot.Fake,
+		&out.Bot.ID, &out.Bot.Username, &out.Bot.FirstName, &out.Bot.LastName, &out.About, &out.Bot.Verified, &out.Bot.Scam, &out.Bot.Fake,
 		&out.Bot.OwnerUserID, &out.Description, &out.Bot.CreatedAt, &out.Bot.UpdatedAt,
 	)
 	if err != nil {
@@ -757,16 +759,18 @@ SELECT u.id, u.phone, u.username, u.first_name, u.last_name, u.created_at, u.upd
 	COALESCE(r.frozen, false), COALESCE(r.reason, ''),
 	COALESCE(EXTRACT(EPOCH FROM u.premium_expires_at), 0)::bigint,
 	COALESCE(sb.balance, 0)::bigint, COALESCE(sb.granted, false),
+	COALESCE(ap.login_email, ''),
 	COALESCE(NULLIF(u.username, ''), p.username_lower, '') AS display_username,
 	`+accountCollectibleUsernamesColumn+` AS collectibles
 FROM users u
 LEFT JOIN account_restrictions r ON r.user_id = u.id
 LEFT JOIN stars_balances sb ON sb.user_id = u.id
+LEFT JOIN account_passwords ap ON ap.user_id = u.id
 LEFT JOIN peer_usernames p ON p.peer_type = 'user' AND p.peer_id = u.id AND p.editable
 WHERE u.id = $1`, userID).Scan(
 		&out.Account.ID, &out.Account.Phone, &out.Account.Username, &out.Account.FirstName, &out.Account.LastName,
 		&out.Account.CreatedAt, &out.Account.UpdatedAt, &out.About, &out.LastSeenAt, &out.Verified, &out.Scam, &out.Fake, &out.Support, &out.Bot,
-		&out.Account.Frozen, &out.Account.Reason, &out.Account.PremiumUntil, &out.StarsBalance, &out.StarsGranted, &out.Account.Username,
+		&out.Account.Frozen, &out.Account.Reason, &out.Account.PremiumUntil, &out.StarsBalance, &out.StarsGranted, &out.LoginEmail, &out.Account.Username,
 		&out.Account.Collectibles,
 	)
 	if err != nil {

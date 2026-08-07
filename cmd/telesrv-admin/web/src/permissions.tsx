@@ -8,6 +8,7 @@ import { useI18n } from "./i18n";
 // a full-access session.
 export const permissionAll = "*";
 export const permissionPremiumManage = "premium.manage";
+export const permissionBotTokenRead = "bots.token.read";
 export const permissionVerificationReview = "verification.review";
 export const permissionVerificationRevoke = "verification.revoke";
 // Third-party verification is a separate mechanism and therefore a separate pair of

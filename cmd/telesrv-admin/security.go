@@ -37,6 +37,7 @@ import (
 const (
 	permissionAll                = "*"
 	permissionPremiumManage      = "premium.manage"
+	permissionBotTokenRead       = "bots.token.read"
 	permissionVerificationReview = "verification.review"
 	permissionVerificationRevoke = "verification.revoke"
 	// Third-party bot verification. Deliberately not implied by the official

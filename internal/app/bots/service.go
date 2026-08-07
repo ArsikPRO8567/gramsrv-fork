@@ -656,6 +656,23 @@ func (s *Service) ExportBotToken(ctx context.Context, ownerUserID, botUserID int
 	return domain.FormatBotToken(botUserID, profile.TokenSecret), nil
 }
 
+// AdminExportBotToken returns a non-system bot's current token without
+// rotating it or applying the owner check used by the Telegram RPC. The admin
+// layer is responsible for RBAC and for keeping the secret out of audit data.
+func (s *Service) AdminExportBotToken(ctx context.Context, botUserID int64) (string, error) {
+	if s == nil || s.bots == nil || botUserID <= 0 || domain.IsSystemUserID(botUserID) || botUserID == domain.BotFatherUserID {
+		return "", domain.ErrBotNotFound
+	}
+	profile, found, err := s.botProfile(ctx, botUserID)
+	if err != nil {
+		return "", err
+	}
+	if !found || profile.TokenSecret == "" {
+		return "", domain.ErrBotNotFound
+	}
+	return domain.FormatBotToken(botUserID, profile.TokenSecret), nil
+}
+
 // RevokeBotToken 生成新 token 随机段并落库；旧 token 立即不可登录，并踢掉所有
 // 已凭旧 token 登录的 session（经注入的 SessionRevoker）。
 func (s *Service) RevokeBotToken(ctx context.Context, ownerUserID, botUserID int64) (string, error) {

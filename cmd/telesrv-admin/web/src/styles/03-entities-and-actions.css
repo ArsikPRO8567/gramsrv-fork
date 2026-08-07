@@ -1301,3 +1301,28 @@
   .compact-form-grid, .compact-owner-row, .phone-price-editor, .phone-transfer-editor { grid-template-columns: 1fr; }
   .compact-span-2 { grid-column: auto; }
 }
+.entity-identity,
+.table-identity {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+
+.table-identity { gap: 8px; }
+
+.avatar-photo-img,
+.avatar-fallback {
+  display: block;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  object-fit: cover;
+}
+
+.avatar-fallback {
+  display: grid;
+  place-items: center;
+  color: #fff;
+  font-weight: 800;
+  letter-spacing: -.02em;
+}

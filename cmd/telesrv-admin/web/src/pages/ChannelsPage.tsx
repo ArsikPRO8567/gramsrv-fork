@@ -3,6 +3,7 @@ import { useEffect, useState } from "react";
 import { api, errorMessage } from "../api";
 import { Alert, Badge, EmptyRow, Metric, PageFrame, QueryPanel } from "../components/ui";
 import { ScamFakeBadges } from "../components/flags";
+import { Avatar } from "../components/Avatar";
 import { useI18n } from "../i18n";
 import { channelKind, displayUsername, formatDate } from "../lib/format";
 import { channelMetrics } from "../lib/metrics";
@@ -136,7 +137,7 @@ export function ChannelsPage({ navigate }: { navigate: Navigate }) {
                 <td className="mono">{row.ID}</td>
                 <td>{channelKind(row, t)}</td>
                 <td>{displayUsername(row.Username)}</td>
-                <td>{row.Title}</td>
+                <td><span className="table-identity"><Avatar id={row.ID} kind="channel" label={row.Title || row.Username} />{row.Title}</span></td>
                 <td>{row.ParticipantsCount}</td>
                 <td>{row.AdminsCount}</td>
                 <td>{row.PTS}</td>

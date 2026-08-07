@@ -616,6 +616,10 @@ func (fakeService) DeleteBot(_ context.Context, req admin.DeleteBotRequest) (adm
 	return admin.CommandResult{CommandID: req.CommandID, Status: "completed", DryRun: req.DryRun}, nil
 }
 
+func (fakeService) ExportBotToken(_ context.Context, req admin.ExportBotTokenRequest) (admin.CommandResult, error) {
+	return admin.CommandResult{CommandID: req.CommandID, Status: "completed", DryRun: req.DryRun}, nil
+}
+
 func (fakeService) SetUserFlags(_ context.Context, req admin.SetUserFlagsRequest) (admin.CommandResult, error) {
 	return admin.CommandResult{CommandID: req.CommandID, Status: "completed", DryRun: req.DryRun}, nil
 }
@@ -633,6 +637,34 @@ func (fakeService) GiveGift(_ context.Context, req admin.GiveGiftRequest) (admin
 }
 
 func (fakeService) SetUsername(_ context.Context, req admin.SetUsernameRequest) (admin.CommandResult, error) {
+	return admin.CommandResult{CommandID: req.CommandID, Status: "completed", DryRun: req.DryRun}, nil
+}
+
+func (fakeService) SetProfile(_ context.Context, req admin.SetProfileRequest) (admin.CommandResult, error) {
+	return admin.CommandResult{CommandID: req.CommandID, Status: "completed", DryRun: req.DryRun}, nil
+}
+
+func (fakeService) SetPhone(_ context.Context, req admin.SetPhoneRequest) (admin.CommandResult, error) {
+	return admin.CommandResult{CommandID: req.CommandID, Status: "completed", DryRun: req.DryRun}, nil
+}
+
+func (fakeService) SetLoginEmail(_ context.Context, req admin.SetLoginEmailRequest) (admin.CommandResult, error) {
+	return admin.CommandResult{CommandID: req.CommandID, Status: "completed", DryRun: req.DryRun}, nil
+}
+
+func (fakeService) AccountAvatar(context.Context, int64) ([]byte, string, bool, error) {
+	return nil, "", false, nil
+}
+
+func (fakeService) SetAccountAvatar(_ context.Context, req admin.SetAccountAvatarRequest) (admin.CommandResult, error) {
+	return admin.CommandResult{CommandID: req.CommandID, Status: "completed", DryRun: req.DryRun}, nil
+}
+
+func (fakeService) ChannelAvatar(context.Context, int64) ([]byte, string, bool, error) {
+	return nil, "", false, nil
+}
+
+func (fakeService) SetChannelAvatar(_ context.Context, req admin.SetChannelAvatarRequest) (admin.CommandResult, error) {
 	return admin.CommandResult{CommandID: req.CommandID, Status: "completed", DryRun: req.DryRun}, nil
 }
 

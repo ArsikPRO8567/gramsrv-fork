@@ -51,6 +51,7 @@ export function CreateBotModal({ onClose, onCreated }: { onClose: () => void; on
             tone="neutral"
             disabled={!valid}
             path="/api/actions/create-bot"
+            secretField="token"
             payload={() => ({ owner_user_id: toInt(ownerID), name: botName.trim(), username })}
             onDone={onCreated}
           />

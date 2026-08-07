@@ -213,6 +213,23 @@ func (s *UserStore) UpdateUsername(ctx context.Context, userID int64, username s
 	return u, nil
 }
 
+func (s *UserStore) UpdatePhone(_ context.Context, userID int64, phone string) (domain.User, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	u, ok := s.byID[userID]
+	if !ok || u.Deleted {
+		return domain.User{}, domain.ErrUserNotFound
+	}
+	for id, existing := range s.byID {
+		if id != userID && !existing.Deleted && existing.Phone == phone {
+			return domain.User{}, domain.ErrPhoneNumberOccupied
+		}
+	}
+	u.Phone = phone
+	s.byID[userID] = u
+	return u, nil
+}
+
 func (s *UserStore) UpdateProfile(_ context.Context, userID int64, firstName, lastName, about string) (domain.User, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

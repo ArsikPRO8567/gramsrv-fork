@@ -74,6 +74,7 @@ export type AccountDetail = {
   Fake: boolean;
   Support: boolean;
   Bot: boolean;
+  LoginEmail: string;
   StarsBalance: number;
   StarsGranted: boolean;
   Restriction: RestrictionRow;
@@ -146,6 +147,7 @@ export type BotRow = {
   ID: number;
   Username: string;
   FirstName: string;
+  LastName: string;
   Verified: boolean;
   Scam: boolean;
   Fake: boolean;

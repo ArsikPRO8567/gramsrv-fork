@@ -31,12 +31,17 @@ const (
 	ActionSetUserFlags            = "account.set_flags"
 	ActionSetSupport              = "account.set_support"
 	ActionSetUsername             = "account.set_username"
+	ActionSetProfile              = "account.set_profile"
+	ActionSetPhone                = "account.set_phone"
+	ActionSetLoginEmail           = "account.set_login_email"
+	ActionSetAccountAvatar        = "account.set_avatar"
 	ActionSetUserColor            = "account.set_color"
 	ActionSetUserEmojiStatus      = "account.set_emoji_status"
 	ActionSetChannelUsername      = "channel.set_username"
 	ActionSetChannelSettings      = "channel.set_settings"
 	ActionSetChannelColor         = "channel.set_color"
 	ActionSetChannelEmojiStatus   = "channel.set_emoji_status"
+	ActionSetChannelAvatar        = "channel.set_avatar"
 	ActionSetChannelVerified      = "channel.set_verified"
 	ActionSetChannelFlags         = "channel.set_flags"
 	ActionRevokeSessions          = "account.revoke_sessions"
@@ -55,6 +60,7 @@ const (
 	ActionSetGifCatalogSortOrder  = "gif_catalog.set_sort_order"
 	ActionDeleteGifCatalogEntry   = "gif_catalog.delete"
 	ActionDeleteBot               = "bot.delete"
+	ActionExportBotToken          = "bot.export_token"
 	// Collectible (Fragment-style) username lifecycle.
 	ActionMintCollectibleUsername     = "usernames.collectible.mint"
 	ActionTransferCollectibleUsername = "usernames.collectible.transfer"
@@ -209,6 +215,15 @@ type UsersService interface {
 	UpdateUsername(ctx context.Context, userID int64, username string) (domain.User, error)
 	UpdateColor(ctx context.Context, userID int64, forProfile bool, color domain.PeerColor) (domain.User, error)
 	UpdateEmojiStatus(ctx context.Context, userID int64, status domain.UserEmojiStatus) (domain.User, error)
+	UpdateProfile(ctx context.Context, userID int64, update domain.UserProfileUpdate) (domain.User, error)
+	SetPhone(ctx context.Context, userID int64, phone string) (domain.User, error)
+}
+
+type AccountService interface {
+	ValidLoginEmail(email string) bool
+	SetLoginEmail(ctx context.Context, userID int64, email string) error
+	ClearLoginEmail(ctx context.Context, userID int64) error
+	LoginEmail(ctx context.Context, userID int64) (string, bool, error)
 }
 
 type StarsService interface {
@@ -255,6 +270,7 @@ type ChannelsService interface {
 	AdminSetUsername(ctx context.Context, channelID int64, username string) (domain.Channel, error)
 	AdminSetColor(ctx context.Context, channelID int64, forProfile bool, color domain.ChannelPeerColor) (domain.Channel, error)
 	AdminSetEmojiStatus(ctx context.Context, channelID int64, status domain.ChannelEmojiStatus) (domain.Channel, error)
+	AdminSetPhoto(ctx context.Context, channelID int64, photo domain.Photo) (domain.Channel, error)
 }
 
 type ChannelNotifier interface {
@@ -287,12 +303,22 @@ type OfficialGiftsSource interface {
 	Bundle(ctx context.Context, giftID int64, includeCollectible bool) (officialgifts.Bundle, error)
 }
 
+type AvatarResolver interface {
+	CurrentProfilePhotoKind(ctx context.Context, ownerType domain.PeerType, ownerID int64, kind domain.ProfilePhotoKind) (domain.Photo, bool, error)
+	GetPhoto(ctx context.Context, id int64) (domain.Photo, bool, error)
+	GetFile(ctx context.Context, req domain.FileDownloadRequest) (domain.FileChunk, bool, error)
+	ValidateAvatarUpload(data []byte) bool
+	CreateAvatarFromBytes(ctx context.Context, data []byte) (domain.Photo, error)
+	SetCurrentProfilePhotoKind(ctx context.Context, ownerType domain.PeerType, ownerID int64, kind domain.ProfilePhotoKind, photoID int64, date int) (domain.Photo, bool, error)
+}
+
 // BotService creates bot accounts on behalf of the admin. It mirrors the
 // owner-scoped /newbot flow: a bot is a users row (is_bot=true) plus a bots row
 // owned by ownerUserID, and the returned token is shown once to the operator.
 type BotService interface {
 	CreateBot(ctx context.Context, ownerUserID int64, name, username string) (domain.User, string, error)
 	DeleteBot(ctx context.Context, botUserID int64) (domain.User, error)
+	AdminExportBotToken(ctx context.Context, botUserID int64) (string, error)
 }
 
 // EmojiService renders custom-emoji document animations for the admin emoji
@@ -381,6 +407,8 @@ type Dependencies struct {
 	Auth                   AuthService
 	Revoker                AuthKeyRevoker
 	Users                  UsersService
+	Account                AccountService
+	Photos                 AvatarResolver
 	Stars                  StarsService
 	Premium                PremiumService
 	StarsNotifier          StarsNotifier
@@ -414,6 +442,8 @@ type Service struct {
 	auth                   AuthService
 	revoker                AuthKeyRevoker
 	users                  UsersService
+	account                AccountService
+	photos                 AvatarResolver
 	stars                  StarsService
 	premium                PremiumService
 	starsNotifier          StarsNotifier
@@ -459,6 +489,12 @@ func (s *Service) Configure(deps Dependencies) *Service {
 	}
 	if deps.Users != nil {
 		s.users = deps.Users
+	}
+	if deps.Account != nil {
+		s.account = deps.Account
+	}
+	if deps.Photos != nil {
+		s.photos = deps.Photos
 	}
 	if deps.Stars != nil {
 		s.stars = deps.Stars
@@ -864,6 +900,41 @@ type SetUsernameRequest struct {
 	Username string `json:"username"`
 }
 
+type SetProfileRequest struct {
+	CommandMeta
+	UserID    int64  `json:"user_id"`
+	FirstName string `json:"first_name"`
+	LastName  string `json:"last_name"`
+}
+
+type SetPhoneRequest struct {
+	CommandMeta
+	UserID int64  `json:"user_id"`
+	Phone  string `json:"phone"`
+}
+
+type SetLoginEmailRequest struct {
+	CommandMeta
+	UserID int64  `json:"user_id"`
+	Email  string `json:"email"`
+}
+
+type SetAccountAvatarRequest struct {
+	CommandMeta
+	UserID        int64  `json:"user_id"`
+	FileName      string `json:"file_name"`
+	ContentSHA256 string `json:"content_sha256"`
+	Data          []byte `json:"-"`
+}
+
+type SetChannelAvatarRequest struct {
+	CommandMeta
+	ChannelID     int64  `json:"channel_id"`
+	FileName      string `json:"file_name"`
+	ContentSHA256 string `json:"content_sha256"`
+	Data          []byte `json:"-"`
+}
+
 type SetChannelUsernameRequest struct {
 	CommandMeta
 	ChannelID int64  `json:"channel_id"`
@@ -958,6 +1029,11 @@ type DeleteGifCatalogEntryRequest struct {
 }
 
 type DeleteBotRequest struct {
+	CommandMeta
+	BotUserID int64 `json:"bot_user_id"`
+}
+
+type ExportBotTokenRequest struct {
 	CommandMeta
 	BotUserID int64 `json:"bot_user_id"`
 }
@@ -1785,6 +1861,193 @@ func (s *Service) SetUsername(ctx context.Context, req SetUsernameRequest) (Comm
 	})
 }
 
+func (s *Service) SetProfile(ctx context.Context, req SetProfileRequest) (CommandResult, error) {
+	if req.UserID <= 0 {
+		return CommandResult{}, fmt.Errorf("user_id is required")
+	}
+	if domain.IsSystemUserID(req.UserID) {
+		return CommandResult{}, fmt.Errorf("system user profile cannot be changed")
+	}
+	if s == nil || s.users == nil {
+		return CommandResult{}, fmt.Errorf("admin user dependency is not configured")
+	}
+	req.FirstName = strings.TrimSpace(req.FirstName)
+	req.LastName = strings.TrimSpace(req.LastName)
+	return s.runCommand(ctx, req.CommandMeta, ActionSetProfile, req.UserID, domain.Peer{}, req, func() (CommandResult, error) {
+		u, found, err := s.users.AdminUser(ctx, req.UserID)
+		if err != nil {
+			return CommandResult{}, err
+		}
+		if !found {
+			return CommandResult{}, domain.ErrUserNotFound
+		}
+		details := map[string]any{
+			"previous_first_name": u.FirstName,
+			"previous_last_name":  u.LastName,
+			"new_first_name":      req.FirstName,
+			"new_last_name":       req.LastName,
+			"would_change":        u.FirstName != req.FirstName || u.LastName != req.LastName,
+		}
+		if req.DryRun {
+			return CommandResult{Message: "profile update validated", Details: details}, nil
+		}
+		updated, err := s.users.UpdateProfile(ctx, req.UserID, domain.UserProfileUpdate{
+			FirstName: req.FirstName, HasFirstName: true,
+			LastName: req.LastName, HasLastName: true,
+		})
+		if err != nil {
+			return CommandResult{Details: details}, err
+		}
+		if err := s.notifyUserChanged(ctx, updated); err != nil {
+			details["notify_error"] = err.Error()
+		}
+		return CommandResult{Message: "profile updated", Details: details}, nil
+	})
+}
+
+func (s *Service) SetPhone(ctx context.Context, req SetPhoneRequest) (CommandResult, error) {
+	if req.UserID <= 0 {
+		return CommandResult{}, fmt.Errorf("user_id is required")
+	}
+	if s == nil || s.users == nil {
+		return CommandResult{}, fmt.Errorf("admin user dependency is not configured")
+	}
+	req.Phone = domain.NormalizePhone(req.Phone)
+	if !domain.ValidPhone(req.Phone) {
+		return CommandResult{}, domain.ErrPhoneNumberInvalid
+	}
+	return s.runCommand(ctx, req.CommandMeta, ActionSetPhone, req.UserID, domain.Peer{}, req, func() (CommandResult, error) {
+		u, found, err := s.users.AdminUser(ctx, req.UserID)
+		if err != nil {
+			return CommandResult{}, err
+		}
+		if !found {
+			return CommandResult{}, domain.ErrUserNotFound
+		}
+		if u.Bot || domain.IsSystemUserID(u.ID) {
+			return CommandResult{}, domain.ErrPhoneChangeForbidden
+		}
+		details := map[string]any{
+			"previous_phone": u.Phone,
+			"new_phone":      req.Phone,
+			"would_change":   u.Phone != req.Phone,
+		}
+		if req.DryRun {
+			return CommandResult{Message: "phone update validated", Details: details}, nil
+		}
+		updated, err := s.users.SetPhone(ctx, req.UserID, req.Phone)
+		if err != nil {
+			return CommandResult{Details: details}, err
+		}
+		details["changed"] = u.Phone != updated.Phone
+		if err := s.notifyUserChanged(ctx, updated); err != nil {
+			details["notify_error"] = err.Error()
+		}
+		return CommandResult{Message: "phone updated", Details: details}, nil
+	})
+}
+
+func (s *Service) SetLoginEmail(ctx context.Context, req SetLoginEmailRequest) (CommandResult, error) {
+	if req.UserID <= 0 {
+		return CommandResult{}, fmt.Errorf("user_id is required")
+	}
+	if s == nil || s.users == nil || s.account == nil {
+		return CommandResult{}, fmt.Errorf("admin account dependencies are not configured")
+	}
+	req.Email = strings.TrimSpace(req.Email)
+	if req.Email != "" && !s.account.ValidLoginEmail(req.Email) {
+		return CommandResult{}, domain.ErrEmailInvalid
+	}
+	return s.runCommand(ctx, req.CommandMeta, ActionSetLoginEmail, req.UserID, domain.Peer{}, req, func() (CommandResult, error) {
+		u, found, err := s.users.AdminUser(ctx, req.UserID)
+		if err != nil {
+			return CommandResult{}, err
+		}
+		if !found {
+			return CommandResult{}, domain.ErrUserNotFound
+		}
+		if u.Bot || domain.IsSystemUserID(u.ID) {
+			return CommandResult{}, domain.ErrEmailInvalid
+		}
+		previous, _, err := s.account.LoginEmail(ctx, req.UserID)
+		if err != nil {
+			return CommandResult{}, err
+		}
+		details := map[string]any{
+			"previous_login_email": previous,
+			"new_login_email":      req.Email,
+			"would_change":         !strings.EqualFold(previous, req.Email),
+		}
+		if req.DryRun {
+			return CommandResult{Message: "login email update validated", Details: details}, nil
+		}
+		if req.Email == "" {
+			err = s.account.ClearLoginEmail(ctx, req.UserID)
+		} else {
+			err = s.account.SetLoginEmail(ctx, req.UserID, req.Email)
+		}
+		if err != nil {
+			return CommandResult{Details: details}, err
+		}
+		message := "login email updated"
+		if req.Email == "" {
+			message = "login email cleared"
+		}
+		return CommandResult{Message: message, Details: details}, nil
+	})
+}
+
+const MaxAccountAvatarBytes = 4 << 20
+
+func (s *Service) SetAccountAvatar(ctx context.Context, req SetAccountAvatarRequest) (CommandResult, error) {
+	if req.UserID <= 0 {
+		return CommandResult{}, fmt.Errorf("user_id is required")
+	}
+	if domain.IsSystemUserID(req.UserID) {
+		return CommandResult{}, fmt.Errorf("system user avatar cannot be changed")
+	}
+	if s == nil || s.users == nil || s.photos == nil {
+		return CommandResult{}, fmt.Errorf("admin avatar dependencies are not configured")
+	}
+	if len(req.Data) == 0 || len(req.Data) > MaxAccountAvatarBytes || !s.photos.ValidateAvatarUpload(req.Data) {
+		return CommandResult{}, domain.ErrPhotoInvalid
+	}
+	digest := sha256.Sum256(req.Data)
+	req.ContentSHA256 = hex.EncodeToString(digest[:])
+	return s.runCommand(ctx, req.CommandMeta, ActionSetAccountAvatar, req.UserID, domain.Peer{}, req, func() (CommandResult, error) {
+		u, found, err := s.users.AdminUser(ctx, req.UserID)
+		if err != nil {
+			return CommandResult{}, err
+		}
+		if !found {
+			return CommandResult{}, domain.ErrUserNotFound
+		}
+		details := map[string]any{
+			"file_name":      req.FileName,
+			"bytes":          len(req.Data),
+			"content_sha256": req.ContentSHA256,
+			"bot":            u.Bot,
+		}
+		if req.DryRun {
+			return CommandResult{Message: "avatar update validated", Details: details}, nil
+		}
+		photo, err := s.photos.CreateAvatarFromBytes(ctx, req.Data)
+		if err != nil {
+			return CommandResult{Details: details}, err
+		}
+		if _, found, err := s.photos.SetCurrentProfilePhotoKind(ctx, domain.PeerTypeUser, req.UserID, domain.ProfilePhotoKindProfile, photo.ID, int(s.now().Unix())); err != nil {
+			return CommandResult{Details: details}, err
+		} else if !found {
+			return CommandResult{Details: details}, domain.ErrPhotoInvalid
+		}
+		details["photo_id"] = strconv.FormatInt(photo.ID, 10)
+		if err := s.notifyUserChanged(ctx, u); err != nil {
+			details["notify_error"] = err.Error()
+		}
+		return CommandResult{Message: "avatar updated", Details: details}, nil
+	})
+}
+
 // SetUserColor force-sets or clears a user's name/profile color.
 func (s *Service) SetUserColor(ctx context.Context, req SetUserColorRequest) (CommandResult, error) {
 	if req.UserID <= 0 {
@@ -1957,6 +2220,36 @@ func (s *Service) DeleteBot(ctx context.Context, req DeleteBotRequest) (CommandR
 			details["notify_error"] = err.Error()
 		}
 		return CommandResult{Message: "bot deleted", Details: details}, nil
+	})
+}
+
+// ExportBotToken returns the current token only to this request. The secret is
+// merged into the HTTP response after the persisted command result is encoded,
+// so audit rows and completed-command replay never contain it.
+func (s *Service) ExportBotToken(ctx context.Context, req ExportBotTokenRequest) (CommandResult, error) {
+	if s == nil || s.bots == nil {
+		return CommandResult{}, fmt.Errorf("admin bot dependency is not configured")
+	}
+	if req.BotUserID <= 0 {
+		return CommandResult{}, fmt.Errorf("bot_user_id is required")
+	}
+	if domain.IsSystemUserID(req.BotUserID) {
+		return CommandResult{}, fmt.Errorf("system bots have no exportable token")
+	}
+	return s.runCommand(ctx, req.CommandMeta, ActionExportBotToken, req.BotUserID, domain.Peer{}, req, func() (CommandResult, error) {
+		details := map[string]any{"bot_user_id": req.BotUserID}
+		if req.DryRun {
+			return CommandResult{Message: "token export validated", Details: details}, nil
+		}
+		token, err := s.bots.AdminExportBotToken(ctx, req.BotUserID)
+		if err != nil {
+			return CommandResult{Details: details}, err
+		}
+		return CommandResult{
+			Message:          "token exported",
+			Details:          details,
+			transientDetails: map[string]any{"token": token},
+		}, nil
 	})
 }
 
@@ -2738,6 +3031,52 @@ func (s *Service) SetChannelSettings(ctx context.Context, req SetChannelSettings
 			details["notify_error"] = err.Error()
 		}
 		return CommandResult{Message: "channel settings updated", Details: details}, nil
+	})
+}
+
+func (s *Service) SetChannelAvatar(ctx context.Context, req SetChannelAvatarRequest) (CommandResult, error) {
+	if req.ChannelID <= 0 {
+		return CommandResult{}, fmt.Errorf("channel_id is required")
+	}
+	if s == nil || s.channels == nil || s.photos == nil {
+		return CommandResult{}, fmt.Errorf("admin channel avatar dependencies are not configured")
+	}
+	if len(req.Data) == 0 || len(req.Data) > MaxAccountAvatarBytes || !s.photos.ValidateAvatarUpload(req.Data) {
+		return CommandResult{}, domain.ErrPhotoInvalid
+	}
+	digest := sha256.Sum256(req.Data)
+	req.ContentSHA256 = hex.EncodeToString(digest[:])
+	target := domain.Peer{Type: domain.PeerTypeChannel, ID: req.ChannelID}
+	return s.runCommand(ctx, req.CommandMeta, ActionSetChannelAvatar, 0, target, req, func() (CommandResult, error) {
+		channel, err := s.channels.GetChannelByID(ctx, req.ChannelID)
+		if err != nil {
+			return CommandResult{}, err
+		}
+		if channel.Deleted || channel.Monoforum || (!channel.Broadcast && !channel.Megagroup) {
+			return CommandResult{}, domain.ErrChannelInvalid
+		}
+		details := map[string]any{
+			"file_name":         req.FileName,
+			"bytes":             len(req.Data),
+			"content_sha256":    req.ContentSHA256,
+			"previous_photo_id": strconv.FormatInt(channel.PhotoID, 10),
+		}
+		if req.DryRun {
+			return CommandResult{Message: "channel avatar update validated", Details: details}, nil
+		}
+		photo, err := s.photos.CreateAvatarFromBytes(ctx, req.Data)
+		if err != nil {
+			return CommandResult{Details: details}, err
+		}
+		updated, err := s.channels.AdminSetPhoto(ctx, req.ChannelID, photo)
+		if err != nil {
+			return CommandResult{Details: details}, err
+		}
+		details["photo_id"] = strconv.FormatInt(photo.ID, 10)
+		if err := s.notifyChannelChanged(ctx, updated); err != nil {
+			details["notify_error"] = err.Error()
+		}
+		return CommandResult{Message: "channel avatar updated", Details: details}, nil
 	})
 }
 
@@ -3527,6 +3866,116 @@ func (s *Service) GifCatalogDocumentPreview(ctx context.Context, documentID int6
 		return nil, "", false, nil
 	}
 	return chunk.Bytes, detected, true, nil
+}
+
+func (s *Service) AccountAvatar(ctx context.Context, userID int64) ([]byte, string, bool, error) {
+	if s == nil || s.photos == nil || userID <= 0 {
+		return nil, "", false, nil
+	}
+	photo, found, err := s.photos.CurrentProfilePhotoKind(ctx, domain.PeerTypeUser, userID, domain.ProfilePhotoKindProfile)
+	if err != nil || !found {
+		return nil, "", found, err
+	}
+	return s.avatarBytes(ctx, photo)
+}
+
+func (s *Service) ChannelAvatar(ctx context.Context, channelID int64) ([]byte, string, bool, error) {
+	if s == nil || s.photos == nil || s.channels == nil || channelID <= 0 {
+		return nil, "", false, nil
+	}
+	channel, err := s.channels.GetChannelByID(ctx, channelID)
+	if err != nil {
+		return nil, "", false, err
+	}
+	if channel.PhotoID == 0 {
+		return nil, "", false, nil
+	}
+	photo, found, err := s.photos.GetPhoto(ctx, channel.PhotoID)
+	if err != nil || !found {
+		return nil, "", found, err
+	}
+	return s.avatarBytes(ctx, photo)
+}
+
+func (s *Service) avatarBytes(ctx context.Context, photo domain.Photo) ([]byte, string, bool, error) {
+	size, inline, ok := bestAccountPhotoSize(photo.Sizes)
+	if !ok {
+		return nil, "", false, nil
+	}
+	data := inline
+	if len(data) == 0 {
+		chunk, found, err := s.photos.GetFile(ctx, domain.FileDownloadRequest{
+			LocationKey: fmt.Sprintf("photo:%d:%s", photo.ID, size.Type),
+			Limit:       MaxAccountAvatarBytes + 1,
+		})
+		if err != nil || !found {
+			return nil, "", found, err
+		}
+		if chunk.Total <= 0 || chunk.Total > MaxAccountAvatarBytes || int64(len(chunk.Bytes)) != chunk.Total {
+			return nil, "", false, nil
+		}
+		data = chunk.Bytes
+	}
+	if len(data) == 0 || len(data) > MaxAccountAvatarBytes {
+		return nil, "", false, nil
+	}
+	mimeType := http.DetectContentType(data)
+	if !safeAccountImageType(mimeType) {
+		return nil, "", false, nil
+	}
+	return data, mimeType, true, nil
+}
+
+func bestAccountPhotoSize(sizes []domain.PhotoSize) (domain.PhotoSize, []byte, bool) {
+	var best domain.PhotoSize
+	var bestBytes []byte
+	bestScore := int64(-1)
+	for _, size := range sizes {
+		if !validAccountPhotoSizeType(size.Type) {
+			continue
+		}
+		var inline []byte
+		switch size.Kind {
+		case domain.PhotoSizeKindCached:
+			if len(size.Bytes) == 0 || len(size.Bytes) > MaxAccountAvatarBytes {
+				continue
+			}
+			inline = size.Bytes
+		case domain.PhotoSizeKindDefault, domain.PhotoSizeKindProgressive:
+		default:
+			continue
+		}
+		score := int64(size.W) * int64(size.H)
+		if score <= 0 {
+			score = int64(size.Size)
+		}
+		if score > bestScore {
+			best, bestBytes, bestScore = size, inline, score
+		}
+	}
+	return best, bestBytes, bestScore >= 0
+}
+
+func validAccountPhotoSizeType(value string) bool {
+	if value == "" || len(value) > 8 {
+		return false
+	}
+	for _, r := range value {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func safeAccountImageType(value string) bool {
+	switch value {
+	case "image/jpeg", "image/png", "image/gif", "image/webp":
+		return true
+	default:
+		return false
+	}
 }
 
 func (s *Service) StarGiftCollectibles(ctx context.Context, giftID int64) (domain.StarGiftUpgradePreview, bool, error) {

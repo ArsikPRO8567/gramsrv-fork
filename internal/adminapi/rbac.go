@@ -62,6 +62,9 @@ const (
 	// PermissionPremiumManage guards grants, revocations and refunds. It is kept
 	// separate from Stars grants because a Premium refund mutates both ledgers.
 	PermissionPremiumManage = "premium.manage"
+	// PermissionBotTokenRead is intentionally narrower than unrestricted admin
+	// access because it reveals a live credential.
+	PermissionBotTokenRead = "bots.token.read"
 )
 
 // CodeForbidden is the stable code for a permission failure, so the panel can

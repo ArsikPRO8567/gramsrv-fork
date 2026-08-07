@@ -3,6 +3,7 @@ import { useEffect, useState } from "react";
 import { api, errorMessage } from "../api";
 import { Alert, Badge, EmptyRow, Metric, PageFrame, QueryPanel, UsernameCell } from "../components/ui";
 import { ScamFakeBadges } from "../components/flags";
+import { Avatar } from "../components/Avatar";
 import { useI18n } from "../i18n";
 import { displayName, displayPhone, formatDate, formatUnix } from "../lib/format";
 import { accountMetrics } from "../lib/metrics";
@@ -137,7 +138,7 @@ export function AccountsPage({ navigate }: { navigate: Navigate }) {
                 <td className="mono">{row.ID}</td>
                 <td>{displayPhone(row.Phone)}</td>
                 <td><UsernameCell username={row.Username} collectibles={row.Collectibles} /></td>
-                <td>{displayName(row)}</td>
+                <td><span className="table-identity"><Avatar id={row.ID} label={displayName(row)} />{displayName(row)}</span></td>
                 <td>{row.DeviceCount}</td>
                 <td>{formatDate(row.LastActiveAt)}</td>
                 <td>{row.PremiumUntil > 0 ? <Badge tone="good">{t("account.premium")} {formatUnix(row.PremiumUntil)}</Badge> : <Badge>{t("common.none")}</Badge>}</td>

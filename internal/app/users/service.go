@@ -303,6 +303,37 @@ func (s *Service) UpdateProfile(ctx context.Context, userID int64, update domain
 	return u, nil
 }
 
+// SetPhone force-sets the authoritative phone for the trusted admin path. It
+// remains a non-PTS profile mutation because updateUserPhone and updateUser
+// carry no pts/pts_count in every admitted exact layer.
+func (s *Service) SetPhone(ctx context.Context, userID int64, phone string) (domain.User, error) {
+	self, err := s.loadSelf(ctx, userID)
+	if err != nil {
+		return domain.User{}, err
+	}
+	if self.Bot || domain.IsSystemUserID(self.ID) {
+		return domain.User{}, domain.ErrPhoneChangeForbidden
+	}
+	phone = domain.NormalizePhone(strings.TrimSpace(phone))
+	if !domain.ValidPhone(phone) {
+		return domain.User{}, domain.ErrPhoneNumberInvalid
+	}
+	if phone == self.Phone {
+		return s.projectOne(ctx, self.ID, self)
+	}
+	if existing, found, err := s.users.ByPhone(ctx, phone); err != nil {
+		return domain.User{}, err
+	} else if found && existing.ID != self.ID {
+		return domain.User{}, domain.ErrPhoneNumberOccupied
+	}
+	u, err := s.users.UpdatePhone(ctx, self.ID, phone)
+	if err != nil {
+		return domain.User{}, err
+	}
+	s.refreshCachedUsers(ctx, u)
+	return s.projectOne(ctx, self.ID, u)
+}
+
 // UpdateLastSeen records the latest visible account activity time.
 func (s *Service) UpdateLastSeen(ctx context.Context, userID int64, lastSeenAt int) error {
 	if userID == 0 {
