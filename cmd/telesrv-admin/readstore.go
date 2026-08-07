@@ -60,6 +60,56 @@ type StorageStatsRow struct {
 	Backends       []StorageBackendRow
 }
 
+type BroadcastRow struct {
+	ID                int64 `json:"ID,string"`
+	Message           string
+	TargetMode        string
+	TargetCount       int64 `json:"TargetCount,string"`
+	MaterializedCount int64 `json:"MaterializedCount,string"`
+	SentCount         int64 `json:"SentCount,string"`
+	FailedCount       int64 `json:"FailedCount,string"`
+	EnumerationDone   bool
+	CreatedBy         string
+	CreatedAt         time.Time
+}
+
+func (s *readStore) ListBroadcasts(ctx context.Context, beforeID int64, limit int) ([]BroadcastRow, bool, error) {
+	if limit <= 0 {
+		limit = accountListDefaultLimit
+	}
+	if limit > accountListMaxLimit {
+		limit = accountListMaxLimit
+	}
+	rows, err := s.pool.Query(ctx, `
+SELECT id, message, target_mode, target_count, materialized_count,
+       sent_count, failed_count, enumeration_done, created_by, created_at
+FROM broadcasts
+WHERE $1::bigint = 0 OR id < $1
+ORDER BY id DESC
+LIMIT $2`, beforeID, limit+1)
+	if err != nil {
+		return nil, false, fmt.Errorf("list broadcasts: %w", err)
+	}
+	defer rows.Close()
+	out := make([]BroadcastRow, 0, limit+1)
+	for rows.Next() {
+		var item BroadcastRow
+		if err := rows.Scan(&item.ID, &item.Message, &item.TargetMode, &item.TargetCount, &item.MaterializedCount,
+			&item.SentCount, &item.FailedCount, &item.EnumerationDone, &item.CreatedBy, &item.CreatedAt); err != nil {
+			return nil, false, fmt.Errorf("scan broadcast: %w", err)
+		}
+		out = append(out, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, false, fmt.Errorf("iterate broadcasts: %w", err)
+	}
+	hasMore := len(out) > limit
+	if hasMore {
+		out = out[:limit]
+	}
+	return out, hasMore, nil
+}
+
 // StorageStats is deliberately read-only and derives physical usage from
 // content-addressed object keys. It does not claim that an unreferenced object
 // is safe to delete; the complete media-reference graph is not yet available.

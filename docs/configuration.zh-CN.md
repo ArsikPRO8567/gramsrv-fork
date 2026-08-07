@@ -581,6 +581,10 @@ active key。不要手工编辑 manifest 或 PEM，不要在各实例上分别�
 | `TELESRV_VERIFICATION_BOT_RATE_WINDOW` | duration / `1m` | bot 对话限流窗口；limit>0 时必须为正数。 |
 | `TELESRV_VERIFICATION_NOTIFY_INTERVAL` | duration / `15s` | durable 通知 outbox worker 周期，必须为正数。 |
 | `TELESRV_VERIFICATION_NOTIFY_BATCH` | int / `50` | 每轮投递通知数，必须为 `1..500`。 |
+| `TELESRV_BROADCAST_WORKER_INTERVAL` | duration / `3s` | 系统广播 worker 周期，必须为正数。 |
+| `TELESRV_BROADCAST_WORKER_LEASE` | duration / `30s` | recipient 崩溃恢复租约，必须为正数且不超过 `1h`。 |
+| `TELESRV_BROADCAST_MATERIALIZE_BATCH` | int / `200` | 单次数据库 keyset 物化的全体用户上限，必须为 `1..1000`；ID 不离开 PostgreSQL。 |
+| `TELESRV_BROADCAST_DELIVERY_BATCH` | int / `50` | 每轮领取并投递的 recipient 上限，必须为 `1..500`；每条消息独立提交。 |
 | `TELESRV_VERIFICATION_MAX_ACTIVE_PER_USER` | int / `3` | 每个申请者可保持的 active 申请数；允许 `0..50`。 |
 
 ### 第三方 bot 认证

@@ -641,6 +641,10 @@ deliberate anti-SSRF decision, and validation is the only thing ever done to an 
 | `TELESRV_VERIFICATION_BOT_RATE_WINDOW` | duration / `1m` | Window for the bot dialog rate; must be positive whenever that limit is set. |
 | `TELESRV_VERIFICATION_NOTIFY_INTERVAL` | duration / `15s` | Applicant-notification worker interval; must be positive. A decision commits with its outbox row, never with a message send, so delivery is a separate retrying cycle over durable rows. |
 | `TELESRV_VERIFICATION_NOTIFY_BATCH` | int / `50` | Outbox rows delivered per cycle; must be `1..500`. |
+| `TELESRV_BROADCAST_WORKER_INTERVAL` | duration / `3s` | System-broadcast worker interval; must be positive. |
+| `TELESRV_BROADCAST_WORKER_LEASE` | duration / `30s` | Recipient claim lease used for crash recovery; must be positive and no more than `1h`. |
+| `TELESRV_BROADCAST_MATERIALIZE_BATCH` | int / `200` | Maximum all-user recipient IDs materialized by one database keyset step; must be `1..1000`. IDs stay inside PostgreSQL. |
+| `TELESRV_BROADCAST_DELIVERY_BATCH` | int / `50` | Maximum leased recipients delivered per cycle; must be `1..500`. Each message commits independently. |
 | `TELESRV_VERIFICATION_MAX_ACTIVE_PER_USER` | int / `3` | Applications one applicant may keep open (draft, submitted, in review) at once. `0` disables the cap; must be `0..50`. |
 
 The defaults ship the feature on with the official bar in place, so no existing deployment changes behaviour: user

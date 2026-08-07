@@ -57,6 +57,7 @@ func (s *server) routes() http.Handler {
 	mux.Handle("GET /api/channels", s.requireAuthAPI(http.HandlerFunc(s.handleChannelsAPI)))
 	mux.Handle("GET /api/channels/{id}", s.requireAuthAPI(http.HandlerFunc(s.handleChannelDetailAPI)))
 	mux.Handle("GET /api/bots", s.requireAuthAPI(http.HandlerFunc(s.handleBotsAPI)))
+	mux.Handle("GET /api/broadcasts", s.requireAuthAPI(http.HandlerFunc(s.handleBroadcastsAPI)))
 	mux.Handle("GET /api/bots/{id}", s.requireAuthAPI(http.HandlerFunc(s.handleBotDetailAPI)))
 	mux.Handle("GET /api/premium/plans", s.premiumManage(s.handlePremiumPlansAPI))
 	mux.Handle("GET /api/emoji", s.requireAuthAPI(http.HandlerFunc(s.handleEmojiAPI)))
@@ -100,6 +101,7 @@ func (s *server) routes() http.Handler {
 	mux.Handle("POST /api/actions/set-channel-color", s.requireAuthAPI(http.HandlerFunc(s.handleSetChannelColorAPI)))
 	mux.Handle("POST /api/actions/set-channel-emoji-status", s.requireAuthAPI(http.HandlerFunc(s.handleSetChannelEmojiStatusAPI)))
 	mux.Handle("POST /api/actions/create-bot", s.requireAuthAPI(http.HandlerFunc(s.handleCreateBotAPI)))
+	mux.Handle("POST /api/actions/create-broadcast", s.requireAuthAPI(http.HandlerFunc(s.handleCreateBroadcastAPI)))
 	mux.Handle("POST /api/actions/delete-bot", s.requireAuthAPI(http.HandlerFunc(s.handleDeleteBotAPI)))
 	mux.Handle("POST /api/actions/set-channel-verified", s.requireAuthAPI(http.HandlerFunc(s.handleSetChannelVerifiedAPI)))
 	mux.Handle("POST /api/actions/revoke-sessions", s.requireAuthAPI(http.HandlerFunc(s.handleRevokeSessionsAPI)))
@@ -674,6 +676,36 @@ func (s *server) handleBotsAPI(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func (s *server) handleBroadcastsAPI(w http.ResponseWriter, r *http.Request) {
+	if s.read == nil {
+		writeAPIError(w, http.StatusServiceUnavailable, "read store is not configured")
+		return
+	}
+	beforeID, _ := parseInt64(r.URL.Query().Get("before_id"))
+	limit, _ := parseInt(r.URL.Query().Get("limit"))
+	rows, hasMore, err := s.read.ListBroadcasts(r.Context(), beforeID, limit)
+	if err != nil {
+		writeAPIError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	nextBeforeID := "0"
+	if hasMore && len(rows) > 0 {
+		nextBeforeID = strconv.FormatInt(rows[len(rows)-1].ID, 10)
+	}
+	if limit <= 0 {
+		limit = accountListDefaultLimit
+	}
+	if limit > accountListMaxLimit {
+		limit = accountListMaxLimit
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"limit":          limit,
+		"rows":           rows,
+		"has_more":       hasMore,
+		"next_before_id": nextBeforeID,
+	})
+}
+
 func (s *server) handleBotDetailAPI(w http.ResponseWriter, r *http.Request) {
 	if s.read == nil {
 		writeAPIError(w, http.StatusServiceUnavailable, "read store is not configured")
@@ -713,6 +745,30 @@ func (s *server) handleCreateBotAPI(w http.ResponseWriter, r *http.Request) {
 		Username:    body.Username,
 	}
 	result, err := s.callAdminAPI(r.Context(), "/v1/bots/create", req)
+	writeCommandResultAPI(w, result, err)
+}
+
+type createBroadcastAPIRequest struct {
+	CommandID  string  `json:"command_id"`
+	Reason     string  `json:"reason"`
+	Confirm    bool    `json:"confirm"`
+	Message    string  `json:"message"`
+	TargetMode string  `json:"target_mode"`
+	UserIDs    []int64 `json:"user_ids,omitempty"`
+}
+
+func (s *server) handleCreateBroadcastAPI(w http.ResponseWriter, r *http.Request) {
+	var body createBroadcastAPIRequest
+	if !decodeAction(w, r, &body) {
+		return
+	}
+	req := admin.CreateBroadcastRequest{
+		CommandMeta: s.commandMetaFromAPI(r, body.CommandID, body.Reason, body.Confirm, "create-broadcast"),
+		Message:     body.Message,
+		TargetMode:  body.TargetMode,
+		UserIDs:     body.UserIDs,
+	}
+	result, err := s.callAdminAPI(r.Context(), "/v1/broadcasts/create", req)
 	writeCommandResultAPI(w, result, err)
 }
 

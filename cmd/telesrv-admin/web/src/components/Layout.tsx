@@ -7,6 +7,7 @@ import {
   LayoutDashboard,
   LogOut,
   MessageSquareText,
+  Megaphone,
   Phone,
   BadgeDollarSign,
   Server,
@@ -95,6 +96,7 @@ export function Shell({
           <NavLink icon={<Users size={16} />} href="/accounts" route={route} navigate={navigate}>{t("layout.accounts")}</NavLink>
           <NavLink icon={<ShieldCheck size={16} />} href="/channels" route={route} navigate={navigate}>{t("layout.channels")}</NavLink>
           <NavLink icon={<Bot size={16} />} href="/bots" route={route} navigate={navigate}>{t("layout.bots")}</NavLink>
+          <NavLink icon={<Megaphone size={16} />} href="/broadcasts" route={route} navigate={navigate}>{t("layout.broadcasts")}</NavLink>
           {canManagePremium && (
             <NavLink icon={<BadgeDollarSign size={16} />} href="/monetization" route={route} navigate={navigate}
               activeWhen={(path) => path.startsWith("/monetization") || path.startsWith("/premium")}>

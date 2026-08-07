@@ -485,6 +485,13 @@ type Config struct {
 	// message send, so delivery cadence is a worker property.
 	VerificationNotifyInterval time.Duration
 	VerificationNotifyBatch    int
+	// Broadcast worker enumerates all-user campaigns and delivers claimed
+	// recipients in bounded batches. Lease permits another instance to recover a
+	// claim after a crash; it is not a message timeout.
+	BroadcastWorkerInterval   time.Duration
+	BroadcastWorkerLease      time.Duration
+	BroadcastMaterializeBatch int
+	BroadcastDeliveryBatch    int
 	// VerificationMaxActivePerUser bounds how many applications one applicant may
 	// keep open at once; 0 disables the cap.
 	VerificationMaxActivePerUser int
@@ -908,6 +915,10 @@ func Load() (Config, error) {
 		VerificationBotRateWindow:    envDurationOr("TELESRV_VERIFICATION_BOT_RATE_WINDOW", time.Minute),
 		VerificationNotifyInterval:   envDurationOr("TELESRV_VERIFICATION_NOTIFY_INTERVAL", 15*time.Second),
 		VerificationNotifyBatch:      envIntOr("TELESRV_VERIFICATION_NOTIFY_BATCH", 50),
+		BroadcastWorkerInterval:      envDurationOr("TELESRV_BROADCAST_WORKER_INTERVAL", 3*time.Second),
+		BroadcastWorkerLease:         envDurationOr("TELESRV_BROADCAST_WORKER_LEASE", 30*time.Second),
+		BroadcastMaterializeBatch:    envIntOr("TELESRV_BROADCAST_MATERIALIZE_BATCH", 200),
+		BroadcastDeliveryBatch:       envIntOr("TELESRV_BROADCAST_DELIVERY_BATCH", 50),
 		VerificationMaxActivePerUser: envIntOr("TELESRV_VERIFICATION_MAX_ACTIVE_PER_USER", 3),
 
 		BotVerificationEnabled:        envBoolOr("TELESRV_BOT_VERIFICATION_ENABLED", true),
@@ -1217,6 +1228,18 @@ func validateVerificationConfig(cfg Config) error {
 	}
 	if cfg.VerificationNotifyBatch <= 0 || cfg.VerificationNotifyBatch > 500 {
 		return fmt.Errorf("TELESRV_VERIFICATION_NOTIFY_BATCH must be 1..500")
+	}
+	if cfg.BroadcastWorkerInterval <= 0 {
+		return fmt.Errorf("TELESRV_BROADCAST_WORKER_INTERVAL must be positive")
+	}
+	if cfg.BroadcastWorkerLease <= 0 || cfg.BroadcastWorkerLease > time.Hour {
+		return fmt.Errorf("TELESRV_BROADCAST_WORKER_LEASE must be positive and at most 1h")
+	}
+	if cfg.BroadcastMaterializeBatch <= 0 || cfg.BroadcastMaterializeBatch > 1000 {
+		return fmt.Errorf("TELESRV_BROADCAST_MATERIALIZE_BATCH must be 1..1000")
+	}
+	if cfg.BroadcastDeliveryBatch <= 0 || cfg.BroadcastDeliveryBatch > 500 {
+		return fmt.Errorf("TELESRV_BROADCAST_DELIVERY_BATCH must be 1..500")
 	}
 	if cfg.VerificationMaxActivePerUser < 0 || cfg.VerificationMaxActivePerUser > 50 {
 		return fmt.Errorf("TELESRV_VERIFICATION_MAX_ACTIVE_PER_USER must be 0..50")

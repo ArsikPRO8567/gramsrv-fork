@@ -47,6 +47,7 @@ const (
 	ActionSetStarGiftSortOrder    = "gifts.set_sort_order"
 	ActionGiveGift                = "gifts.give"
 	ActionCreateBot               = "bot.create"
+	ActionCreateBroadcast         = "broadcast.create"
 	ActionDeleteBot               = "bot.delete"
 	// Collectible (Fragment-style) username lifecycle.
 	ActionMintCollectibleUsername     = "usernames.collectible.mint"
@@ -206,6 +207,11 @@ type UsersService interface {
 
 type StarsService interface {
 	Credit(ctx context.Context, userID, amount int64, reason domain.StarsTransactionReason, peer domain.Peer, title, desc string) (domain.StarsBalance, error)
+}
+
+type BroadcastService interface {
+	Preview(ctx context.Context, message string, mode domain.BroadcastTargetMode, selectedUserIDs []int64) (int64, error)
+	Create(ctx context.Context, message string, mode domain.BroadcastTargetMode, selectedUserIDs []int64, createdBy string) (domain.Broadcast, error)
 }
 
 type PremiumService interface {
@@ -371,6 +377,7 @@ type Dependencies struct {
 	GiftGranter            GiftGranter
 	OfficialGifts          OfficialGiftsSource
 	Bots                   BotService
+	Broadcast              BroadcastService
 	Emoji                  EmojiService
 	Moderation             ModerationService
 	Usernames              CollectibleUsernamesService
@@ -402,6 +409,7 @@ type Service struct {
 	giftGranter            GiftGranter
 	officialGifts          OfficialGiftsSource
 	bots                   BotService
+	broadcast              BroadcastService
 	emoji                  EmojiService
 	moderation             ModerationService
 	usernames              CollectibleUsernamesService
@@ -471,6 +479,9 @@ func (s *Service) Configure(deps Dependencies) *Service {
 	}
 	if deps.Bots != nil {
 		s.bots = deps.Bots
+	}
+	if deps.Broadcast != nil {
+		s.broadcast = deps.Broadcast
 	}
 	if deps.Emoji != nil {
 		s.emoji = deps.Emoji
@@ -890,6 +901,13 @@ type CreateBotRequest struct {
 	OwnerUserID int64  `json:"owner_user_id"`
 	Name        string `json:"name"`
 	Username    string `json:"username"`
+}
+
+type CreateBroadcastRequest struct {
+	CommandMeta
+	Message    string  `json:"message"`
+	TargetMode string  `json:"target_mode"`
+	UserIDs    []int64 `json:"user_ids,omitempty"`
 }
 
 type DeleteBotRequest struct {
@@ -1814,6 +1832,44 @@ func (s *Service) CreateBot(ctx context.Context, req CreateBotRequest) (CommandR
 			transientDetails: map[string]any{"token": token},
 		}, nil
 	})
+}
+
+// CreateBroadcast records only the durable campaign. Recipient enumeration and
+// delivery are handled by the bounded background worker.
+func (s *Service) CreateBroadcast(ctx context.Context, req CreateBroadcastRequest) (CommandResult, error) {
+	if s == nil || s.broadcast == nil {
+		return CommandResult{}, fmt.Errorf("admin broadcast dependency is not configured")
+	}
+	mode := domain.BroadcastTargetMode(strings.TrimSpace(req.TargetMode))
+	return s.runCommand(ctx, req.CommandMeta, ActionCreateBroadcast, 0, domain.Peer{}, req, func() (CommandResult, error) {
+		count, err := s.broadcast.Preview(ctx, req.Message, mode, req.UserIDs)
+		if err != nil {
+			return CommandResult{}, err
+		}
+		details := map[string]any{
+			"target_mode":     string(mode),
+			"recipient_count": count,
+			"message_preview": truncateBroadcastPreview(req.Message),
+		}
+		if req.DryRun {
+			return CommandResult{Message: "broadcast validated", Details: details}, nil
+		}
+		created, err := s.broadcast.Create(ctx, req.Message, mode, req.UserIDs, req.Actor)
+		if err != nil {
+			return CommandResult{Details: details}, err
+		}
+		details["broadcast_id"] = created.ID
+		details["recipient_count"] = created.TargetCount
+		return CommandResult{Message: "broadcast created", Details: details}, nil
+	})
+}
+
+func truncateBroadcastPreview(message string) string {
+	runes := []rune(strings.TrimSpace(message))
+	if len(runes) <= 120 {
+		return string(runes)
+	}
+	return string(runes[:120]) + "…"
 }
 
 // DeleteBot permanently removes a user-created bot. The dry-run stage verifies

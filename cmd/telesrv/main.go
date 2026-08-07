@@ -30,6 +30,7 @@ import (
 	authdiagnosticsapp "telesrv/internal/app/authdiagnostics"
 	botsapp "telesrv/internal/app/bots"
 	botverificationapp "telesrv/internal/app/botverification"
+	broadcastapp "telesrv/internal/app/broadcast"
 	channelapp "telesrv/internal/app/channels"
 	chatlistsapp "telesrv/internal/app/chatlists"
 	clienttelemetryapp "telesrv/internal/app/clienttelemetry"
@@ -704,6 +705,8 @@ func run(logger *zap.Logger) error {
 	messageStore := postgres.NewMessageStore(pool,
 		postgres.WithMessageAllocators(boxIDAllocator),
 		postgres.WithMessageLogger(logger.Named("store").Named("messages")))
+	broadcastStore := postgres.NewBroadcastStore(pool)
+	broadcastService := broadcastapp.NewService(broadcastStore, messageStore, logger.Named("app").Named("broadcast"))
 	// 共享频道行/成员缓存 + 统一 read-model LISTEN/NOTIFY 实时失效：消除高频「逐 RPC
 	// 解析频道/成员」在客户端重连同步突发里重复读同一行的放大。
 	channelRowCache := postgres.NewChannelRowCache(cfg.ChannelRowCacheMaxEntries)
@@ -1374,6 +1377,7 @@ func run(logger *zap.Logger) error {
 		Gifts:                  giftsService,
 		GiftGranter:            router,
 		Bots:                   botsService,
+		Broadcast:              broadcastService,
 		Emoji:                  filesService,
 		Moderation:             moderationService,
 		Usernames:              usernamesService,
@@ -1440,6 +1444,12 @@ func run(logger *zap.Logger) error {
 	// a message send.
 	go verificationapp.NewNotificationWorker(verificationService, logger.Named("verification").Named("notify"),
 		cfg.VerificationNotifyInterval, cfg.VerificationNotifyBatch).Run(ctx)
+	go broadcastapp.NewWorker(broadcastService, broadcastapp.WorkerConfig{
+		Interval:         cfg.BroadcastWorkerInterval,
+		Lease:            cfg.BroadcastWorkerLease,
+		MaterializeBatch: cfg.BroadcastMaterializeBatch,
+		DeliveryBatch:    cfg.BroadcastDeliveryBatch,
+	}, logger.Named("broadcast").Named("delivery")).Run(ctx)
 	moderationActionOptions := []moderationapp.ActionExecutorOption{}
 	if cfg.PublicLinkWebAddr != "" {
 		moderationActionOptions = append(

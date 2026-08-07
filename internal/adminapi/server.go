@@ -204,6 +204,7 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("POST /v1/channels/set-color", s.authenticated(s.handleSetChannelColor))
 	mux.HandleFunc("POST /v1/channels/set-emoji-status", s.authenticated(s.handleSetChannelEmojiStatus))
 	mux.HandleFunc("POST /v1/bots/create", s.authenticated(s.handleCreateBot))
+	mux.HandleFunc("POST /v1/broadcasts/create", s.authenticated(s.handleCreateBroadcast))
 	mux.HandleFunc("POST /v1/bots/delete", s.authenticated(s.handleDeleteBot))
 	mux.HandleFunc("POST /v1/messages/delete", s.authenticated(s.handleDeleteMessages))
 	mux.HandleFunc("POST /v1/messages/delete-history", s.authenticated(s.handleDeleteHistory))
@@ -526,6 +527,22 @@ func (s *Server) handleCreateBot(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	result, err := s.svc.CreateBot(r.Context(), req)
+	writeCommandResult(w, result, err)
+}
+
+func (s *Server) handleCreateBroadcast(w http.ResponseWriter, r *http.Request) {
+	var req admin.CreateBroadcastRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	service, ok := s.svc.(interface {
+		CreateBroadcast(context.Context, admin.CreateBroadcastRequest) (admin.CommandResult, error)
+	})
+	if !ok {
+		writeError(w, http.StatusNotImplemented, "broadcasts are not configured")
+		return
+	}
+	result, err := service.CreateBroadcast(r.Context(), req)
 	writeCommandResult(w, result, err)
 }
 

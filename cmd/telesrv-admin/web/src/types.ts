@@ -825,6 +825,26 @@ export type BotListResponse = {
   listing: boolean;
 };
 
+export type BroadcastRow = {
+  ID: string;
+  Message: string;
+  TargetMode: "all" | "selected";
+  TargetCount: string;
+  MaterializedCount: string;
+  SentCount: string;
+  FailedCount: string;
+  EnumerationDone: boolean;
+  CreatedBy: string;
+  CreatedAt: string;
+};
+
+export type BroadcastListResponse = {
+  limit: number;
+  rows: BroadcastRow[];
+  has_more: boolean;
+  next_before_id: string;
+};
+
 export type EmojiRow = {
   DocumentID: string;
   Alt: string;

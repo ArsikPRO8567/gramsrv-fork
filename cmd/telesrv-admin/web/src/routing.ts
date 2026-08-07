@@ -28,6 +28,7 @@ export function routeTitle(pathname: string, t: TFunction): string {
   if (pathname.startsWith("/accounts")) return t("route.accounts");
   if (pathname.startsWith("/channels")) return t("route.channels");
   if (pathname.startsWith("/bots")) return t("route.bots");
+  if (pathname.startsWith("/broadcasts")) return t("route.broadcasts");
   if (pathname.startsWith("/monetization") || pathname.startsWith("/premium")) return t("route.premium");
   if (pathname.startsWith("/moderation")) return t("route.moderation");
   if (pathname.startsWith("/emoji")) return t("route.emoji");
@@ -47,6 +48,7 @@ export function routeSubtitle(pathname: string, t: TFunction): string {
   if (pathname.startsWith("/accounts")) return t("route.accountsSubtitle");
   if (pathname.startsWith("/channels")) return t("route.channelsSubtitle");
   if (pathname.startsWith("/bots")) return t("route.botsSubtitle");
+  if (pathname.startsWith("/broadcasts")) return t("route.broadcastsSubtitle");
   if (pathname.startsWith("/monetization") || pathname.startsWith("/premium")) return t("route.premiumSubtitle");
   if (pathname.startsWith("/moderation")) return t("route.moderationSubtitle");
   if (pathname.startsWith("/emoji")) return t("route.emojiSubtitle");

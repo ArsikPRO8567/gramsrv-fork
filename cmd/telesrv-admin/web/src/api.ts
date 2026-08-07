@@ -7,6 +7,7 @@ import type {
   AdminSession,
   BotDetail,
   BotListResponse,
+  BroadcastListResponse,
   BotVerificationCountsResponse,
   BotVerifierListResponse,
   ChannelDetail,
@@ -157,6 +158,7 @@ export const api = {
   channel: (id: number) => request<ChannelDetail>(`/api/channels/${id}`),
   bots: (params: URLSearchParams) => request<BotListResponse>(`/api/bots?${params.toString()}`),
   bot: (id: number) => request<BotDetail>(`/api/bots/${id}`),
+  broadcasts: (params: URLSearchParams) => request<BroadcastListResponse>(`/api/broadcasts?${params.toString()}`),
   premiumPlans: () => request<PremiumPlansResponse>("/api/premium/plans"),
   collectibleUsernames: (params: URLSearchParams) =>
     request<CollectibleUsernameListResponse>(`/api/collectible-usernames?${params.toString()}`),
