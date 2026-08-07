@@ -152,12 +152,12 @@ export function ActionButton({
                   <div className="result-message">{result.message || result.error}</div>
                   {secretValue && (
                     <div className="secret-reveal">
-                      <div className="secret-reveal-label">One-time secret — copy it now; it will not be shown again.</div>
+                      <div className="secret-reveal-label">{t("action.oneTimeSecret")}</div>
                       <div className="secret-reveal-row">
                         <code className="secret-reveal-value">{"•".repeat(Math.min(secretValue.length, 40))}</code>
                         <button className="btn icon-text" type="button" onClick={() => void copySecret()}>
                           {secretCopied ? <Check size={15} /> : <Copy size={15} />}
-                          {secretCopied ? "Copied" : "Copy"}
+                          {secretCopied ? t("common.copied") : t("common.copy")}
                         </button>
                       </div>
                     </div>

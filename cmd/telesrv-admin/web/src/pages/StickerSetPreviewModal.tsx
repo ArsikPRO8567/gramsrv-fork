@@ -5,12 +5,13 @@ import { api, errorMessage } from "../api";
 import { ActionButton } from "../components/ActionButton";
 import { StickerDocumentPreview } from "../components/StickerDocumentPreview";
 import { Alert } from "../components/ui";
+import { useI18n } from "../i18n";
 import type { StickerSetRow } from "../types";
 
 const pageSize = 24;
 
 export function StickerSetPreviewModal({ set, onClose }: { set: StickerSetRow; onClose: () => void }) {
-  const noun = set.Kind === "emoji" ? "emoji" : "sticker";
+  const { t } = useI18n();
   const [documentIDs, setDocumentIDs] = useState<string[] | null>(null);
   const [error, setError] = useState("");
   const [page, setPage] = useState(1);
@@ -51,22 +52,22 @@ export function StickerSetPreviewModal({ set, onClose }: { set: StickerSetRow; o
       <section className="modal command-modal sticker-preview-modal" role="dialog" aria-modal="true" aria-label={set.Title || `#${set.ID}`}>
         <div className="modal-head">
           <div>
-            <div className="eyebrow">Set contents</div>
+            <div className="eyebrow">{t("stickers.setContents")}</div>
             <h2>{set.Title || `#${set.ID}`}</h2>
           </div>
-          <button className="icon-btn" type="button" onClick={onClose} aria-label="Close">
+          <button className="icon-btn" type="button" onClick={onClose} aria-label={t("common.close")}>
             <X size={15} />
           </button>
         </div>
         <div className="command-body">
-          <AddStickerForm setID={set.ID} noun={noun} onAdded={load} />
+          <AddStickerForm setID={set.ID} kind={set.Kind === "emoji" ? "emoji" : "stickers"} onAdded={load} />
           {error && <Alert>{error}</Alert>}
           {!error && documentIDs === null && (
             <div className="loading-line">
-              <Loader2 className="spin" size={18} /> Loading
+              <Loader2 className="spin" size={18} /> {t("common.loading")}
             </div>
           )}
-          {documentIDs !== null && total === 0 && !error && <div className="empty-panel">This set has no documents.</div>}
+          {documentIDs !== null && total === 0 && !error && <div className="empty-panel">{t("stickers.emptySet")}</div>}
           {pageItems.length > 0 && (
             <div className="sticker-doc-grid" key={currentPage}>
               {pageItems.map((documentID) => (
@@ -75,7 +76,7 @@ export function StickerSetPreviewModal({ set, onClose }: { set: StickerSetRow; o
                   <ActionButton
                     compact
                     tone="danger"
-                    label="Remove"
+                    label={t("common.remove")}
                     icon={<Trash2 size={12} />}
                     path="/api/actions/remove-sticker-from-set"
                     payload={() => ({ set_id: set.ID, document_id: documentID })}
@@ -87,19 +88,19 @@ export function StickerSetPreviewModal({ set, onClose }: { set: StickerSetRow; o
           )}
           {total > pageSize && (
             <div className="gift-pager">
-              <span className="gift-pager-range">{`Showing ${rangeStart}-${rangeEnd} of ${total}`}</span>
+              <span className="gift-pager-range">{t("common.showingRange", { start: rangeStart, end: rangeEnd, total })}</span>
               <div className="gift-pager-controls">
                 <button className="btn compact-btn" type="button" onClick={() => setPage((p) => Math.max(1, p - 1))} disabled={currentPage <= 1}>
-                  <ChevronLeft size={14} /> Previous
+                  <ChevronLeft size={14} /> {t("common.previous")}
                 </button>
-                <span className="gift-pager-page">{`Page ${currentPage} of ${totalPages}`}</span>
+                <span className="gift-pager-page">{t("common.pageOf", { current: currentPage, total: totalPages })}</span>
                 <button
                   className="btn compact-btn"
                   type="button"
                   onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
                   disabled={currentPage >= totalPages}
                 >
-                  Next <ChevronRight size={14} />
+                  {t("common.next")} <ChevronRight size={14} />
                 </button>
               </div>
             </div>
@@ -111,7 +112,8 @@ export function StickerSetPreviewModal({ set, onClose }: { set: StickerSetRow; o
   );
 }
 
-function AddStickerForm({ setID, noun, onAdded }: { setID: string; noun: string; onAdded: () => void }) {
+function AddStickerForm({ setID, kind, onAdded }: { setID: string; kind: "stickers" | "emoji"; onAdded: () => void }) {
+  const { t } = useI18n();
   const [file, setFile] = useState<File | null>(null);
   const [emoji, setEmoji] = useState("");
   const [reason, setReason] = useState("");
@@ -120,15 +122,15 @@ function AddStickerForm({ setID, noun, onAdded }: { setID: string; noun: string;
 
   async function submit() {
     if (!file) {
-      setError(`Choose a ${noun} file first.`);
+      setError(kind === "emoji" ? t("stickers.chooseEmojiFirst") : t("stickers.chooseStickerFirst"));
       return;
     }
     if (!emoji.trim()) {
-      setError("An emoji is required.");
+      setError(t("stickers.emojiValueRequired"));
       return;
     }
     if (!reason.trim()) {
-      setError("Please enter an operation reason.");
+      setError(t("action.reasonRequired"));
       return;
     }
     setBusy(true);
@@ -158,13 +160,13 @@ function AddStickerForm({ setID, noun, onAdded }: { setID: string; noun: string;
           onChange={(event) => setFile(event.target.files?.[0] ?? null)}
         />
         <span className="gift-file-copy">
-          <strong>{file ? file.name : "Choose a TGS, Lottie JSON, or WebP file"}</strong>
+          <strong>{file ? file.name : t("stickers.chooseMedia")}</strong>
         </span>
       </label>
       <input className="small-input" value={emoji} onChange={(event) => setEmoji(event.target.value)} placeholder="e.g. 😀" />
-      <input className="small-input" value={reason} onChange={(event) => setReason(event.target.value)} placeholder="Describe why this operation is being performed" />
+      <input className="small-input" value={reason} onChange={(event) => setReason(event.target.value)} placeholder={t("action.reasonPlaceholder")} />
       <button className="btn primary compact-btn" type="button" onClick={submit} disabled={busy}>
-        {busy ? <Loader2 className="spin" size={14} /> : <Plus size={14} />} {`Add ${noun}`}
+        {busy ? <Loader2 className="spin" size={14} /> : <Plus size={14} />} {kind === "emoji" ? t("stickers.addEmoji") : t("stickers.addSticker")}
       </button>
       {error && <span className="sticker-add-form-error">{error}</span>}
     </div>
