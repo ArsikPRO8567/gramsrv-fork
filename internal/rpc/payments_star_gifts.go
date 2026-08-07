@@ -1433,7 +1433,7 @@ func (r *Router) tgSavedStarGiftsResponse(ctx context.Context, viewerUserID int6
 		Gifts: projected,
 		Chats: []tg.ChatClass{},
 	}
-	if ids := savedStarGiftUserIDs(gifts); len(ids) > 0 {
+	if ids := savedStarGiftUserIDs(viewerUserID, gifts); len(ids) > 0 {
 		out.Users = tgUsersForViewer(viewerUserID, r.domainUsersForIDs(ctx, viewerUserID, ids))
 	} else {
 		out.Users = []tg.UserClass{}
@@ -1676,7 +1676,7 @@ func tgSavedStarGifts(viewerUserID int64, gifts []domain.SavedStarGift, catalog 
 		if g.Unsaved {
 			item.Unsaved = true
 		}
-		if g.FromUserID != 0 && !g.NameHidden {
+		if g.FromUserID != 0 && savedStarGiftOriginalDetailsVisible(viewerUserID, g) {
 			item.SetFromID(&tg.PeerUser{UserID: g.FromUserID})
 		}
 		if g.Owner.Type == domain.PeerTypeUser && g.MsgID > 0 {
@@ -1688,7 +1688,7 @@ func tgSavedStarGifts(viewerUserID int64, gifts []domain.SavedStarGift, catalog 
 		if g.ConvertStars > 0 {
 			item.SetConvertStars(g.ConvertStars)
 		}
-		if g.Message != "" {
+		if g.Message != "" && savedStarGiftOriginalDetailsVisible(viewerUserID, g) {
 			item.SetMessage(tg.TextWithEntities{Text: g.Message})
 		}
 		if g.UniqueGiftID == 0 {
@@ -1770,11 +1770,18 @@ func tgSavedStarGiftGift(g domain.SavedStarGift, catalog map[int64]domain.StarGi
 	}
 }
 
-func savedStarGiftUserIDs(gifts []domain.SavedStarGift) []int64 {
+func savedStarGiftOriginalDetailsVisible(viewerUserID int64, gift domain.SavedStarGift) bool {
+	if !gift.NameHidden {
+		return true
+	}
+	return gift.Owner.Type == domain.PeerTypeUser && gift.Owner.ID == viewerUserID
+}
+
+func savedStarGiftUserIDs(viewerUserID int64, gifts []domain.SavedStarGift) []int64 {
 	seen := make(map[int64]struct{}, len(gifts))
 	ids := make([]int64, 0, len(gifts))
 	for _, g := range gifts {
-		if g.FromUserID == 0 || g.NameHidden {
+		if g.FromUserID == 0 || !savedStarGiftOriginalDetailsVisible(viewerUserID, g) {
 			continue
 		}
 		if _, ok := seen[g.FromUserID]; ok {

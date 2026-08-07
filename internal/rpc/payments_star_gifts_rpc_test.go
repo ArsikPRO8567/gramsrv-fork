@@ -1346,8 +1346,9 @@ func TestStarGiftSaga(t *testing.T) {
 	}
 
 	inv := &tg.InputInvoiceStarGift{
-		Peer:   &tg.InputPeerUser{UserID: recipient.ID, AccessHash: recipient.AccessHash},
-		GiftID: gift.ID,
+		HideName: true,
+		Peer:     &tg.InputPeerUser{UserID: recipient.ID, AccessHash: recipient.AccessHash},
+		GiftID:   gift.ID,
 	}
 
 	// 2. getPaymentForm → paymentFormStarGift（XTR + 非空 prices）。
@@ -1418,6 +1419,19 @@ func TestStarGiftSaga(t *testing.T) {
 	}
 	if from, ok := saved.GetFromID(); !ok {
 		t.Fatalf("saved gift from = %v, want sender peer", from)
+	}
+	if !saved.NameHidden {
+		t.Fatal("saved gift name_hidden = false, want anonymous gift")
+	}
+	foundSender := false
+	for _, user := range savedRes.Users {
+		if got, ok := user.(*tg.User); ok && got.ID == sender.ID {
+			foundSender = true
+			break
+		}
+	}
+	if !foundSender {
+		t.Fatalf("saved gift users = %+v, want anonymous sender %d for receiver", savedRes.Users, sender.ID)
 	}
 
 	// 4b. 收礼人 userFull 必须带 stargifts_count（否则客户端资料页 Gifts 区段不出现）。
@@ -1971,5 +1985,60 @@ func TestStarsTopupRejectsUnlistedAmount(t *testing.T) {
 	_, err := r.onPaymentsGetPaymentForm(ctx, &tg.PaymentsGetPaymentFormRequest{Invoice: inv})
 	if !tgerr.Is(err, "STARS_FORM_AMOUNT_MISMATCH") {
 		t.Fatalf("getPaymentForm unlisted err = %v, want STARS_FORM_AMOUNT_MISMATCH", err)
+	}
+}
+
+func TestSavedStarGiftAnonymousDetailsVisibleOnlyToReceiver(t *testing.T) {
+	const (
+		senderID   = int64(1780243201)
+		receiverID = int64(1780243231)
+		viewerID   = int64(1780243999)
+	)
+	gift := domain.SavedStarGift{
+		Owner:      domain.Peer{Type: domain.PeerTypeUser, ID: receiverID},
+		FromUserID: senderID,
+		GiftID:     7001,
+		RevisionID: 8001,
+		MsgID:      91,
+		Date:       1700000000,
+		NameHidden: true,
+		Message:    "private gift message",
+	}
+
+	// Telegram iOS needs the sender peer to turn a user gift's msg_id into an
+	// InputSavedStarGiftUser reference. The protocol exposes hidden original
+	// details to the receiver, while keeping them hidden from profile viewers.
+	receiverProjection := tgSavedStarGifts(receiverID, []domain.SavedStarGift{gift}, nil, nil)
+	if len(receiverProjection) != 1 {
+		t.Fatalf("receiver projection len = %d, want 1", len(receiverProjection))
+	}
+	from, ok := receiverProjection[0].GetFromID()
+	fromUser, isUser := from.(*tg.PeerUser)
+	if !ok || !isUser || fromUser.UserID != senderID {
+		t.Fatalf("receiver from_id = %#v ok=%v, want sender %d", from, ok, senderID)
+	}
+	message, ok := receiverProjection[0].GetMessage()
+	if !ok || message.Text != gift.Message {
+		t.Fatalf("receiver message = %#v ok=%v, want private message", message, ok)
+	}
+	if msgID, ok := receiverProjection[0].GetMsgID(); !ok || msgID != gift.MsgID {
+		t.Fatalf("receiver msg_id = %d ok=%v, want %d", msgID, ok, gift.MsgID)
+	}
+	if ids := savedStarGiftUserIDs(receiverID, []domain.SavedStarGift{gift}); !reflect.DeepEqual(ids, []int64{senderID}) {
+		t.Fatalf("receiver user ids = %v, want sender %d", ids, senderID)
+	}
+
+	viewerProjection := tgSavedStarGifts(viewerID, []domain.SavedStarGift{gift}, nil, nil)
+	if len(viewerProjection) != 1 {
+		t.Fatalf("viewer projection len = %d, want 1", len(viewerProjection))
+	}
+	if from, ok := viewerProjection[0].GetFromID(); ok {
+		t.Fatalf("anonymous sender leaked to profile viewer: %#v", from)
+	}
+	if message, ok := viewerProjection[0].GetMessage(); ok {
+		t.Fatalf("anonymous message leaked to profile viewer: %#v", message)
+	}
+	if ids := savedStarGiftUserIDs(viewerID, []domain.SavedStarGift{gift}); len(ids) != 0 {
+		t.Fatalf("anonymous sender user leaked to profile viewer: %v", ids)
 	}
 }
