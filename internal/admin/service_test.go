@@ -1178,7 +1178,7 @@ func TestImportOfficialStarGiftPublishesThroughRealGiftService(t *testing.T) {
 		SourceJSON:     []byte(`{"id":6003643167683903930,"title":"Party Sparkler"}`),
 		Gift: officialgifts.Gift{
 			ID: 6003643167683903930, Title: "Party Sparkler", Stars: 15, ConvertStars: 13,
-			UpgradeStars: 25, AvailabilityTotal: 400000, DocumentID: 1,
+			UpgradeStars: 25, UpgradeVariants: 8, DocumentID: 1,
 		},
 		BaseDocument: document(1, "gift.json"),
 		Collectible: &officialgifts.CollectibleSet{
@@ -1214,7 +1214,7 @@ func TestImportOfficialStarGiftPublishesThroughRealGiftService(t *testing.T) {
 		t.Fatalf("catalog=%+v err=%v, want one imported gift", catalog, err)
 	}
 	preview, ok, err := giftService.CollectiblePreview(ctx, catalog[0].ID)
-	if err != nil || !ok || len(preview.Models) != 2 || len(preview.Patterns) != 2 {
+	if err != nil || !ok || preview.SupplyTotal != 8 || len(preview.Models) != 2 || len(preview.Patterns) != 2 {
 		t.Fatalf("preview=%+v ok=%v err=%v", preview, ok, err)
 	}
 	model := preview.Models[0].Document

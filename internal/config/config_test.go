@@ -44,6 +44,45 @@ func TestLoadDefaultsAdvertiseIPToLoopback(t *testing.T) {
 	}
 }
 
+func TestLoadUpdateServiceConfig(t *testing.T) {
+	disableDefaultConfigFile(t)
+	t.Setenv("TELESRV_UPDATE_PUBLIC_URL", "https://updates.example.test/root/")
+	t.Setenv("TELESRV_UPDATE_SERVICE_URL", "http://127.0.0.1:2402/")
+	t.Setenv("TELESRV_UPDATE_REQUEST_TIMEOUT", "3s")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.UpdatePublicURL != "https://updates.example.test/root" || cfg.UpdateServiceURL != "http://127.0.0.1:2402" {
+		t.Fatalf("update URLs = %q / %q", cfg.UpdatePublicURL, cfg.UpdateServiceURL)
+	}
+	if cfg.UpdateRequestTimeout != 3*time.Second {
+		t.Fatalf("UpdateRequestTimeout = %v", cfg.UpdateRequestTimeout)
+	}
+}
+
+func TestLoadUpdateServiceDefaultsInternalURLToPublic(t *testing.T) {
+	disableDefaultConfigFile(t)
+	t.Setenv("TELESRV_UPDATE_PUBLIC_URL", "https://updates.example.test")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.UpdateServiceURL != cfg.UpdatePublicURL {
+		t.Fatalf("UpdateServiceURL = %q, want %q", cfg.UpdateServiceURL, cfg.UpdatePublicURL)
+	}
+}
+
+func TestLoadRejectsInvalidUpdateServiceConfig(t *testing.T) {
+	disableDefaultConfigFile(t)
+	t.Setenv("TELESRV_UPDATE_PUBLIC_URL", "file:///updates")
+	if _, err := Load(); err == nil {
+		t.Fatal("invalid update public URL accepted")
+	}
+}
+
 func TestLoadPremiumPromoSeedDirOverride(t *testing.T) {
 	disableDefaultConfigFile(t)
 	t.Setenv("TELESRV_PREMIUM_PROMO_SEED_DIR", `D:\seed\premium-promo`)
@@ -54,6 +93,44 @@ func TestLoadPremiumPromoSeedDirOverride(t *testing.T) {
 	}
 	if cfg.PremiumPromoSeedDir != `D:\seed\premium-promo` {
 		t.Fatalf("PremiumPromoSeedDir = %q", cfg.PremiumPromoSeedDir)
+	}
+}
+
+func TestLoadPremiumBotAndPlans(t *testing.T) {
+	disableDefaultConfigFile(t)
+	t.Setenv("TELESRV_PREMIUM_BOT_USERNAME", "@premium_store_bot")
+	t.Setenv("TELESRV_PREMIUM_BOT_USER_ID", "1250000999")
+	t.Setenv("TELESRV_PREMIUM_PLANS", "1:30:250,12:365:2400")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.PremiumBotUsername != "premium_store_bot" || cfg.PremiumBotUserID != 1250000999 {
+		t.Fatalf("Premium bot config = %q/%d", cfg.PremiumBotUsername, cfg.PremiumBotUserID)
+	}
+	if len(cfg.PremiumPlans) != 2 || cfg.PremiumPlans[0].Months != 1 ||
+		cfg.PremiumPlans[0].DurationDays != 30 || cfg.PremiumPlans[0].AmountStars != 250 ||
+		cfg.PremiumPlans[1].Months != 12 {
+		t.Fatalf("Premium plans = %+v", cfg.PremiumPlans)
+	}
+}
+
+func TestLoadRejectsInvalidPremiumCatalog(t *testing.T) {
+	for _, value := range []string{
+		"3:90:0",
+		"3:90:750,3:91:760",
+		"121:365:750",
+		"3:36501:750",
+		"3:90:1000000000000001",
+	} {
+		t.Run(value, func(t *testing.T) {
+			disableDefaultConfigFile(t)
+			t.Setenv("TELESRV_PREMIUM_PLANS", value)
+			if _, err := Load(); err == nil {
+				t.Fatalf("Load accepted TELESRV_PREMIUM_PLANS=%q", value)
+			}
+		})
 	}
 }
 

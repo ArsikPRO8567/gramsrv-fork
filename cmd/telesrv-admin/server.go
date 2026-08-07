@@ -58,6 +58,7 @@ func (s *server) routes() http.Handler {
 	mux.Handle("GET /api/channels/{id}", s.requireAuthAPI(http.HandlerFunc(s.handleChannelDetailAPI)))
 	mux.Handle("GET /api/bots", s.requireAuthAPI(http.HandlerFunc(s.handleBotsAPI)))
 	mux.Handle("GET /api/bots/{id}", s.requireAuthAPI(http.HandlerFunc(s.handleBotDetailAPI)))
+	mux.Handle("GET /api/premium/plans", s.premiumManage(s.handlePremiumPlansAPI))
 	mux.Handle("GET /api/emoji", s.requireAuthAPI(http.HandlerFunc(s.handleEmojiAPI)))
 	mux.Handle("GET /api/emoji/{id}/animation", s.requireAuthAPI(http.HandlerFunc(s.handleEmojiAnimationAPI)))
 	mux.Handle("GET /api/messages", s.requireAuthAPI(http.HandlerFunc(s.handleMessagesAPI)))
@@ -72,6 +73,8 @@ func (s *server) routes() http.Handler {
 	mux.Handle("GET /api/gifts/{id}/collectibles/{kind}/{attribute_id}/animation", s.requireAuthAPI(http.HandlerFunc(s.handleStarGiftCollectibleAnimationAPI)))
 	mux.Handle("GET /api/collectible-usernames", s.requireAuthAPI(http.HandlerFunc(s.handleCollectibleUsernamesAPI)))
 	mux.Handle("GET /api/collectible-usernames/{id}", s.requireAuthAPI(http.HandlerFunc(s.handleCollectibleUsernameDetailAPI)))
+	mux.Handle("GET /api/collectible-phones", s.requireAuthAPI(http.HandlerFunc(s.handleCollectiblePhonesAPI)))
+	mux.Handle("GET /api/collectible-phones/{id}", s.requireAuthAPI(http.HandlerFunc(s.handleCollectiblePhoneDetailAPI)))
 	mux.Handle("GET /api/account-ratings", s.requireAuthAPI(http.HandlerFunc(s.handleAccountRatingsAPI)))
 	mux.Handle("GET /api/account-ratings/{user_id}", s.requireAuthAPI(http.HandlerFunc(s.handleAccountRatingDetailAPI)))
 	mux.Handle("GET /api/moderation/cases", s.requireAuthAPI(http.HandlerFunc(s.handleModerationCasesAPI)))
@@ -81,7 +84,8 @@ func (s *server) routes() http.Handler {
 	mux.Handle("POST /api/moderation/cases/{id}/decide", s.requireAuthAPI(http.HandlerFunc(s.handleDecideModerationCaseAPI)))
 	mux.Handle("POST /api/moderation/cases/{id}/appeals/{appeal_id}/review", s.requireAuthAPI(http.HandlerFunc(s.handleReviewModerationAppealAPI)))
 	mux.Handle("POST /api/actions/set-frozen", s.requireAuthAPI(http.HandlerFunc(s.handleSetAccountFrozenAPI)))
-	mux.Handle("POST /api/actions/grant-premium", s.requireAuthAPI(http.HandlerFunc(s.handleGrantPremiumAPI)))
+	mux.Handle("POST /api/actions/grant-premium", s.premiumManage(s.handleGrantPremiumAPI))
+	mux.Handle("POST /api/actions/upsert-premium-plan", s.premiumManage(s.handleUpsertPremiumPlanAPI))
 	mux.Handle("POST /api/actions/grant-stars", s.requireAuthAPI(http.HandlerFunc(s.handleGrantStarsAPI)))
 	mux.Handle("POST /api/actions/set-verified", s.requireAuthAPI(http.HandlerFunc(s.handleSetVerifiedAPI)))
 	mux.Handle("POST /api/actions/set-account-flags", s.requireAuthAPI(http.HandlerFunc(s.handleSetUserFlagsAPI)))
@@ -107,6 +111,11 @@ func (s *server) routes() http.Handler {
 	mux.Handle("POST /api/actions/set-gift-sort-order", s.requireAuthAPI(http.HandlerFunc(s.handleSetStarGiftSortOrderAPI)))
 	mux.Handle("POST /api/actions/give-gift", s.requireAuthAPI(http.HandlerFunc(s.handleGiveGiftAPI)))
 	mux.Handle("POST /api/actions/mint-collectible-username", s.requireAuthAPI(http.HandlerFunc(s.handleMintCollectibleUsernameAPI)))
+	mux.Handle("POST /api/actions/mint-collectible-phone", s.requireAuthAPI(http.HandlerFunc(s.handleMintCollectiblePhoneAPI)))
+	mux.Handle("POST /api/actions/update-collectible-phone-price", s.requireAuthAPI(http.HandlerFunc(s.handleUpdateCollectiblePhonePriceAPI)))
+	mux.Handle("POST /api/actions/transfer-collectible-phone", s.requireAuthAPI(http.HandlerFunc(s.handleTransferCollectiblePhoneAPI)))
+	mux.Handle("POST /api/actions/revoke-collectible-phone", s.requireAuthAPI(http.HandlerFunc(s.handleRevokeCollectiblePhoneAPI)))
+	mux.Handle("POST /api/actions/delete-collectible-phone", s.requireAuthAPI(http.HandlerFunc(s.handleDeleteCollectiblePhoneAPI)))
 	mux.Handle("POST /api/actions/transfer-collectible-username", s.requireAuthAPI(http.HandlerFunc(s.handleTransferCollectibleUsernameAPI)))
 	mux.Handle("POST /api/actions/revoke-collectible-username", s.requireAuthAPI(http.HandlerFunc(s.handleRevokeCollectibleUsernameAPI)))
 	mux.Handle("POST /api/actions/delete-collectible-username", s.requireAuthAPI(http.HandlerFunc(s.handleDeleteCollectibleUsernameAPI)))
@@ -1751,6 +1760,106 @@ func (s *server) handleDeleteCollectibleUsernameAPI(w http.ResponseWriter, r *ht
 	writeCommandResultAPI(w, result, err)
 }
 
+type mintCollectiblePhoneAPIRequest struct {
+	CommandID      string                      `json:"command_id"`
+	Reason         string                      `json:"reason"`
+	Confirm        bool                        `json:"confirm"`
+	Phone          string                      `json:"phone"`
+	Tier           domain.CollectiblePhoneTier `json:"tier"`
+	OwnerUserID    flexInt64                   `json:"owner_user_id"`
+	Currency       string                      `json:"currency"`
+	Amount         flexInt64                   `json:"amount"`
+	CryptoCurrency string                      `json:"crypto_currency"`
+	CryptoAmount   flexInt64                   `json:"crypto_amount"`
+	URL            string                      `json:"url"`
+	PurchaseDate   flexUnix                    `json:"purchase_date"`
+}
+
+func (s *server) handleMintCollectiblePhoneAPI(w http.ResponseWriter, r *http.Request) {
+	var b mintCollectiblePhoneAPIRequest
+	if !decodeAction(w, r, &b) {
+		return
+	}
+	req := admin.MintCollectiblePhoneRequest{CommandMeta: s.commandMetaFromAPI(r, b.CommandID, b.Reason, b.Confirm, "mint-collectible-phone"), Phone: b.Phone, Tier: b.Tier, OwnerUserID: b.OwnerUserID.Int64(), Currency: b.Currency, Amount: b.Amount.Int64(), CryptoCurrency: b.CryptoCurrency, CryptoAmount: b.CryptoAmount.Int64(), URL: b.URL, PurchaseDate: b.PurchaseDate.Unix()}
+	result, err := s.callAdminAPI(r.Context(), "/v1/collectible-phones/mint", req)
+	writeCommandResultAPI(w, result, err)
+}
+
+type updateCollectiblePhonePriceAPIRequest struct {
+	CommandID      string    `json:"command_id"`
+	Reason         string    `json:"reason"`
+	Confirm        bool      `json:"confirm"`
+	Phone          string    `json:"phone"`
+	Currency       string    `json:"currency"`
+	Amount         flexInt64 `json:"amount"`
+	CryptoCurrency string    `json:"crypto_currency"`
+	CryptoAmount   flexInt64 `json:"crypto_amount"`
+}
+
+func (s *server) handleUpdateCollectiblePhonePriceAPI(w http.ResponseWriter, r *http.Request) {
+	var b updateCollectiblePhonePriceAPIRequest
+	if !decodeAction(w, r, &b) {
+		return
+	}
+	req := admin.UpdateCollectiblePhonePriceRequest{CommandMeta: s.commandMetaFromAPI(r, b.CommandID, b.Reason, b.Confirm, "update-collectible-phone-price"),
+		Phone: b.Phone, Currency: b.Currency, Amount: b.Amount.Int64(), CryptoCurrency: b.CryptoCurrency, CryptoAmount: b.CryptoAmount.Int64()}
+	result, err := s.callAdminAPI(r.Context(), "/v1/collectible-phones/update-price", req)
+	writeCommandResultAPI(w, result, err)
+}
+
+type transferCollectiblePhoneAPIRequest struct {
+	CommandID string    `json:"command_id"`
+	Reason    string    `json:"reason"`
+	Confirm   bool      `json:"confirm"`
+	Phone     string    `json:"phone"`
+	ToUserID  flexInt64 `json:"to_user_id"`
+}
+
+func (s *server) handleTransferCollectiblePhoneAPI(w http.ResponseWriter, r *http.Request) {
+	var b transferCollectiblePhoneAPIRequest
+	if !decodeAction(w, r, &b) {
+		return
+	}
+	req := admin.TransferCollectiblePhoneRequest{CommandMeta: s.commandMetaFromAPI(r, b.CommandID, b.Reason, b.Confirm, "transfer-collectible-phone"), Phone: b.Phone, ToUserID: b.ToUserID.Int64()}
+	result, err := s.callAdminAPI(r.Context(), "/v1/collectible-phones/transfer", req)
+	writeCommandResultAPI(w, result, err)
+}
+
+type revokeCollectiblePhoneAPIRequest struct {
+	CommandID string `json:"command_id"`
+	Reason    string `json:"reason"`
+	Confirm   bool   `json:"confirm"`
+	Phone     string `json:"phone"`
+	Burn      bool   `json:"burn"`
+}
+
+func (s *server) handleRevokeCollectiblePhoneAPI(w http.ResponseWriter, r *http.Request) {
+	var b revokeCollectiblePhoneAPIRequest
+	if !decodeAction(w, r, &b) {
+		return
+	}
+	req := admin.RevokeCollectiblePhoneRequest{CommandMeta: s.commandMetaFromAPI(r, b.CommandID, b.Reason, b.Confirm, "revoke-collectible-phone"), Phone: b.Phone, Burn: b.Burn}
+	result, err := s.callAdminAPI(r.Context(), "/v1/collectible-phones/revoke", req)
+	writeCommandResultAPI(w, result, err)
+}
+
+type deleteCollectiblePhoneAPIRequest struct {
+	CommandID string `json:"command_id"`
+	Reason    string `json:"reason"`
+	Confirm   bool   `json:"confirm"`
+	Phone     string `json:"phone"`
+}
+
+func (s *server) handleDeleteCollectiblePhoneAPI(w http.ResponseWriter, r *http.Request) {
+	var b deleteCollectiblePhoneAPIRequest
+	if !decodeAction(w, r, &b) {
+		return
+	}
+	req := admin.DeleteCollectiblePhoneRequest{CommandMeta: s.commandMetaFromAPI(r, b.CommandID, b.Reason, b.Confirm, "delete-collectible-phone"), Phone: b.Phone}
+	result, err := s.callAdminAPI(r.Context(), "/v1/collectible-phones/delete", req)
+	writeCommandResultAPI(w, result, err)
+}
+
 type recomputeAccountRatingAPIRequest struct {
 	CommandID string    `json:"command_id"`
 	Reason    string    `json:"reason"`
@@ -1865,6 +1974,26 @@ func (s *server) handleCollectibleUsernameDetailAPI(w http.ResponseWriter, r *ht
 		"asset":     detail.Asset,
 		"transfers": detail.Transfers,
 	})
+}
+
+func (s *server) handleCollectiblePhonesAPI(w http.ResponseWriter, r *http.Request) {
+	suffix := "/v1/collectible-phones"
+	if r.URL.RawQuery != "" {
+		suffix += "?" + r.URL.RawQuery
+	}
+	s.proxyAdminJSONNoStore(w, r, suffix, 2<<20)
+}
+func (s *server) handleCollectiblePhoneDetailAPI(w http.ResponseWriter, r *http.Request) {
+	id, err := parseInt64(r.PathValue("id"))
+	if err != nil || id <= 0 {
+		writeAPIError(w, http.StatusBadRequest, "invalid id")
+		return
+	}
+	suffix := fmt.Sprintf("/v1/collectible-phones/%d", id)
+	if r.URL.RawQuery != "" {
+		suffix += "?" + r.URL.RawQuery
+	}
+	s.proxyAdminJSONNoStore(w, r, suffix, 2<<20)
 }
 
 // handleAccountRatingsAPI pages the leaderboard. next_before_id is the last

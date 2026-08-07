@@ -48,6 +48,18 @@ type aiChatGenerator interface {
 	GenerateTextStream(ctx context.Context, req domain.AITextGenerationRequest, emit func(domain.AIComposeText) error) (domain.AIComposeText, error)
 }
 
+// premiumStorefront is the deliberately narrow surface used by the built-in
+// @premiumbot. Price authority and entitlement state stay in app/premium.
+type premiumStorefront interface {
+	BotUserID() int64
+	BotUsername() string
+	Plans(ctx context.Context) ([]domain.PremiumPlan, error)
+	Plan(ctx context.Context, months int) (domain.PremiumPlan, error)
+	Balance(ctx context.Context, userID int64) (domain.StarsBalance, error)
+	ActiveEntitlements(ctx context.Context, userID int64, now int) ([]domain.PremiumEntitlement, error)
+	PurchaseHistory(ctx context.Context, userID int64, limit int) ([]domain.PremiumEntitlement, error)
+}
+
 // verificationApplications is the applicant-side surface of official platform
 // verification used by the built-in @verifybot (app/verification.Service
 // satisfies it as-is).
@@ -107,6 +119,7 @@ type Service struct {
 	stickers              stickerSetCreator
 	installer             userStickerSetInstaller
 	aiChat                aiChatGenerator
+	premium               premiumStorefront
 	verification          verificationApplications
 	customVerification    customVerifications
 	verifierTargets       verifierBotTargets
@@ -207,6 +220,15 @@ func WithAIChatGenerator(g aiChatGenerator) Option {
 	return func(s *Service) {
 		if g != nil {
 			s.aiChat = g
+		}
+	}
+}
+
+// WithPremium injects the Premium catalog/status service used by @premiumbot.
+func WithPremium(p premiumStorefront) Option {
+	return func(s *Service) {
+		if p != nil {
+			s.premium = p
 		}
 	}
 }
@@ -343,6 +365,14 @@ func (s *Service) SetTextDraftPusher(p TextDraftPusher) {
 func (s *Service) SetAIChatGenerator(g aiChatGenerator) {
 	if s != nil {
 		s.aiChat = g
+	}
+}
+
+// SetPremium injects the Premium storefront after construction when startup
+// ordering requires the message service to be built first.
+func (s *Service) SetPremium(p premiumStorefront) {
+	if s != nil && p != nil {
+		s.premium = p
 	}
 }
 

@@ -7,6 +7,8 @@ import {
   LayoutDashboard,
   LogOut,
   MessageSquareText,
+  Phone,
+  BadgeDollarSign,
   Server,
   Shield,
   ShieldAlert,
@@ -21,7 +23,7 @@ import {
 import { useEffect, useState, type ReactNode } from "react";
 import { api } from "../api";
 import { LanguageSwitch, useI18n } from "../i18n";
-import { permissionBotVerificationReview, permissionVerificationReview, useCan } from "../permissions";
+import { permissionBotVerificationReview, permissionPremiumManage, permissionVerificationReview, useCan } from "../permissions";
 import { type Navigate, type RouteState, routeSubtitle, routeTitle } from "../routing";
 import { ThemeSwitch } from "../theme";
 import { AppLink } from "./AppLink";
@@ -62,6 +64,7 @@ export function Shell({
   // Same reasoning for the third-party queue, which has its own right: the two
   // sections are granted independently, so one entry can be visible without the other.
   const canReviewBotVerification = useCan(permissionBotVerificationReview);
+  const canManagePremium = useCan(permissionPremiumManage);
   const messagesActive = route.path.startsWith("/messages");
   const [messagesOpen, setMessagesOpen] = useState(messagesActive);
 
@@ -92,6 +95,12 @@ export function Shell({
           <NavLink icon={<Users size={16} />} href="/accounts" route={route} navigate={navigate}>{t("layout.accounts")}</NavLink>
           <NavLink icon={<ShieldCheck size={16} />} href="/channels" route={route} navigate={navigate}>{t("layout.channels")}</NavLink>
           <NavLink icon={<Bot size={16} />} href="/bots" route={route} navigate={navigate}>{t("layout.bots")}</NavLink>
+          {canManagePremium && (
+            <NavLink icon={<BadgeDollarSign size={16} />} href="/monetization" route={route} navigate={navigate}
+              activeWhen={(path) => path.startsWith("/monetization") || path.startsWith("/premium")}>
+              {t("layout.premium")}
+            </NavLink>
+          )}
           <NavLink icon={<ShieldAlert size={16} />} href="/moderation" route={route} navigate={navigate}>{t("layout.moderation")}</NavLink>
           {canReviewVerification && (
             <NavLink icon={<BadgeCheck size={16} />} href="/verification" route={route} navigate={navigate}>{t("layout.verification")}</NavLink>
@@ -100,6 +109,7 @@ export function Shell({
             <NavLink icon={<Stamp size={16} />} href="/bot-verification" route={route} navigate={navigate}>{t("layout.botVerification")}</NavLink>
           )}
           <NavLink icon={<AtSign size={16} />} href="/collectible-usernames" route={route} navigate={navigate}>{t("layout.collectibleUsernames")}</NavLink>
+          <NavLink icon={<Phone size={16} />} href="/collectible-phones" route={route} navigate={navigate}>{t("layout.collectiblePhones")}</NavLink>
           <NavLink icon={<Trophy size={16} />} href="/account-ratings" route={route} navigate={navigate}>{t("layout.accountRatings")}</NavLink>
 			<NavLink icon={<Gift size={16} />} href="/gifts" route={route} navigate={navigate}>{t("layout.gifts")}</NavLink>
           <NavLink icon={<Send size={16} />} href="/give-gifts" route={route} navigate={navigate}>{t("layout.giveGifts")}</NavLink>

@@ -5,6 +5,7 @@ import { AccountRatingsPage } from "./AccountRatingsPage";
 import { AccountsPage } from "./AccountsPage";
 import { CollectibleUsernameDetailPage } from "./CollectibleUsernameDetailPage";
 import { CollectibleUsernamesPage } from "./CollectibleUsernamesPage";
+import { CollectiblePhonesPage } from "./CollectiblePhonesPage";
 import { ChannelDetailPage } from "./ChannelDetailPage";
 import { ChannelsPage } from "./ChannelsPage";
 import { BotDetailPage } from "./BotDetailPage";
@@ -19,6 +20,7 @@ import { GiftsPage } from "./GiftsPage";
 import { GiveGiftsPage } from "./GiveGiftsPage";
 import { ModerationCaseDetailPage } from "./ModerationCaseDetailPage";
 import { ModerationCasesPage } from "./ModerationCasesPage";
+import { PremiumPlansPage } from "./PremiumPlansPage";
 import { BotVerificationPage } from "./BotVerificationPage";
 import { BotVerificationRequestPage } from "./BotVerificationRequestPage";
 import { VerificationDetailPage } from "./VerificationDetailPage";
@@ -26,6 +28,7 @@ import { VerificationPage } from "./VerificationPage";
 import {
   PermissionGate,
   permissionBotVerificationReview,
+  permissionPremiumManage,
   permissionVerificationReview
 } from "../permissions";
 
@@ -81,8 +84,18 @@ export function Routes({ route, navigate }: { route: RouteState; navigate: Navig
   if (route.path === "/collectible-usernames") {
     return <CollectibleUsernamesPage navigate={navigate} />;
   }
+  if (route.path === "/collectible-phones") {
+    return <CollectiblePhonesPage />;
+  }
   if (route.path === "/account-ratings") {
     return <AccountRatingsPage navigate={navigate} />;
+  }
+  if (route.path === "/monetization" || route.path === "/premium") {
+    return (
+      <PermissionGate permission={permissionPremiumManage}>
+        <PremiumPlansPage />
+      </PermissionGate>
+    );
   }
   if (accountID) {
     return <AccountDetailPage id={Number(accountID)} navigate={navigate} />;

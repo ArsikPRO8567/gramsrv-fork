@@ -22,10 +22,12 @@ export function routeTitle(pathname: string, t: TFunction): string {
   if (pathname.startsWith("/bot-verification")) return t("route.botVerification");
   if (pathname.startsWith("/verification")) return t("route.verification");
   if (pathname.startsWith("/collectible-usernames")) return t("route.collectibleUsernames");
+  if (pathname.startsWith("/collectible-phones")) return t("route.collectiblePhones");
   if (pathname.startsWith("/account-ratings")) return t("route.accountRatings");
   if (pathname.startsWith("/accounts")) return t("route.accounts");
   if (pathname.startsWith("/channels")) return t("route.channels");
   if (pathname.startsWith("/bots")) return t("route.bots");
+  if (pathname.startsWith("/monetization") || pathname.startsWith("/premium")) return t("route.premium");
   if (pathname.startsWith("/moderation")) return t("route.moderation");
   if (pathname.startsWith("/emoji")) return t("route.emoji");
   if (pathname.startsWith("/messages")) return t("route.messages");
@@ -38,10 +40,12 @@ export function routeSubtitle(pathname: string, t: TFunction): string {
   if (pathname.startsWith("/bot-verification")) return t("route.botVerificationSubtitle");
   if (pathname.startsWith("/verification")) return t("route.verificationSubtitle");
   if (pathname.startsWith("/collectible-usernames")) return t("route.collectibleUsernamesSubtitle");
+  if (pathname.startsWith("/collectible-phones")) return t("route.collectiblePhonesSubtitle");
   if (pathname.startsWith("/account-ratings")) return t("route.accountRatingsSubtitle");
   if (pathname.startsWith("/accounts")) return t("route.accountsSubtitle");
   if (pathname.startsWith("/channels")) return t("route.channelsSubtitle");
   if (pathname.startsWith("/bots")) return t("route.botsSubtitle");
+  if (pathname.startsWith("/monetization") || pathname.startsWith("/premium")) return t("route.premiumSubtitle");
   if (pathname.startsWith("/moderation")) return t("route.moderationSubtitle");
   if (pathname.startsWith("/emoji")) return t("route.emojiSubtitle");
   if (pathname.startsWith("/messages")) return t("route.messagesSubtitle");

@@ -375,6 +375,17 @@ func (r *Router) onPaymentsGetPaymentForm(ctx context.Context, req *tg.PaymentsG
 		return nil, internalErr()
 	}
 
+	switch inv := req.Invoice.(type) {
+	case *tg.InputInvoicePremiumGiftStars, *tg.InputInvoicePremiumGiftCode, *tg.InputInvoiceMessage:
+		return r.premiumPaymentForm(ctx, userID, inv)
+	case *tg.InputInvoiceStars:
+		if inv != nil {
+			if _, ok := inv.Purpose.(*tg.InputStorePaymentPremiumSubscription); ok {
+				return r.premiumPaymentForm(ctx, userID, inv)
+			}
+		}
+	}
+
 	if inv, ok := req.Invoice.(*tg.InputInvoiceStars); ok {
 		if purpose, gift := starsGiftPurpose(inv); gift {
 			return r.starsGiftPaymentForm(ctx, userID, purpose)
@@ -482,6 +493,12 @@ func (r *Router) onPaymentsValidateRequestedInfo(ctx context.Context, req *tg.Pa
 	if err != nil {
 		return nil, internalErr()
 	}
+	if inv, ok := req.Invoice.(*tg.InputInvoicePremiumGiftCode); ok {
+		if _, err := r.resolvePremiumInvoice(ctx, userID, inv); err != nil {
+			return nil, err
+		}
+		return &tg.PaymentsValidatedRequestedInfo{}, nil
+	}
 	inv, ok := req.Invoice.(*tg.InputInvoiceStars)
 	if !ok || inv == nil {
 		return nil, notImplementedErr()
@@ -550,6 +567,17 @@ func (r *Router) onPaymentsSendStarsForm(ctx context.Context, req *tg.PaymentsSe
 	userID, _, err := r.currentUserID(ctx)
 	if err != nil {
 		return nil, internalErr()
+	}
+
+	switch inv := req.Invoice.(type) {
+	case *tg.InputInvoicePremiumGiftStars, *tg.InputInvoiceMessage:
+		return r.sendPremiumStarsForm(ctx, userID, req.FormID, inv)
+	case *tg.InputInvoiceStars:
+		if inv != nil {
+			if _, ok := inv.Purpose.(*tg.InputStorePaymentPremiumSubscription); ok {
+				return r.sendPremiumStarsForm(ctx, userID, req.FormID, inv)
+			}
+		}
 	}
 
 	if _, ok := req.Invoice.(*tg.InputInvoiceStars); ok {
@@ -666,10 +694,6 @@ func (r *Router) onPaymentsSendPaymentForm(ctx context.Context, req *tg.Payments
 	if err != nil {
 		return nil, internalErr()
 	}
-	inv, ok := req.Invoice.(*tg.InputInvoiceStars)
-	if !ok {
-		return nil, notImplementedErr()
-	}
 	if !validDevStarsPaymentCredentials(req.Credentials, req.FormID) {
 		return nil, tgerr.New(400, "PAYMENT_CREDENTIALS_INVALID")
 	}
@@ -681,6 +705,13 @@ func (r *Router) onPaymentsSendPaymentForm(ctx context.Context, req *tg.Payments
 	}
 	if _, present := req.GetTipAmount(); present || req.TipAmount != 0 {
 		return nil, tgerr.New(400, "TIP_AMOUNT_INVALID")
+	}
+	if inv, ok := req.Invoice.(*tg.InputInvoicePremiumGiftCode); ok {
+		return r.sendPremiumStarsForm(ctx, userID, req.FormID, inv)
+	}
+	inv, ok := req.Invoice.(*tg.InputInvoiceStars)
+	if !ok {
+		return nil, notImplementedErr()
 	}
 	if purpose, ok := starsGiftPurpose(inv); ok {
 		return r.sendStarsGiftPurchase(ctx, userID, req.FormID, purpose)

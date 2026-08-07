@@ -61,6 +61,17 @@ func defaultStarGiftCraftDraw(upper int) (int, error) {
 	return int(draw.Int64()), nil
 }
 
+func starGiftCraftInputAvailable(gift domain.UniqueStarGift, owner domain.Peer, survivor bool) bool {
+	if gift.Owner != owner || gift.Burned || gift.OwnerAddress != "" || gift.CraftChancePermille <= 0 {
+		return false
+	}
+	// The first input survives a successful craft. Official clients reject an
+	// already-addressed NFT in that slot because its on-chain identity cannot be
+	// reconciled with the newly crafted model. Addressed burn-only inputs remain
+	// valid in the other slots.
+	return !survivor || gift.GiftAddress == ""
+}
+
 // SweepStarGiftLifecycle advances time-driven aggregates without requiring a
 // foreground client RPC. All effects remain local PostgreSQL ledger/message
 // mutations; this worker never talks to TON, Fragment, wallets or chain nodes.
@@ -307,7 +318,7 @@ func (s *StarGiftLifecycleStore) CraftStarGift(ctx context.Context, req domain.S
 				return domain.ErrStarGiftCraftUnavailable
 			}
 			unique, found, err := NewStarGiftStore(tx).UniqueByID(ctx, saved.UniqueGiftID)
-			if err != nil || !found || unique.Owner != owner || unique.Burned || unique.OwnerAddress != "" || unique.CraftChancePermille <= 0 {
+			if err != nil || !found || !starGiftCraftInputAvailable(unique, owner, i == 0) {
 				return domain.ErrStarGiftCraftUnavailable
 			}
 			if giftID == 0 {
@@ -380,7 +391,7 @@ WHERE collectible_revision_id=$1 AND crafted
 				return err
 			}
 			if _, err := tx.Exec(ctx, `UPDATE unique_star_gifts SET model_attribute_id=$2,pattern_attribute_id=$3,
-backdrop_attribute_id=$4,crafted=true,craft_chance_permille=0,updated_at=now() WHERE id=$1`, firstUniqueID, modelID, patternID, backdropID); err != nil {
+	backdrop_attribute_id=$4,crafted=true,craft_chance_permille=0,offer_min_stars=0,updated_at=now() WHERE id=$1`, firstUniqueID, modelID, patternID, backdropID); err != nil {
 				return err
 			}
 			if _, err := tx.Exec(ctx, `UPDATE peer_star_gifts SET can_craft_at=0 WHERE id=$1`, firstSavedID); err != nil {

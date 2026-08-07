@@ -419,6 +419,7 @@ const (
 	MessageMediaKindStory    MessageMediaKind = "story"
 	MessageMediaKindWebPage  MessageMediaKind = "web_page"
 	MessageMediaKindGiveaway MessageMediaKind = "giveaway"
+	MessageMediaKindInvoice  MessageMediaKind = "invoice"
 )
 
 // MessageGiveaway is the immutable launch-card snapshot shown in the boost
@@ -594,6 +595,7 @@ const (
 	MessageServiceActionStarGiftUnique        MessageServiceActionKind = "star_gift_unique"
 	MessageServiceActionStarGiftOffer         MessageServiceActionKind = "star_gift_offer"
 	MessageServiceActionStarGiftOfferDeclined MessageServiceActionKind = "star_gift_offer_declined"
+	MessageServiceActionGiftPremium           MessageServiceActionKind = "gift_premium"
 )
 
 // MessagePhoneCallAction 是 messageActionPhoneCall 的协议中立载荷。
@@ -681,6 +683,16 @@ type MessageServiceAction struct {
 	StarGiftUnique        *MessageStarGiftUniqueAction        `json:"star_gift_unique,omitempty"`
 	StarGiftOffer         *MessageStarGiftOfferAction         `json:"star_gift_offer,omitempty"`
 	StarGiftOfferDeclined *MessageStarGiftOfferDeclinedAction `json:"star_gift_offer_declined,omitempty"`
+	GiftPremium           *MessageGiftPremiumAction           `json:"gift_premium,omitempty"`
+}
+
+// MessageGiftPremiumAction is projected as
+// messageActionGiftPremium#48e91302 at the RPC boundary.
+type MessageGiftPremiumAction struct {
+	Currency string             `json:"currency"`
+	Amount   int64              `json:"amount"`
+	Days     int                `json:"days"`
+	Message  PremiumGiftMessage `json:"message,omitempty"`
 }
 
 // MessageGiftStarsAction is the immutable service-message projection. The
@@ -781,6 +793,7 @@ type MessageMedia struct {
 	Story          *MessageStory         `json:"story,omitempty"`
 	WebPage        *MessageWebPage       `json:"web_page,omitempty"`
 	Giveaway       *MessageGiveaway      `json:"giveaway,omitempty"`
+	Invoice        *PremiumInvoice       `json:"invoice,omitempty"`
 	Spoiler        bool                  `json:"spoiler,omitempty"`
 	TTLSeconds     int                   `json:"ttl_seconds,omitempty"`
 	Nopremium      bool                  `json:"nopremium,omitempty"`
