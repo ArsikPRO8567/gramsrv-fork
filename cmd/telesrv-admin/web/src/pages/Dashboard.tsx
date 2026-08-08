@@ -18,11 +18,13 @@ import {
 import { type ReactNode, useEffect, useState } from "react";
 import { api } from "../api";
 import { Alert } from "../components/ui";
+import { useI18n, type TFunction } from "../i18n";
 import { formatBytes, formatQuantity } from "../lib/format";
 import type { Navigate } from "../routing";
 import type { DashboardResponse, StorageStatsResponse } from "../types";
 
 export function Dashboard({ navigate }: { navigate: Navigate }) {
+  const { t } = useI18n();
   const [data, setData] = useState<DashboardResponse | null>(null);
   const [error, setError] = useState("");
 
@@ -36,7 +38,7 @@ export function Dashboard({ navigate }: { navigate: Navigate }) {
           setError("");
         }
       } catch (err) {
-        if (!cancelled) setError(err instanceof Error ? err.message : "Failed to load dashboard");
+        if (!cancelled) setError(err instanceof Error ? err.message : t("dashboard.loadError"));
       }
     }
     void load();
@@ -45,7 +47,7 @@ export function Dashboard({ navigate }: { navigate: Navigate }) {
       cancelled = true;
       window.clearInterval(timer);
     };
-  }, []);
+  }, [t]);
 
   const counts = data?.counts;
   const storage = data?.storage;
@@ -55,10 +57,10 @@ export function Dashboard({ navigate }: { navigate: Navigate }) {
     <div className="dashboard-layout">
       {error && <Alert>{error}</Alert>}
 
-      <Section title="Needs attention">
+      <Section title={t("dashboard.needsAttention")}>
         <StatTile
           icon={<Flag />}
-          label="Pending reports"
+          label={t("dashboard.pendingReports")}
           value={counts ? formatQuantity(String(counts.PendingReports)) : "…"}
           tone={counts && counts.PendingReports > 0 ? "warn" : "good"}
           href="/moderation"
@@ -66,7 +68,7 @@ export function Dashboard({ navigate }: { navigate: Navigate }) {
         />
         <StatTile
           icon={<BadgeCheck />}
-          label="Verification requests"
+          label={t("dashboard.verificationRequests")}
           value={counts ? formatQuantity(String(counts.PendingVerifications)) : "…"}
           tone={counts && counts.PendingVerifications > 0 ? "warn" : "good"}
           href="/verification"
@@ -74,90 +76,90 @@ export function Dashboard({ navigate }: { navigate: Navigate }) {
         />
       </Section>
 
-      <Section title="People & chats">
-        <StatTile icon={<Users />} label="Users" value={counts ? formatQuantity(String(counts.Users)) : "…"} href="/accounts" navigate={navigate} />
+      <Section title={t("dashboard.peopleChats")}>
+        <StatTile icon={<Users />} label={t("dashboard.users")} value={counts ? formatQuantity(String(counts.Users)) : "…"} href="/accounts" navigate={navigate} />
         <StatTile
           icon={<Activity />}
-          label="Online now"
+          label={t("dashboard.onlineNow")}
           value={counts ? formatQuantity(String(counts.OnlineUsers)) : "…"}
-          sub="last 5 min"
+          sub={t("dashboard.lastFiveMinutes")}
           href="/accounts"
           navigate={navigate}
         />
-        <StatTile icon={<Bot />} label="Bots" value={counts ? formatQuantity(String(counts.Bots)) : "…"} href="/bots" navigate={navigate} />
+        <StatTile icon={<Bot />} label={t("dashboard.bots")} value={counts ? formatQuantity(String(counts.Bots)) : "…"} href="/bots" navigate={navigate} />
         <StatTile
           icon={<Radio />}
-          label="Channels"
+          label={t("dashboard.channels")}
           value={counts ? formatQuantity(String(counts.BroadcastChannels)) : "…"}
           href="/channels"
           navigate={navigate}
         />
         <StatTile
           icon={<UsersRound />}
-          label="Supergroups"
+          label={t("dashboard.supergroups")}
           value={counts ? formatQuantity(String(counts.Supergroups)) : "…"}
           href="/channels"
           navigate={navigate}
         />
       </Section>
 
-      <Section title="Content">
+      <Section title={t("dashboard.content")}>
         <StatTile
           icon={<Sticker />}
-          label="Sticker packs"
+          label={t("dashboard.stickerPacks")}
           value={counts ? formatQuantity(String(counts.StickerSets)) : "…"}
           href="/stickers"
           navigate={navigate}
         />
         <StatTile
           icon={<Smile />}
-          label="Emoji packs"
+          label={t("dashboard.emojiPacks")}
           value={counts ? formatQuantity(String(counts.EmojiSets)) : "…"}
           href="/emoji"
           navigate={navigate}
         />
         <StatTile
           icon={<Film />}
-          label="GIFs"
+          label={t("dashboard.gifs")}
           value={counts ? formatQuantity(String(counts.Gifs)) : "…"}
-          sub="saved by users"
+          sub={t("dashboard.savedByUsers")}
           href="/gif-catalog"
           navigate={navigate}
         />
         <StatTile
           icon={<Database />}
-          label="Media storage used"
+          label={t("dashboard.mediaStorageUsed")}
           value={storage ? formatBytes(storage.PhysicalBytes) : "…"}
-          sub={storage ? storageBackendLabel(storage) : undefined}
+          sub={storage ? storageBackendLabel(storage, t) : undefined}
           href="/storage"
           navigate={navigate}
         />
       </Section>
 
-      <Section title="Server health" hint={host?.Ready ? undefined : "waiting for first sample…"}>
+      <Section title={t("dashboard.serverHealth")} hint={host?.Ready ? undefined : t("dashboard.waitingForSample")}>
         <UsageTile
           icon={<Cpu />}
-          label="CPU load"
+          label={t("dashboard.cpuLoad")}
           percent={host?.Ready ? host.CPUPercent : undefined}
           valueText={host?.Ready ? `${host.CPUPercent.toFixed(0)}%` : "…"}
         />
         <UsageTile
           icon={<MemoryStick />}
-          label="RAM used"
+          label={t("dashboard.ramUsed")}
           percent={host?.Ready && host.MemTotalBytes > 0 ? (host.MemUsedBytes / host.MemTotalBytes) * 100 : undefined}
           valueText={host?.Ready ? formatBytes(String(host.MemUsedBytes)) : "…"}
-          sub={host?.Ready ? `of ${formatBytes(String(host.MemTotalBytes))}` : undefined}
+          sub={host?.Ready ? t("dashboard.ofTotal", { total: formatBytes(String(host.MemTotalBytes)) }) : undefined}
         />
         <UsageTile
           icon={<HardDrive />}
-          label="Disk free"
+          label={t("dashboard.diskFree")}
           percent={
             host?.Ready && host.DiskTotalBytes > 0
               ? ((host.DiskTotalBytes - host.DiskFreeBytes) / host.DiskTotalBytes) * 100
               : undefined
           }
           valueText={host?.Ready ? formatBytes(String(host.DiskFreeBytes)) : "…"}
-          sub={host?.Ready ? `of ${formatBytes(String(host.DiskTotalBytes))}` : undefined}
+          sub={host?.Ready ? t("dashboard.ofTotal", { total: formatBytes(String(host.DiskTotalBytes)) }) : undefined}
           warnAbove={85}
         />
       </Section>
@@ -165,11 +167,11 @@ export function Dashboard({ navigate }: { navigate: Navigate }) {
   );
 }
 
-function storageBackendLabel(storage: StorageStatsResponse): string {
+function storageBackendLabel(storage: StorageStatsResponse, t: TFunction): string {
   const backends = storage.Backends ?? [];
-  if (backends.length === 1) return `${backends[0].Backend} backend`;
-  if (backends.length > 1) return `${backends.length} backends`;
-  return "no media objects";
+  if (backends.length === 1) return t("dashboard.singleBackend", { backend: backends[0].Backend });
+  if (backends.length > 1) return t("dashboard.multipleBackends", { count: backends.length });
+  return t("dashboard.noMediaObjects");
 }
 
 function Section({ title, hint, children }: { title: string; hint?: string; children: ReactNode }) {

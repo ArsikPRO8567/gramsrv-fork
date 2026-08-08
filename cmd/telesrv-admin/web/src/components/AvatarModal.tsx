@@ -2,6 +2,7 @@ import { ImagePlus, Loader2, Upload, X } from "lucide-react";
 import { useEffect, useState } from "react";
 import { createPortal } from "react-dom";
 import { api, errorMessage } from "../api";
+import { useI18n } from "../i18n";
 import { Alert } from "./ui";
 
 export function AvatarModal({ kind, id, onClose, onDone }: {
@@ -10,6 +11,7 @@ export function AvatarModal({ kind, id, onClose, onDone }: {
   onClose: () => void;
   onDone: () => void;
 }) {
+  const { t } = useI18n();
   const [file, setFile] = useState<File | null>(null);
   const [previewURL, setPreviewURL] = useState("");
   const [reason, setReason] = useState("");
@@ -28,7 +30,7 @@ export function AvatarModal({ kind, id, onClose, onDone }: {
 
   async function submit() {
     if (!file || !reason.trim()) {
-      setError(!file ? "Choose an image file first." : "Please enter an operation reason.");
+      setError(!file ? t("avatar.chooseFirst") : t("action.reasonRequired"));
       return;
     }
     setBusy(true);
@@ -54,25 +56,25 @@ export function AvatarModal({ kind, id, onClose, onDone }: {
 
   return createPortal(
     <div className="modal-backdrop" role="presentation">
-      <section className="modal command-modal" role="dialog" aria-modal="true" aria-label="Change avatar">
+      <section className="modal command-modal" role="dialog" aria-modal="true" aria-label={t("avatar.change")}>
         <div className="modal-head">
-          <div><div className="eyebrow">{kind === "channel" ? "Channel" : "Account"}</div><h2>Change avatar</h2></div>
-          <button className="icon-btn" type="button" onClick={onClose} disabled={busy} aria-label="Close"><X size={15} /></button>
+          <div><div className="eyebrow">{kind === "channel" ? t("common.channel") : t("common.account")}</div><h2>{t("avatar.change")}</h2></div>
+          <button className="icon-btn" type="button" onClick={onClose} disabled={busy} aria-label={t("common.close")}><X size={15} /></button>
         </div>
         <div className="command-body">
           <label className={`gift-file-picker ${file ? "has-file" : ""}`}>
             <input type="file" accept="image/png,image/jpeg,image/webp" onChange={(event) => setFile(event.target.files?.[0] ?? null)} />
             {previewURL ? <img className="gift-file-icon" src={previewURL} alt="" style={{ objectFit: "cover" }} /> : <ImagePlus size={22} />}
-            <span className="gift-file-copy"><span className="gift-field-label">New avatar</span><strong>{file ? file.name : "Choose a JPEG, PNG, or WebP image"}</strong></span>
-            <span className="gift-file-action">{file ? "Change file" : "Choose file"}</span>
+            <span className="gift-file-copy"><span className="gift-field-label">{t("avatar.new")}</span><strong>{file ? file.name : t("avatar.chooseImage")}</strong></span>
+            <span className="gift-file-action">{file ? t("common.changeFile") : t("common.chooseFile")}</span>
           </label>
-          <label className="gift-reason-field"><span>Audit reason</span><input value={reason} placeholder="Briefly describe why this avatar is being changed" onChange={(event) => setReason(event.target.value)} /></label>
+          <label className="gift-reason-field"><span>{t("action.reason")}</span><input value={reason} placeholder={t("avatar.reasonPlaceholder")} onChange={(event) => setReason(event.target.value)} /></label>
           {error && <Alert>{error}</Alert>}
         </div>
         <div className="modal-actions">
-          <button className="btn" type="button" onClick={onClose} disabled={busy}>Close</button>
+          <button className="btn" type="button" onClick={onClose} disabled={busy}>{t("common.close")}</button>
           <button className="btn primary icon-text" type="button" onClick={() => void submit()} disabled={busy}>
-            {busy ? <Loader2 className="spin" size={15} /> : <Upload size={15} />} Upload avatar
+            {busy ? <Loader2 className="spin" size={15} /> : <Upload size={15} />} {t("avatar.upload")}
           </button>
         </div>
       </section>

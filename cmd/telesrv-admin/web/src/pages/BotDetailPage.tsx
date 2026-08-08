@@ -102,7 +102,7 @@ export function BotDetailPage({ id, navigate }: { id: number; navigate: Navigate
             </div>
             <ScamFakeActions idKey="user_id" id={bot.ID} path="/api/actions/set-account-flags" scam={bot.Scam} fake={bot.Fake} onDone={load} />
             <div className="dock-title">{t("attr.attributes")}</div>
-            {!bot.System && <button className="btn icon-text" type="button" onClick={() => setAvatarOpen(true)}><ImagePlus size={15} /> Change avatar</button>}
+            {!bot.System && <button className="btn icon-text" type="button" onClick={() => setAvatarOpen(true)}><ImagePlus size={15} /> {t("avatar.change")}</button>}
             {!bot.System && <ProfileAction id={bot.ID} firstName={bot.FirstName} lastName={bot.LastName} onDone={load} />}
             <UsernameAction idKey="user_id" id={bot.ID} path="/api/actions/set-account-username" current={bot.Username} onDone={load} />
             <ColorAction idKey="user_id" id={bot.ID} path="/api/actions/set-account-color" onDone={load} />
@@ -111,7 +111,7 @@ export function BotDetailPage({ id, navigate }: { id: number; navigate: Navigate
               <p className="bot-create-note">{t("bots.systemHint")}</p>
             ) : (
               <div className="danger-zone">
-                {canReadToken && <button className="btn icon-text" type="button" onClick={() => setTokenOpen(true)}><KeyRound size={15} /> Copy bot token</button>}
+                {canReadToken && <button className="btn icon-text" type="button" onClick={() => setTokenOpen(true)}><KeyRound size={15} /> {t("bots.copyToken")}</button>}
                 <ActionButton
                   label={t("bots.delete")}
                   icon={<Trash2 size={15} />}

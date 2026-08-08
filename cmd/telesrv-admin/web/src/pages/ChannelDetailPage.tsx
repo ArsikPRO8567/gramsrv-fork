@@ -100,7 +100,7 @@ export function ChannelDetailPage({ id, navigate }: { id: number; navigate: Navi
             <div className="dock-title">{t("attr.settings")}</div>
             <ChannelSettingsAction channel={ch} onDone={load} />
             <div className="dock-title">{t("attr.attributes")}</div>
-            <button className="btn icon-text" type="button" onClick={() => setAvatarOpen(true)}><ImagePlus size={15} /> Change avatar</button>
+            <button className="btn icon-text" type="button" onClick={() => setAvatarOpen(true)}><ImagePlus size={15} /> {t("avatar.change")}</button>
             <UsernameAction idKey="channel_id" id={ch.ID} path="/api/actions/set-channel-username" current={ch.Username} onDone={load} />
             <ColorAction idKey="channel_id" id={ch.ID} path="/api/actions/set-channel-color" onDone={load} />
             <EmojiStatusAction idKey="channel_id" id={ch.ID} path="/api/actions/set-channel-emoji-status" onDone={load} />

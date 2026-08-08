@@ -93,7 +93,7 @@ export function AccountDetailPage({ id, navigate }: { id: number; navigate: Navi
               <Summary label={t("common.updatedAt")} value={formatDate(account.UpdatedAt) || "-"} />
               <Summary label={t("account.activeSessions")} value={String(detail.Authorizations.length)} />
               <Summary label={t("account.accountFlags")} value={`support=${detail.Support} bot=${detail.Bot}`} />
-              <Summary label="Login email" value={detail.LoginEmail || t("common.none")} />
+              <Summary label={t("attr.loginEmail")} value={detail.LoginEmail || t("common.none")} />
               <Summary label={t("account.restriction")} value={detail.HasRestriction ? detail.Restriction.Reason || t("account.restricted") : t("common.none")} />
               <Summary label={t("account.freezeSince")} value={detail.Restriction.Since ? formatDate(detail.Restriction.Since) : t("common.none")} />
               <Summary label={t("account.freezeUntil")} value={detail.Restriction.Until ? formatDate(detail.Restriction.Until) : t("common.none")} />
@@ -212,7 +212,7 @@ export function AccountDetailPage({ id, navigate }: { id: number; navigate: Navi
             </div>
             <ScamFakeActions idKey="user_id" id={account.ID} path="/api/actions/set-account-flags" scam={detail.Scam} fake={detail.Fake} onDone={load} />
             <div className="dock-title">{t("attr.attributes")}</div>
-            <button className="btn icon-text" type="button" onClick={() => setAvatarOpen(true)}><ImagePlus size={15} /> Change avatar</button>
+            <button className="btn icon-text" type="button" onClick={() => setAvatarOpen(true)}><ImagePlus size={15} /> {t("avatar.change")}</button>
             <ProfileAction id={account.ID} firstName={account.FirstName} lastName={account.LastName} onDone={load} />
             <PhoneAction id={account.ID} current={account.Phone} onDone={load} />
             <LoginEmailAction id={account.ID} current={detail.LoginEmail} onDone={load} />
