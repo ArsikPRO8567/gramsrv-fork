@@ -437,7 +437,7 @@ active key。不要手工编辑 manifest 或 PEM，不要在各实例上分别�
 | `TELESRV_SMTP_USERNAME` | sensitive string / 空 | SMTP 用户名；`TELESRV_SMTP_FROM` 为空时也用作发件人。 |
 | `TELESRV_SMTP_PASSWORD` | secret string / 空 | SMTP 密码。 |
 | `TELESRV_SMTP_FROM` | email/string / 空 | envelope/header 发件人；启用登录邮箱时它与 SMTP username 至少一个非空。 |
-| `TELESRV_SMTP_FROM_NAME` | string / `telesrv` | 登录邮件展示的发件人名称。 |
+| `TELESRV_SMTP_FROM_NAME` | string / `TELESRV_BRAND_PRODUCT_NAME` | 登录邮件展示的发件人名称；未显式配置时继承母品牌显示名。 |
 | `TELESRV_SMTP_TLS` | enum / `starttls` | 仅允许 `starttls`、`tls`、`none`，其它值阻止启动。 |
 | `TELESRV_SMTP_TIMEOUT` | duration / `10s` | SMTP 操作超时；使用 SMTP provider 时必须为正数。 |
 | `TELESRV_PASSKEY_RP_ID` | hostname / `telesrv.net` | WebAuthn relying-party ID，用于校验 `rpIdHash`；Android Credential Manager 必须与公网 `assetlinks.json` 对齐。 |

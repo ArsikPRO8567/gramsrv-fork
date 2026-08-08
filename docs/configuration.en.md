@@ -456,7 +456,7 @@ offline migration command, and verification matrix. Do not flip
 | `TELESRV_SMTP_USERNAME` | sensitive string / empty | SMTP username. Also used as sender when `TELESRV_SMTP_FROM` is empty. |
 | `TELESRV_SMTP_PASSWORD` | secret string / empty | SMTP password. |
 | `TELESRV_SMTP_FROM` | email/string / empty | Envelope/header sender. Either this or SMTP username is required when login email is enabled. |
-| `TELESRV_SMTP_FROM_NAME` | string / `telesrv` | Display name for login-email messages. |
+| `TELESRV_SMTP_FROM_NAME` | string / `TELESRV_BRAND_PRODUCT_NAME` | Display name for login-email messages; when unset, it inherits the parent product display name. |
 | `TELESRV_SMTP_TLS` | enum / `starttls` | `starttls`, `tls`, or `none`; any other value fails startup. |
 | `TELESRV_SMTP_TIMEOUT` | duration / `10s` | SMTP operation timeout; must be positive when the SMTP provider is used. |
 | `TELESRV_PASSKEY_RP_ID` | hostname / `telesrv.net` | WebAuthn relying-party ID used for `rpIdHash`. Android Credential Manager requires alignment with hosted `assetlinks.json`. |
