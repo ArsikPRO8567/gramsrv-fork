@@ -1391,17 +1391,19 @@ func (s *Service) passwordNeeded(ctx context.Context, userID int64) (bool, error
 	return found && settings.HasPassword, nil
 }
 
-const loginMessageTpl = `Login code: %s. Do not give this code to anyone, even if they say they are from ` + branding.ProductName + `!
+func loginMessageTemplate() string {
+	return `Login code: %s. Do not give this code to anyone, even if they say they are from ` + branding.ProductName() + `!
 
-This code can be used to log in to your ` + branding.ProductName + ` account. We never ask it for anything else.
+This code can be used to log in to your ` + branding.ProductName() + ` account. We never ask it for anything else.
 
 If you didn't request this code by trying to log in on another device, simply ignore this message.`
+}
 
 func (s *Service) recordLoginMessage(ctx context.Context, userID int64, code string) (domain.Message, error) {
 	if s.messages == nil || s.dialogs == nil {
 		return domain.Message{}, nil
 	}
-	body := fmt.Sprintf(loginMessageTpl, code)
+	body := fmt.Sprintf(loginMessageTemplate(), code)
 	codeOffset := len("Login code: ")
 	msg, err := s.messages.Create(ctx, domain.Message{
 		OwnerUserID: userID,

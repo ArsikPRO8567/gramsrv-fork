@@ -66,13 +66,23 @@ live expanded buffer 释放后会归还进程内存，但不会返还该 frame �
 | `TELESRV_ADMIN_UI_PERMISSIONS` | comma-separated list / `*` | 使用 `TELESRV_ADMIN_UI_PASSWORD` / `_TOKEN` 登录的 Admin UI 会话权限集合。`*` 表示全部权限且是默认值。读取托管 bot token 需要显式 `bots.token.read` 权限；token 只在命令响应中返回，不会持久化到审计结果。权限名只允许字母、数字和 `._:-`，最多 64 字符，可用 `namespace.*` 授权整个命名空间。空列表或无法解析的权限名会让启动失败。 |
 | `TELESRV_ADMIN_SCOPED_TOKENS` | 用 `;` 分隔的 `name:token:perm1,perm2` 条目 / 空 | 额外的 Admin API bearer token，每个 token 只携带指定权限，供集成服务按最小权限访问，避免使用无限制的 `TELESRV_ADMIN_API_TOKEN`。token 不能包含 `:` 或空白字符，每个条目必须至少列出一个权限，name/token 必须唯一，且禁止复用 `TELESRV_ADMIN_API_TOKEN`，否则会把受限 token 静默放大成全权限。任何格式错误都会让启动失败。 |
 | `TELESRV_PUBLIC_BASE_URL` | HTTP(S) URL / `https://telesrv.net` | 客户端可见的公开链接根地址；允许 path，禁止 credentials、query、fragment。本地例：`http://127.0.0.1:2401`。 |
+| `TELESRV_BRAND_PRODUCT_NAME` | string / `Telesrv` | 母品牌显示名；系统账号、登录通知、邀请、WebAuthn、内置 bot 与上游可见文案替换共用。trim 后非空、无控制字符、最多 64 个 Unicode 字符。 |
+| `TELESRV_BRAND_PRODUCT_USERNAME` | username / `telesrv` | 777000 系统账号的公开 username；trim、去掉可选 `@` 后规范成小写，必须为 5–32 位 ASCII username 且首字符为字母。 |
+| `TELESRV_BRAND_DESKTOP_APP_NAME` | string / `Telesrv Desktop` | `account.getAuthorizations` 返回的 Desktop/Windows 显示名；校验规则同产品名。 |
+| `TELESRV_BRAND_ANDROID_APP_NAME` | string / `Telesrv Android` | 授权列表中的 Android 显示名；校验规则同产品名。 |
+| `TELESRV_BRAND_IOS_APP_NAME` | string / `Telesrv iOS` | 授权列表中的 iOS 显示名；校验规则同产品名。 |
+| `TELESRV_BRAND_MACOS_APP_NAME` | string / `Telesrv macOS` | 授权列表中的 macOS 显示名；校验规则同产品名。 |
+| `TELESRV_BRAND_WEB_A_APP_NAME` | string / `Telesrv Web A` | `telegram-tt` / `weba` 授权列表显示名；持久化检测 token 不变。 |
+| `TELESRV_BRAND_WEB_K_APP_NAME` | string / `Telesrv Web K` | `tweb` / `webk` 授权列表显示名；持久化检测 token 不变。 |
+| `TELESRV_BRAND_PREMIUM_NAME` | string / `Telesrv Premium` | Premium 状态与相关客户端可见文案中的产品名；校验规则同产品名。 |
+| `TELESRV_BRAND_STARS_NAME` | string / `Telesrv Stars` | Stars 支付 label 与相关客户端可见文案中的产品名；校验规则同产品名。 |
 | `TELESRV_UPDATE_PUBLIC_URL` | nullable HTTP(S) URL / 空 | 客户端可见的 `cmd/telesrv-update` 根地址，通过 `help.getConfig.autoupdate_url_prefix` 下发；空值关闭 desktop 原生更新。详见 `docs/update-service.md`。 |
 | `TELESRV_UPDATE_SERVICE_URL` | nullable HTTP(S) URL / `TELESRV_UPDATE_PUBLIC_URL` | `help.getAppUpdate` 使用的内部 resolver 地址，可指向 loopback/private route；空值回退到公开更新地址。 |
 | `TELESRV_UPDATE_REQUEST_TIMEOUT` | duration / `2s` | application update resolver 调用超时，必须大于零且不超过 `30s`；resolver 故障返回 `help.noAppUpdate`，不会转成 RPC 500。 |
 | `TELESRV_PUBLIC_APP_SCHEME` | URL scheme / `telesrv` | 落地页自动唤起客户端的 scheme，必须与 patched 客户端注册值一致；禁止 `tg`、`http`、`https`。 |
 | `TELESRV_PUBLIC_APP_LINK_BASE` | nullable custom URL base / 空 | 多服务客户端可选的 host-based 根，例如 `owpg://example.com`。配置后生成 `owpg://example.com/oauth`、`owpg://example.com/<username>` 等；只允许精确 `<custom-scheme>://<host>`，禁止端口、path、query、fragment。`TELESRV_PUBLIC_APP_SCHEME` 仍作为旧链接输入兼容。 |
 | `TELESRV_PUBLIC_WEB_BASE_URL` | HTTP(S) URL / `https://weba.telesrv.net` | username 页面 Web 客户端入口，校验规则同 `TELESRV_PUBLIC_BASE_URL`。 |
-| `TELESRV_PUBLIC_APP_NAME` | string / `telesrv` | 公开落地页产品名；trim 后非空、无控制字符、最多 64 个 Unicode 字符。 |
+| `TELESRV_PUBLIC_APP_NAME` | string / `TELESRV_BRAND_PRODUCT_NAME` | 公开落地页产品名；trim 后非空、无控制字符、最多 64 个 Unicode 字符。 |
 | `TELESRV_PUBLIC_LINK_WEB_ADDR` | nullable address / 空 | 只读 username/avatar/sticker/emoji/chatlist/collectible gift 落地页监听；空值关闭。生产应 loopback + nginx 精确反代；`.env.example` 为开发启用 `127.0.0.1:2401`。 |
 | `TELESRV_TELEGRAM_LOGIN_ENABLE` | bool / `false` | 在 `TELESRV_PUBLIC_LINK_WEB_ADDR` 上挂载自建 Telegram Login/OIDC Provider；启用时必须同时配置该 listener 与下列全部密钥文件。 |
 | `TELESRV_TELEGRAM_LOGIN_ISSUER` | 绝对 origin URL / `TELESRV_PUBLIC_BASE_URL` | discovery 与 token 使用的精确公开 issuer；默认必须 HTTPS，禁止 path、credentials、query、fragment。开启下一项后可直接配置任意 HTTP 域名/IP。 |

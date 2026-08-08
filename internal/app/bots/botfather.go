@@ -50,7 +50,8 @@ const (
 	maxTelegramLoginCommandsPerMessage = 32
 )
 
-const botFatherHelpText = `I can help you create and manage ` + branding.ProductName + ` bots.
+func botFatherHelpText() string {
+	return `I can help you create and manage ` + branding.ProductName() + ` bots.
 
 You can control me by sending these commands:
 
@@ -73,6 +74,7 @@ You can control me by sending these commands:
 /done - finish the active Telegram Login configuration
 /cancel - cancel the current operation
 /help - show this message`
+}
 
 // botReply 是内置 service bot 的一条回复。ReplyMarkup 为可选 inline keyboard
 // 快照（@verifybot 的按钮式对话使用）；落库前经 domain.ValidateReplyMarkup 校验。
@@ -326,7 +328,7 @@ func (s *Service) handleBotFatherCommand(ctx context.Context, userID int64, cmd 
 	switch cmd {
 	case "start", "help":
 		_ = s.bots.DeleteBotChatState(ctx, domain.BotFatherUserID, userID)
-		return botReply{Text: botFatherHelpText}
+		return botReply{Text: botFatherHelpText()}
 	case "cancel":
 		state, found, err := s.bots.GetBotChatState(ctx, domain.BotFatherUserID, userID)
 		if err != nil {

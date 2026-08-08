@@ -10,7 +10,6 @@ const (
 	DefaultPublicBaseURL = "https://telesrv.net"
 	DefaultWebBaseURL    = "https://weba.telesrv.net"
 	DefaultAppScheme     = "telesrv"
-	DefaultAppName       = "telesrv"
 )
 const MaxChatlistSlugBytes = 128
 

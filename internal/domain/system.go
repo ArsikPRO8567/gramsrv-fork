@@ -114,8 +114,8 @@ func OfficialSystemUser() User {
 		ID:         OfficialSystemUserID,
 		AccessHash: 6599886787491911851,
 		Phone:      "42777",
-		FirstName:  branding.ProductName,
-		Username:   branding.ProductUsername,
+		FirstName:  branding.ProductName(),
+		Username:   branding.ProductUsername(),
 		Verified:   true,
 		Support:    true,
 	}

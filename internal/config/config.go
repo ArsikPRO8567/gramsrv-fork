@@ -13,6 +13,7 @@ import (
 
 	"golang.org/x/text/language"
 
+	"telesrv/internal/branding"
 	"telesrv/internal/domain"
 	"telesrv/internal/links"
 )
@@ -91,6 +92,9 @@ type Config struct {
 	// PublicBaseURL 是所有客户端可见 telesrv 链接的公开根 URL。
 	// 生产默认 https://telesrv.net；本地可设为 http://127.0.0.1:2401。
 	PublicBaseURL string
+	// Branding 是所有客户端可见产品名称的进程级只读快照；协议标识、
+	// 客户端检测 token 与兼容 header 不属于品牌配置。
+	Branding branding.Config
 	// UpdatePublicURL is advertised to native clients through
 	// help.getConfig.autoupdate_url_prefix. Empty disables desktop updates.
 	UpdatePublicURL string
@@ -622,6 +626,22 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, fmt.Errorf("TELESRV_PUBLIC_BASE_URL: %w", err)
 	}
+	brandConfig := branding.DefaultConfig()
+	brandConfig.ProductName = envOr("TELESRV_BRAND_PRODUCT_NAME", brandConfig.ProductName)
+	brandConfig.ProductUsername = envOr("TELESRV_BRAND_PRODUCT_USERNAME", brandConfig.ProductUsername)
+	brandConfig.DesktopAppName = envOr("TELESRV_BRAND_DESKTOP_APP_NAME", brandConfig.DesktopAppName)
+	brandConfig.AndroidAppName = envOr("TELESRV_BRAND_ANDROID_APP_NAME", brandConfig.AndroidAppName)
+	brandConfig.IOSAppName = envOr("TELESRV_BRAND_IOS_APP_NAME", brandConfig.IOSAppName)
+	brandConfig.MacOSAppName = envOr("TELESRV_BRAND_MACOS_APP_NAME", brandConfig.MacOSAppName)
+	brandConfig.WebAAppName = envOr("TELESRV_BRAND_WEB_A_APP_NAME", brandConfig.WebAAppName)
+	brandConfig.WebKAppName = envOr("TELESRV_BRAND_WEB_K_APP_NAME", brandConfig.WebKAppName)
+	brandConfig.PremiumName = envOr("TELESRV_BRAND_PREMIUM_NAME", brandConfig.PremiumName)
+	brandConfig.StarsName = envOr("TELESRV_BRAND_STARS_NAME", brandConfig.StarsName)
+	brandConfig.PublicBaseURL = publicBaseURL
+	brandConfig, err = branding.Validate(brandConfig)
+	if err != nil {
+		return Config{}, fmt.Errorf("brand configuration: %w", err)
+	}
 	updatePublicURL := strings.TrimSpace(envAllowEmptyOr("TELESRV_UPDATE_PUBLIC_URL", ""))
 	if updatePublicURL != "" {
 		updatePublicURL, err = links.ValidateBaseURL(updatePublicURL)
@@ -648,7 +668,7 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, fmt.Errorf("TELESRV_PUBLIC_WEB_BASE_URL: %w", err)
 	}
-	publicAppName, err := links.ValidateAppName(envOr("TELESRV_PUBLIC_APP_NAME", links.DefaultAppName))
+	publicAppName, err := links.ValidateAppName(envOr("TELESRV_PUBLIC_APP_NAME", brandConfig.ProductName))
 	if err != nil {
 		return Config{}, fmt.Errorf("TELESRV_PUBLIC_APP_NAME: %w", err)
 	}
@@ -719,6 +739,7 @@ func Load() (Config, error) {
 		AdminAPIAddr:                         envAllowEmptyOr("TELESRV_ADMIN_API_ADDR", ""),
 		AdminAPIToken:                        envOr("TELESRV_ADMIN_API_TOKEN", ""),
 		PublicBaseURL:                        publicBaseURL,
+		Branding:                             brandConfig,
 		UpdatePublicURL:                      updatePublicURL,
 		UpdateServiceURL:                     updateServiceURL,
 		UpdateRequestTimeout:                 envDurationOr("TELESRV_UPDATE_REQUEST_TIMEOUT", 2*time.Second),
@@ -778,7 +799,7 @@ func Load() (Config, error) {
 		SMTPUsername:                  envOr("TELESRV_SMTP_USERNAME", ""),
 		SMTPPassword:                  envOr("TELESRV_SMTP_PASSWORD", ""),
 		SMTPFrom:                      envOr("TELESRV_SMTP_FROM", ""),
-		SMTPFromName:                  envOr("TELESRV_SMTP_FROM_NAME", "telesrv"),
+		SMTPFromName:                  envOr("TELESRV_SMTP_FROM_NAME", brandConfig.ProductName),
 		SMTPTLSMode:                   strings.ToLower(strings.TrimSpace(envOr("TELESRV_SMTP_TLS", "starttls"))),
 		SMTPTimeout:                   envDurationOr("TELESRV_SMTP_TIMEOUT", 10*time.Second),
 		LangPackSeedDir:               envOr("TELESRV_LANGPACK_SEED_DIR", "data/langpack"),

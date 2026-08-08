@@ -70,7 +70,7 @@ func (r *Router) devStarsFiatPaymentForm(
 		Title:  title, Description: description,
 		Invoice: tg.Invoice{
 			Test: true, Currency: form.Currency,
-			Prices: []tg.LabeledPrice{{Label: branding.StarsName, Amount: form.Amount}},
+			Prices: []tg.LabeledPrice{{Label: branding.StarsName(), Amount: form.Amount}},
 		},
 		ProviderID: domain.OfficialSystemUserID,
 		URL: r.publicLinkQuery("payments/dev-stars", url.Values{
@@ -886,7 +886,7 @@ func (r *Router) starsTopupPaymentForm(ctx context.Context, userID int64, purpos
 		return nil, starsPurchaseErr(err)
 	}
 	return r.devStarsFiatPaymentForm(userID, form,
-		branding.StarsName, "telesrv dev Stars top-up",
+		branding.StarsName(), branding.ProductName()+" dev Stars top-up",
 		[]domain.User{domain.OfficialSystemUser()}), nil
 }
 

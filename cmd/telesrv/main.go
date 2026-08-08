@@ -65,6 +65,7 @@ import (
 	"telesrv/internal/app/users"
 	verificationapp "telesrv/internal/app/verification"
 	"telesrv/internal/botapi"
+	"telesrv/internal/branding"
 	"telesrv/internal/config"
 	"telesrv/internal/domain"
 	"telesrv/internal/mtprotoedge"
@@ -515,6 +516,9 @@ func run(logger *zap.Logger) error {
 	cfg, err := config.Load()
 	if err != nil {
 		return fmt.Errorf("load config: %w", err)
+	}
+	if err := branding.Configure(cfg.Branding); err != nil {
+		return fmt.Errorf("configure branding: %w", err)
 	}
 	if !domain.ConfigurePremiumBotUserID(cfg.PremiumBotUserID) {
 		return fmt.Errorf("configure Premium bot user id %d", cfg.PremiumBotUserID)

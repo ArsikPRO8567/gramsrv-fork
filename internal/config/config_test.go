@@ -33,8 +33,13 @@ func TestLoadDefaultsAdvertiseIPToLoopback(t *testing.T) {
 	if cfg.PublicWebBaseURL != "https://weba.telesrv.net" {
 		t.Fatalf("PublicWebBaseURL = %q, want https://weba.telesrv.net", cfg.PublicWebBaseURL)
 	}
-	if cfg.PublicAppName != "telesrv" {
-		t.Fatalf("PublicAppName = %q, want telesrv", cfg.PublicAppName)
+	if cfg.PublicAppName != "Telesrv" {
+		t.Fatalf("PublicAppName = %q, want Telesrv", cfg.PublicAppName)
+	}
+	if cfg.Branding.ProductName != "Telesrv" || cfg.Branding.ProductUsername != "telesrv" ||
+		cfg.Branding.DesktopAppName != "Telesrv Desktop" || cfg.Branding.StarsName != "Telesrv Stars" ||
+		cfg.Branding.PublicBaseURL != cfg.PublicBaseURL {
+		t.Fatalf("Branding = %+v", cfg.Branding)
 	}
 	if cfg.CallRegistryMaxEntries != 10_000 {
 		t.Fatalf("CallRegistryMaxEntries = %d, want 10000", cfg.CallRegistryMaxEntries)
@@ -193,6 +198,58 @@ func TestLoadPremiumBotAndPlans(t *testing.T) {
 		cfg.PremiumPlans[0].DurationDays != 30 || cfg.PremiumPlans[0].AmountStars != 250 ||
 		cfg.PremiumPlans[1].Months != 12 {
 		t.Fatalf("Premium plans = %+v", cfg.PremiumPlans)
+	}
+}
+
+func TestLoadBrandingConfig(t *testing.T) {
+	disableDefaultConfigFile(t)
+	t.Setenv("TELESRV_PUBLIC_BASE_URL", "https://links.example.test/root/")
+	t.Setenv("TELESRV_BRAND_PRODUCT_NAME", " Example Chat ")
+	t.Setenv("TELESRV_BRAND_PRODUCT_USERNAME", "@Example_Chat")
+	t.Setenv("TELESRV_BRAND_DESKTOP_APP_NAME", "Example Workstation")
+	t.Setenv("TELESRV_BRAND_ANDROID_APP_NAME", "Example Droid")
+	t.Setenv("TELESRV_BRAND_IOS_APP_NAME", "Example Phone")
+	t.Setenv("TELESRV_BRAND_MACOS_APP_NAME", "Example Mac")
+	t.Setenv("TELESRV_BRAND_WEB_A_APP_NAME", "Example Web Alpha")
+	t.Setenv("TELESRV_BRAND_WEB_K_APP_NAME", "Example Web Kappa")
+	t.Setenv("TELESRV_BRAND_PREMIUM_NAME", "Example Plus")
+	t.Setenv("TELESRV_BRAND_STARS_NAME", "Example Credits")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	brand := cfg.Branding
+	if brand.ProductName != "Example Chat" || brand.ProductUsername != "example_chat" ||
+		brand.DesktopAppName != "Example Workstation" || brand.AndroidAppName != "Example Droid" ||
+		brand.IOSAppName != "Example Phone" || brand.MacOSAppName != "Example Mac" ||
+		brand.WebAAppName != "Example Web Alpha" || brand.WebKAppName != "Example Web Kappa" ||
+		brand.PremiumName != "Example Plus" || brand.StarsName != "Example Credits" ||
+		brand.PublicBaseURL != "https://links.example.test/root" {
+		t.Fatalf("Branding = %+v", brand)
+	}
+	if cfg.PublicAppName != brand.ProductName {
+		t.Fatalf("PublicAppName = %q, want product default %q", cfg.PublicAppName, brand.ProductName)
+	}
+	if cfg.SMTPFromName != brand.ProductName {
+		t.Fatalf("SMTPFromName = %q, want product default %q", cfg.SMTPFromName, brand.ProductName)
+	}
+}
+
+func TestLoadRejectsInvalidBrandingConfig(t *testing.T) {
+	for _, item := range []struct{ key, value string }{
+		{"TELESRV_BRAND_PRODUCT_NAME", "   "},
+		{"TELESRV_BRAND_PRODUCT_USERNAME", "3bad"},
+		{"TELESRV_BRAND_DESKTOP_APP_NAME", "bad\nname"},
+		{"TELESRV_BRAND_STARS_NAME", "bad\u007fname"},
+	} {
+		t.Run(item.key, func(t *testing.T) {
+			disableDefaultConfigFile(t)
+			t.Setenv(item.key, item.value)
+			if _, err := Load(); err == nil {
+				t.Fatalf("Load accepted %s=%q", item.key, item.value)
+			}
+		})
 	}
 }
 
@@ -670,6 +727,9 @@ TELESRV_POSTGRES_MAX_CONNS=77
 TELESRV_WEBSOCKET_ALLOWED_ORIGINS=https://one.example, https://two.example
 TELESRV_CALL_RING_TIMEOUT=2m
 TELESRV_PUBLIC_BASE_URL=links.example.test/root
+TELESRV_BRAND_PRODUCT_NAME=File Chat
+TELESRV_BRAND_PRODUCT_USERNAME=@File_Chat
+TELESRV_BRAND_DESKTOP_APP_NAME=File Workstation
 TELESRV_PUBLIC_APP_SCHEME=example-chat
 TELESRV_PUBLIC_APP_LINK_BASE=OWPG://Tenant.Example.Test/
 TELESRV_PUBLIC_WEB_BASE_URL=web.example.test/client
@@ -699,6 +759,10 @@ TELESRV_PUBLIC_LINK_WEB_ADDR=127.0.0.1:2401
 	}
 	if cfg.PublicBaseURL != "https://links.example.test/root" {
 		t.Fatalf("PublicBaseURL = %q, want https://links.example.test/root", cfg.PublicBaseURL)
+	}
+	if cfg.Branding.ProductName != "File Chat" || cfg.Branding.ProductUsername != "file_chat" ||
+		cfg.Branding.DesktopAppName != "File Workstation" || cfg.Branding.PublicBaseURL != cfg.PublicBaseURL {
+		t.Fatalf("Branding = %+v", cfg.Branding)
 	}
 	if cfg.PublicAppScheme != "example-chat" {
 		t.Fatalf("PublicAppScheme = %q, want example-chat", cfg.PublicAppScheme)
