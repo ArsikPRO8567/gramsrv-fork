@@ -411,7 +411,7 @@ active key。不要手工编辑 manifest 或 PEM，不要在各实例上分别�
 
 语言包 seed 以文件 manifest 为事实源。新增语言时放入 `data/langpack/<pack>/<pack>_<lang>_v<version>.strings` 并重启 `telesrv`；`pack` 必须与所在一级目录一致，允许 Telegram 已使用的字母、数字、`-` 与 `_`（例如 `android_x`），`lang` 会统一为小写、连字符形式（例如 `pt_BR` 归一为 `pt-br`）。同一语言存在多个文件时只读取最高版本。修改已有语言的有效内容必须提高版本；同版本有效内容变化或版本倒退会阻止启动。删除语言文件或整个 pack 子目录后，下次重启会原子移除对应数据库目录和字符串。启动先流式计算源文件 SHA-256；未变化文件复用上次原子 manifest，不解析字符串也不写库，只有新增或变化文件才解析并通过 PostgreSQL `COPY` 整包替换。
 
-对象存储的运行不变量、参考审计、切换门禁与验证矩阵见 [object-storage.md](object-storage.md)。在显式迁移工具完成复制、验 hash 并更新 `file_blobs.backend` 之前，不得直接翻转 `TELESRV_BLOB_BACKEND`。
+对象存储保持单后端运行。在显式离线迁移完成对象复制、size/SHA-256 校验并更新 `file_blobs.backend` 之前，不得直接翻转 `TELESRV_BLOB_BACKEND`。
 
 ## 5. 登录、OTP Provider、SMTP 与 passkey
 

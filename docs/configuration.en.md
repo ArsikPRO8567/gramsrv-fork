@@ -428,9 +428,9 @@ key rings independently on different instances.
 
 The language-pack file manifest is authoritative. To add a language, place `data/langpack/<pack>/<pack>_<lang>_v<version>.strings` and restart `telesrv`. The `pack` must match its first-level directory and may use the letters, digits, `-`, and `_` already used by Telegram (for example, `android_x`); `lang` is canonicalized to lowercase with hyphens (`pt_BR` becomes `pt-br`). Only the highest file version for each language is loaded. Effective content changes require a version bump; same-version effective mutations and version rollbacks stop startup. Removing a language file or an entire pack subdirectory atomically removes its database catalog and strings on the next restart. Startup streams a source-file SHA-256 first: unchanged files reuse the last atomic manifest without parsing strings or writing the database, while only new or changed files are parsed and replaced through PostgreSQL `COPY`.
 
-See [object-storage.md](object-storage.md) for the single-backend invariant,
-offline migration command, and verification matrix. Do not flip
-`TELESRV_BLOB_BACKEND` before the explicit migration succeeds.
+Object storage is intentionally single-backend. Do not flip
+`TELESRV_BLOB_BACKEND` until an explicit offline migration has copied the
+objects, verified size/SHA-256, and updated `file_blobs.backend`.
 
 ## 5. Authentication, OTP providers, SMTP, and passkeys
 
