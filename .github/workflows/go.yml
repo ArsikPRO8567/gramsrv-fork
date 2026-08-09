@@ -8,23 +8,26 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
 
       - name: Set up Go
-        uses: actions/setup-go@v4
+        uses: actions/setup-go@v5
         with:
-          go-version: '1.21'
+          go-version: '1.22' 
 
-      - name: Build
+      - name: Build Server
         run: |
           go mod download
-          # Собираем основной сервер
+          # Собираем основной сервер с оптимизацией размера
           go build -v -ldflags="-s -w" -o gramsrv ./cmd/telesrv
+
+      - name: Build Admin
+        run: |
           # Собираем админку
           go build -v -ldflags="-s -w" -o gramsrv-admin ./cmd/gramsrv-admin
 
       - name: Upload Artifacts
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: gramsrv-binaries
           path: |
