@@ -706,10 +706,8 @@ func (s *Service) AuctionState(ctx context.Context, userID, giftID int64, slug s
 		return domain.StarGiftAuction{}, err
 	}
 
-
 	if state.CurrentRound > 1 {
-
-		state.LastGiftNum = int64((state.CurrentRound - 1) * state.GiftsPerRound)
+		state.LastGiftNum = int64((state.CurrentRound - 1) * state.Gift.GiftsPerRound)
 	}
 	
 	return state, nil
@@ -741,8 +739,7 @@ func (s *Service) BidAuction(ctx context.Context, req domain.StarGiftAuctionBidR
 	if !allowed {
 		return domain.StarGiftAuction{}, domain.StarsBalance{}, domain.ErrStarGiftInvalid
 	}
-
-	state, err := s.lifecycle.StarGiftAuctionState(ctx, req.UserID, req.GiftID, "", int(s.clock.Now().Unix()))
+	state, err := s.lifecycle.StarGiftAuctionState(ctx, req.UserID, req.GiftID, "", int(time.Now().Unix()))
 	if err != nil {
 		return domain.StarGiftAuction{}, domain.StarsBalance{}, err
 	}
@@ -1029,4 +1026,18 @@ func (s *Service) checkWhitelistDB(ctx context.Context, userID int64, giftID int
 		return false, err
 	}
 	return exists, nil
+}
+
+func (s *Service) GetPool() interface {
+	QueryRow(ctx context.Context, query string, args ...any) domain.Row
+} {
+	// Мы приводим s.store к интерфейсу, который умеет отдавать Pool (обычно это реализовано в postgres store)
+	if p, ok := s.store.(interface {
+		Pool() interface {
+			QueryRow(ctx context.Context, query string, args ...any) domain.Row
+		}
+	}); ok {
+		return p.Pool()
+	}
+	return nil
 }
