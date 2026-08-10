@@ -8,7 +8,9 @@ import (
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
+	"database/sql"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -611,12 +613,14 @@ func validPurchaseForm(form domain.StarGiftPurchaseForm) bool {
 	return form.FormID == 0 && form.BuyerUserID > 0 && form.To.ID > 0 &&
 		(form.To.Type == domain.PeerTypeUser || form.To.Type == domain.PeerTypeChannel) &&
 		form.GiftID > 0 && form.RevisionID > 0 && form.ChargeStars > 0 && form.IssuedAt > 0 &&
-		form.ExpiresAt == form.IssuedAt+600 && len([]rune(form.Message)) <= 128
+		form.ExpiresAt == form.IssuedAt+600 &&
+		(domain.PremiumGiftMessage{Text: form.Message, Entities: form.MessageEntities}).Valid()
 }
 
 func validatePurchaseFormIntent(form domain.StarGiftPurchaseForm, req domain.StarGiftPurchaseRequest) error {
 	if form.BuyerUserID != req.BuyerUserID || form.To != req.To || form.GiftID != req.GiftID ||
-		form.IncludeUpgrade != req.IncludeUpgrade || form.HideName != req.HideName || form.Message != req.Message {
+		form.IncludeUpgrade != req.IncludeUpgrade || form.HideName != req.HideName || form.Message != req.Message ||
+		!slices.Equal(form.MessageEntities, req.MessageEntities) {
 		return domain.ErrStarGiftFormPurposeInvalid
 	}
 	if form.RevisionID != req.RevisionID || form.ChargeStars != req.ChargeStars {
@@ -732,18 +736,18 @@ func (s *Service) BidAuction(ctx context.Context, req domain.StarGiftAuctionBidR
 		return domain.StarGiftAuction{}, domain.StarsBalance{}, domain.ErrStarGiftAuctionUnavailable
 	}
 
-	allowed, err := s.checkWhitelistDB(ctx, req.UserID, req.GiftID)
-	if err != nil {
-		return domain.StarGiftAuction{}, domain.StarsBalance{}, err
-	}
-	if !allowed {
+	// ПРОВЕРКА ВАЙТ-ЛИСТА
+	allowed, err := s.CheckWhitelistDB(ctx, req.UserID, req.GiftID)
+	if err != nil || !allowed {
 		return domain.StarGiftAuction{}, domain.StarsBalance{}, domain.ErrStarGiftInvalid
 	}
+
 	state, err := s.lifecycle.StarGiftAuctionState(ctx, req.UserID, req.GiftID, "", int(time.Now().Unix()))
 	if err != nil {
 		return domain.StarGiftAuction{}, domain.StarsBalance{}, err
 	}
 
+	// РАЗРЕШАЕМ СТАВКИ В PENDING:
 	if state.Finished {
 		return domain.StarGiftAuction{}, domain.StarsBalance{}, domain.ErrStarGiftAuctionUnavailable
 	}
@@ -1006,28 +1010,6 @@ func randomPositiveInt64() (int64, error) {
 	return id, nil
 }
 
-func (s *Service) checkWhitelistDB(ctx context.Context, userID int64, giftID int64) (bool, error) {
-	if s.lifecycle == nil {
-		return true, nil
-	}
-
-	var exists bool
-	userIDStr := fmt.Sprintf("\"%d\"", userID)
-	query := `
-		SELECT EXISTS (
-			SELECT 1 FROM gift_whitelists 
-			WHERE gift_id = $1 AND allowed_buyers @> $2::jsonb
-		) OR NOT EXISTS (
-			SELECT 1 FROM gift_whitelists WHERE gift_id = $1
-		)`
-
-	err := s.store.GetPool().QueryRow(ctx, query, giftID, userIDStr).Scan(&exists)
-	if err != nil {
-		return false, err
-	}
-	return exists, nil
-}
-
 type databaseRow interface {
 	Scan(dest ...any) error
 }
@@ -1036,11 +1018,7 @@ type databaseQuerier interface {
 	QueryRow(ctx context.Context, query string, args ...any) databaseRow
 }
 
-func (s *Service) checkWhitelistDB(ctx context.Context, userID int64, giftID int64) (bool, error) {
-	if s.lifecycle == nil {
-		return true, nil
-	}
-
+func (s *Service) CheckWhitelistDB(ctx context.Context, userID int64, giftID int64) (bool, error) {
 	pool := s.GetPool()
 	if pool == nil {
 		return true, nil
@@ -1057,10 +1035,10 @@ func (s *Service) checkWhitelistDB(ctx context.Context, userID int64, giftID int
 		)`
 
 	err := pool.QueryRow(ctx, query, giftID, userIDStr).Scan(&exists)
-	if err != nil {
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return false, err
 	}
-	return exists, nil
+	return exists || err == sql.ErrNoRows, nil
 }
 
 func (s *Service) GetPool() databaseQuerier {
