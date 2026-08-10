@@ -1832,8 +1832,18 @@ func clampGiftMessage(s string) string {
 }
 
 func (r *Router) isGiftWhitelisted(ctx context.Context, userID int64, giftID int64) bool {
+	type pooler interface {
+		GetPool() interface {
+			QueryRow(ctx context.Context, query string, args ...any) interface{ Scan(dest ...any) error }
+		}
+	}
 
-	pool := r.deps.Gifts.GetPool()
+	p, ok := r.deps.Gifts.(pooler)
+	if !ok {
+		return true
+	}
+
+	pool := p.GetPool()
 	if pool == nil {
 		return true
 	}
