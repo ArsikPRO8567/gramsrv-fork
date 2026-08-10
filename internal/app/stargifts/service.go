@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"database/sql"
 	"fmt"
 	"slices"
@@ -613,14 +614,12 @@ func validPurchaseForm(form domain.StarGiftPurchaseForm) bool {
 	return form.FormID == 0 && form.BuyerUserID > 0 && form.To.ID > 0 &&
 		(form.To.Type == domain.PeerTypeUser || form.To.Type == domain.PeerTypeChannel) &&
 		form.GiftID > 0 && form.RevisionID > 0 && form.ChargeStars > 0 && form.IssuedAt > 0 &&
-		form.ExpiresAt == form.IssuedAt+600 &&
-		(domain.PremiumGiftMessage{Text: form.Message, Entities: form.MessageEntities}).Valid()
+		form.ExpiresAt == form.IssuedAt+600
 }
 
 func validatePurchaseFormIntent(form domain.StarGiftPurchaseForm, req domain.StarGiftPurchaseRequest) error {
 	if form.BuyerUserID != req.BuyerUserID || form.To != req.To || form.GiftID != req.GiftID ||
-		form.IncludeUpgrade != req.IncludeUpgrade || form.HideName != req.HideName || form.Message != req.Message ||
-		!slices.Equal(form.MessageEntities, req.MessageEntities) {
+		form.IncludeUpgrade != req.IncludeUpgrade || form.HideName != req.HideName || form.Message != req.Message {
 		return domain.ErrStarGiftFormPurposeInvalid
 	}
 	if form.RevisionID != req.RevisionID || form.ChargeStars != req.ChargeStars {
@@ -710,6 +709,7 @@ func (s *Service) AuctionState(ctx context.Context, userID, giftID int64, slug s
 		return domain.StarGiftAuction{}, err
 	}
 
+	// ЛОГИКА СЖИГАНИЯ: номер следующей партии начнется с учетом емкости раундов
 	if state.CurrentRound > 1 {
 		state.LastGiftNum = int((state.CurrentRound - 1) * state.Gift.GiftsPerRound)
 	}
