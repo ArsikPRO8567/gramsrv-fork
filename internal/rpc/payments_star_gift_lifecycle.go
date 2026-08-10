@@ -202,12 +202,8 @@ func (r *Router) starGiftAuctionBidTarget(ctx context.Context, userID int64, inv
 	if inv == nil || r.deps.Gifts == nil || inv.GiftID <= 0 || inv.BidAmount <= 0 {
 		return domain.StarGiftAuction{}, domain.Peer{}, 0, starGiftInvalidErr()
 	}
-	state, err := r.deps.Gifts.AuctionState(ctx, userID, inv.GiftID, "", int(r.clock.Now().Unix()))
-	if err != nil {
-		return domain.StarGiftAuction{}, domain.Peer{}, 0, starGiftLifecycleErr(err)
-	}
-	oldAmount := state.UserState.BidAmount
-	peer := domain.Peer{Type: domain.PeerTypeUser, ID: userID}
+
+	// Проверка вайт-листа для аукциона
 	if checker, ok := r.deps.Gifts.(interface {
 		CheckWhitelistDB(context.Context, int64, int64) (bool, error)
 	}); ok {
@@ -217,8 +213,13 @@ func (r *Router) starGiftAuctionBidTarget(ctx context.Context, userID int64, inv
 		}
 	}
 
-    // Состояние аукциона
 	state, err := r.deps.Gifts.AuctionState(ctx, userID, inv.GiftID, "", int(r.clock.Now().Unix()))
+	if err != nil {
+		return domain.StarGiftAuction{}, domain.Peer{}, 0, starGiftLifecycleErr(err)
+	}
+
+	oldAmount := state.UserState.BidAmount
+	peer := domain.Peer{Type: domain.PeerTypeUser, ID: userID}
 	if inv.UpdateBid {
 		if oldAmount <= 0 || inv.HideName {
 			return domain.StarGiftAuction{}, domain.Peer{}, 0, starGiftInvalidErr()
@@ -404,12 +405,7 @@ func (r *Router) onPaymentsCheckCanSendGift(ctx context.Context, req *tg.Payment
 	if !found {
 		return nil, starGiftInvalidErr()
 	}
-	now := int(r.clock.Now().Unix())
-	switch {
-	case gift.SoldOut || gift.Limited && gift.AvailabilityRemains <= 0:
-		return &tg.PaymentsCheckCanSendGiftResultFail{Reason: tg.TextWithEntities{Text: "This gift is sold out."}}, nil
-	case gift.LockedUntilDate > now:
-		return &tg.PaymentsCheckCanSendGiftResultFail{Reason: tg.TextWithEntities{Text: "This gift is not available yet."}}, nil
+
 	if gift.Auction {
 		return &tg.PaymentsCheckCanSendGiftResultOk{}, nil
 	}
