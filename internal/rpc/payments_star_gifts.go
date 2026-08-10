@@ -76,7 +76,7 @@ func (r *Router) devStarsFiatPaymentForm(
 		URL: r.publicLinkQuery("payments/dev-stars", url.Values{
 			"form_id": []string{strconv.FormatInt(form.FormID, 10)},
 		}),
-		Users: tgUsersForViewer(buyerUserID, users),
+		Users: r.tgUsersForViewer(buyerUserID, users),
 	}
 }
 
@@ -424,12 +424,16 @@ func (r *Router) onPaymentsGetPaymentForm(ctx context.Context, req *tg.PaymentsG
 		return r.starGiftDropDetailsPaymentForm(ctx, userID, inv)
 	}
 
-	inv, ok := req.Invoice.(*tg.InputInvoiceStarGift)
-	if !ok {
-        if !r.isGiftWhitelisted(ctx, userID, inv.GiftID) {
-            return nil, starGiftInvalidErr()
-        }
-		return nil, notImplementedErr()
+	if inv, ok := req.Invoice.(*tg.InputInvoiceStarGift); ok {
+		// Безопасно проверяем через сервис
+		if checker, ok := r.deps.Gifts.(interface {
+			CheckWhitelistDB(context.Context, int64, int64) (bool, error)
+		}); ok {
+			allowed, _ := checker.CheckWhitelistDB(ctx, userID, inv.GiftID)
+			if !allowed {
+				return nil, starGiftInvalidErr()
+			}
+		}
 	}
 	if r.deps.Gifts == nil {
 		return nil, notImplementedErr()
@@ -453,13 +457,18 @@ func (r *Router) onPaymentsGetPaymentForm(ctx context.Context, req *tg.PaymentsG
 		upgradeStars = gift.UpgradeStars
 	}
 	giftMessage := ""
+	var giftMessageEntities []domain.MessageEntity
 	if m, ok := inv.GetMessage(); ok {
-		giftMessage = clampGiftMessage(m.Text)
+		giftMessage = m.Text
+		giftMessageEntities = domainMessageEntities(m.Entities)
+		if !(domain.PremiumGiftMessage{Text: giftMessage, Entities: giftMessageEntities}).Valid() {
+			return nil, starGiftInvalidErr()
+		}
 	}
 	now := int(r.clock.Now().Unix())
 	form, err := r.deps.Gifts.IssuePurchaseForm(ctx, domain.StarGiftPurchaseForm{
 		BuyerUserID: userID, To: peer, GiftID: gift.ID, RevisionID: gift.RevisionID,
-		IncludeUpgrade: inv.IncludeUpgrade, HideName: inv.HideName, Message: giftMessage,
+		IncludeUpgrade: inv.IncludeUpgrade, HideName: inv.HideName, Message: giftMessage, MessageEntities: giftMessageEntities,
 		ChargeStars: gift.Stars + upgradeStars, IssuedAt: now, ExpiresAt: now + 600,
 	})
 	if err != nil {
@@ -607,9 +616,6 @@ func (r *Router) onPaymentsSendStarsForm(ctx context.Context, req *tg.PaymentsSe
 
 	inv, ok := req.Invoice.(*tg.InputInvoiceStarGift)
 	if !ok {
-	    if !r.isGiftWhitelisted(ctx, userID, inv.GiftID) {
-            return nil, starGiftInvalidErr()
-        }
 		return nil, notImplementedErr()
 	}
 	if req.FormID == 0 {
@@ -644,12 +650,18 @@ func (r *Router) onPaymentsSendStarsForm(ctx context.Context, req *tg.PaymentsSe
 		upgradeStars = gift.UpgradeStars
 	}
 	giftMessage := ""
+	var giftMessageEntities []domain.MessageEntity
 	if m, ok := inv.GetMessage(); ok {
-		giftMessage = clampGiftMessage(m.Text)
+		giftMessage = m.Text
+		giftMessageEntities = domainMessageEntities(m.Entities)
+		if !(domain.PremiumGiftMessage{Text: giftMessage, Entities: giftMessageEntities}).Valid() {
+			return nil, starGiftInvalidErr()
+		}
 	}
 	now := int(r.clock.Now().Unix())
 	purchaseReq := domain.StarGiftPurchaseRequest{BuyerUserID: userID, BuyerPremium: buyerPremium, To: peer,
-		GiftID: gift.ID, RevisionID: gift.RevisionID, IncludeUpgrade: inv.IncludeUpgrade, HideName: inv.HideName, Message: giftMessage,
+		GiftID: gift.ID, RevisionID: gift.RevisionID, IncludeUpgrade: inv.IncludeUpgrade, HideName: inv.HideName,
+		Message: giftMessage, MessageEntities: giftMessageEntities,
 		ChargeStars: gift.Stars + upgradeStars, FormID: req.FormID, CommandKey: fmt.Sprintf("purchase:%d", req.FormID), Date: now,
 		OriginAuthKeyID: rawAuthKeyIDForOrigin(ctx), OriginSessionID: sessionIDOrZero(ctx)}
 	recipientBlocked := false
@@ -671,7 +683,7 @@ func (r *Router) onPaymentsSendStarsForm(ctx context.Context, req *tg.PaymentsSe
 		if _, err := r.deps.Stars.GetBalance(ctx, userID); err != nil {
 			return nil, starsErr(err)
 		}
-		return r.sendStarGiftMemoryPurchase(ctx, userID, peer, gift, inv, giftMessage, upgradeStars)
+		return r.sendStarGiftMemoryPurchase(ctx, userID, peer, gift, inv, giftMessage, giftMessageEntities, upgradeStars)
 	}
 	if _, err := r.deps.Stars.GetBalance(ctx, userID); err != nil {
 		return nil, starsErr(err)
@@ -811,7 +823,7 @@ func starsPurchaseErr(err error) error {
 }
 
 func (r *Router) sendStarGiftMemoryPurchase(ctx context.Context, userID int64, peer domain.Peer, gift domain.StarGift,
-	inv *tg.InputInvoiceStarGift, giftMessage string, upgradeStars int64) (tg.PaymentsPaymentResultClass, error) {
+	inv *tg.InputInvoiceStarGift, giftMessage string, giftMessageEntities []domain.MessageEntity, upgradeStars int64) (tg.PaymentsPaymentResultClass, error) {
 	purchaseStars := gift.Stars + upgradeStars
 	balance, err := r.deps.Stars.Debit(ctx, userID, purchaseStars, domain.StarsReasonGift, peer, "Star gift", gift.Title)
 	if err != nil {
@@ -820,9 +832,9 @@ func (r *Router) sendStarGiftMemoryPurchase(ctx context.Context, userID int64, p
 	var updates *tg.Updates
 	switch peer.Type {
 	case domain.PeerTypeUser:
-		_, updates, err = r.sendStarGiftToUser(ctx, userID, peer.ID, gift, inv.HideName, giftMessage, upgradeStars)
+		_, updates, err = r.sendStarGiftToUser(ctx, userID, peer.ID, gift, inv.HideName, giftMessage, giftMessageEntities, upgradeStars)
 	case domain.PeerTypeChannel:
-		_, updates, err = r.sendStarGiftToChannel(ctx, userID, peer.ID, gift, inv.HideName, giftMessage, upgradeStars)
+		_, updates, err = r.sendStarGiftToChannel(ctx, userID, peer.ID, gift, inv.HideName, giftMessage, giftMessageEntities, upgradeStars)
 	default:
 		err = domain.ErrStarGiftInvalid
 	}
@@ -927,7 +939,7 @@ func (r *Router) sendStarsTopupForm(ctx context.Context, userID, formID int64, i
 	return &tg.PaymentsPaymentResult{Updates: starsBalanceUpdates(result.Balance.Balance, r.clock.Now().Unix())}, nil
 }
 
-func (r *Router) sendStarGiftToUser(ctx context.Context, senderID, recipientID int64, gift domain.StarGift, hideName bool, message string, prepaidUpgradeStars int64) (domain.SavedStarGiftRef, *tg.Updates, error) {
+func (r *Router) sendStarGiftToUser(ctx context.Context, senderID, recipientID int64, gift domain.StarGift, hideName bool, message string, messageEntities []domain.MessageEntity, prepaidUpgradeStars int64) (domain.SavedStarGiftRef, *tg.Updates, error) {
 	unsaved, err := r.starGiftRecipientUnsaved(ctx, senderID, domain.Peer{Type: domain.PeerTypeUser, ID: recipientID})
 	if err != nil {
 		return domain.SavedStarGiftRef{}, nil, err
@@ -941,7 +953,7 @@ func (r *Router) sendStarGiftToUser(ctx context.Context, senderID, recipientID i
 		prepaidUpgradeHash = base64.RawURLEncoding.EncodeToString(token[:])
 	}
 	// 2. 投递礼物服务消息到收礼人私聊（双盒 + 推送）。
-	send, err := r.deliverStarGift(ctx, senderID, recipientID, gift, hideName, message, prepaidUpgradeStars, prepaidUpgradeHash)
+	send, err := r.deliverStarGift(ctx, senderID, recipientID, gift, hideName, message, messageEntities, prepaidUpgradeStars, prepaidUpgradeHash)
 	if err != nil {
 		return domain.SavedStarGiftRef{}, nil, err
 	}
@@ -959,6 +971,7 @@ func (r *Router) sendStarGiftToUser(ctx context.Context, senderID, recipientID i
 		PrepaidUpgradeStars: prepaidUpgradeStars,
 		PrepaidUpgradeHash:  prepaidUpgradeHash,
 		Message:             message,
+		MessageEntities:     append([]domain.MessageEntity(nil), messageEntities...),
 	}); err != nil {
 		return domain.SavedStarGiftRef{}, nil, err
 	}
@@ -971,7 +984,7 @@ func (r *Router) sendStarGiftToUser(ctx context.Context, senderID, recipientID i
 	return ref, tgPrivateMessageUpdates(send.SenderEvent, send.SenderMessage, 0, false, users, chats), nil
 }
 
-func (r *Router) sendStarGiftToChannel(ctx context.Context, senderID, channelID int64, gift domain.StarGift, hideName bool, message string, prepaidUpgradeStars int64) (domain.SavedStarGiftRef, *tg.Updates, error) {
+func (r *Router) sendStarGiftToChannel(ctx context.Context, senderID, channelID int64, gift domain.StarGift, hideName bool, message string, messageEntities []domain.MessageEntity, prepaidUpgradeStars int64) (domain.SavedStarGiftRef, *tg.Updates, error) {
 	now := int(r.clock.Now().Unix())
 	sticker := gift.Sticker
 	action := domain.ChannelMessageAction{
@@ -983,6 +996,7 @@ func (r *Router) sendStarGiftToChannel(ctx context.Context, senderID, channelID 
 			Title:             gift.Title,
 			Sticker:           &sticker,
 			Message:           message,
+			MessageEntities:   append([]domain.MessageEntity(nil), messageEntities...),
 			FromUserID:        senderID,
 			NameHidden:        hideName,
 			Saved:             true,
@@ -1005,6 +1019,7 @@ func (r *Router) sendStarGiftToChannel(ctx context.Context, senderID, channelID 
 		ConvertStars:        gift.ConvertStars,
 		PrepaidUpgradeStars: prepaidUpgradeStars,
 		Message:             message,
+		MessageEntities:     append([]domain.MessageEntity(nil), messageEntities...),
 	})
 	if err != nil {
 		return domain.SavedStarGiftRef{}, nil, err
@@ -1025,7 +1040,7 @@ func (r *Router) sendStarGiftToChannel(ctx context.Context, senderID, channelID 
 }
 
 // deliverStarGift 经 SendPrivateText 把 messageActionStarGift 服务消息投递到收礼人私聊。
-func (r *Router) deliverStarGift(ctx context.Context, senderID, recipientID int64, gift domain.StarGift, hideName bool, message string, prepaidUpgradeStars int64, prepaidUpgradeHash string) (domain.SendPrivateTextResult, error) {
+func (r *Router) deliverStarGift(ctx context.Context, senderID, recipientID int64, gift domain.StarGift, hideName bool, message string, messageEntities []domain.MessageEntity, prepaidUpgradeStars int64, prepaidUpgradeHash string) (domain.SendPrivateTextResult, error) {
 	recipientBlocked, err := r.peerBlocksUser(ctx, senderID, recipientID)
 	if err != nil {
 		return domain.SendPrivateTextResult{}, err
@@ -1043,6 +1058,7 @@ func (r *Router) deliverStarGift(ctx context.Context, senderID, recipientID int6
 				Title:              gift.Title,
 				Sticker:            &sticker,
 				Message:            message,
+				MessageEntities:    append([]domain.MessageEntity(nil), messageEntities...),
 				FromUserID:         senderID,
 				PeerUserID:         recipientID,
 				NameHidden:         hideName,
@@ -1440,7 +1456,7 @@ func (r *Router) tgSavedStarGiftsResponse(ctx context.Context, viewerUserID int6
 		Chats: []tg.ChatClass{},
 	}
 	if ids := savedStarGiftUserIDs(viewerUserID, gifts); len(ids) > 0 {
-		out.Users = tgUsersForViewer(viewerUserID, r.domainUsersForIDs(ctx, viewerUserID, ids))
+		out.Users = r.tgUsersForViewer(viewerUserID, r.domainUsersForIDs(ctx, viewerUserID, ids))
 	} else {
 		out.Users = []tg.UserClass{}
 	}
@@ -1492,12 +1508,11 @@ func tgStarGifts(catalog []domain.StarGift) []tg.StarGiftClass {
 
 // tgStarGift 把目录项投影为 tg.StarGift（Sticker 须为带 sticker 属性的有效 Document）。
 func tgStarGift(g domain.StarGift) *tg.StarGift {
-	// Определяем, продан ли подарок фактически (флаг или лимит = 0)
 	isActuallySoldOut := g.SoldOut || (g.Limited && g.AvailabilityRemains <= 0)
 
 	gift := &tg.StarGift{
 		Limited: g.Limited, 
-		SoldOut: isActuallySoldOut, // Используем вычисленное значение
+		SoldOut: isActuallySoldOut, // Используем вычисленное
 		Birthday: g.Birthday,
 		RequirePremium: g.RequirePremium, 
 		LimitedPerUser: g.LimitedPerUser,
@@ -1515,7 +1530,9 @@ func tgStarGift(g domain.StarGift) *tg.StarGift {
 	if g.AvailabilityResale > 0 {
 		gift.SetAvailabilityResale(g.AvailabilityResale)
 	}
-	// Устанавливаем даты продаж только если подарок помечен как проданный
+	// sold_out, first_sale_date and last_sale_date share TL flags.1. The store
+	// retains sale timestamps for live gifts as operational facts, but exposing
+	// either timestamp would make every client decode the gift as sold out.
 	if isActuallySoldOut {
 		gift.SetFirstSaleDate(g.FirstSaleDate)
 		gift.SetLastSaleDate(g.LastSaleDate)
@@ -1635,7 +1652,7 @@ func tgMessageActionStarGift(in *domain.MessageStarGiftAction) tg.MessageActionC
 		action.SetConvertStars(in.ConvertStars)
 	}
 	if in.Message != "" {
-		action.SetMessage(tg.TextWithEntities{Text: in.Message})
+		action.SetMessage(tg.TextWithEntities{Text: in.Message, Entities: tgMessageEntities(in.MessageEntities)})
 	}
 	if in.FromUserID != 0 && !in.NameHidden {
 		action.SetFromID(&tg.PeerUser{UserID: in.FromUserID})
@@ -1703,7 +1720,7 @@ func tgSavedStarGifts(viewerUserID int64, gifts []domain.SavedStarGift, catalog 
 			item.SetConvertStars(g.ConvertStars)
 		}
 		if g.Message != "" && savedStarGiftOriginalDetailsVisible(viewerUserID, g) {
-			item.SetMessage(tg.TextWithEntities{Text: g.Message})
+			item.SetMessage(tg.TextWithEntities{Text: g.Message, Entities: tgMessageEntities(g.MessageEntities)})
 		}
 		if g.UniqueGiftID == 0 {
 			current, available := availability[g.GiftID]
@@ -1829,45 +1846,4 @@ func clampGiftMessage(s string) string {
 		return string(runes[:domain.MaxStarGiftMessageRunes])
 	}
 	return s
-}
-
-func (r *Router) isGiftWhitelisted(ctx context.Context, userID int64, giftID int64) bool {
-	type pooler interface {
-		GetPool() interface {
-			QueryRow(ctx context.Context, query string, args ...any) interface{ Scan(dest ...any) error }
-		}
-	}
-
-	p, ok := r.deps.Gifts.(pooler)
-	if !ok {
-		return true
-	}
-
-	pool := p.GetPool()
-	if pool == nil {
-		return true
-	}
-
-	var allowedBuyersJSON []byte
-	query := `SELECT allowed_buyers FROM gift_whitelists WHERE gift_id = $1`
-    
-	err := pool.QueryRow(ctx, query, giftID).Scan(&allowedBuyersJSON)
-	if err != nil {
-		return true 
-	}
-
-	var whitelistedIDs []string 
-	if err := json.Unmarshal(allowedBuyersJSON, &whitelistedIDs); err != nil {
-		r.log.Error("failed_to_parse_db_whitelist", zap.Error(err))
-		return true
-	}
-
-	userIDS := strconv.FormatInt(userID, 10)
-	for _, idStr := range whitelistedIDs {
-		if idStr == userIDS {
-			return true
-		}
-	}
-
-	return false
 }
