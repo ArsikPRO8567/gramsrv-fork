@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
-	"os"
 	"strconv"
 	"strings"
 
@@ -1834,15 +1833,20 @@ func clampGiftMessage(s string) string {
 
 func (r *Router) isGiftWhitelisted(ctx context.Context, userID int64, giftID int64) bool {
 
-	var allowedBuyersJSON []byte
-	query := `SELECT allowed_buyers FROM gift_whitelists WHERE gift_id = $1`
-    
-	err := r.deps.Gifts.GetPool().QueryRow(ctx, query, giftID).Scan(&allowedBuyersJSON)
-	if err != nil {
+	pool := r.deps.Gifts.GetPool()
+	if pool == nil {
 		return true
 	}
 
-	var whitelistedIDs []string // example: ["123", "456"]
+	var allowedBuyersJSON []byte
+	query := `SELECT allowed_buyers FROM gift_whitelists WHERE gift_id = $1`
+    
+	err := pool.QueryRow(ctx, query, giftID).Scan(&allowedBuyersJSON)
+	if err != nil {
+		return true 
+	}
+
+	var whitelistedIDs []string 
 	if err := json.Unmarshal(allowedBuyersJSON, &whitelistedIDs); err != nil {
 		r.log.Error("failed_to_parse_db_whitelist", zap.Error(err))
 		return true

@@ -397,17 +397,14 @@ func (r *Router) onPaymentsCheckCanSendGift(ctx context.Context, req *tg.Payment
 		return nil, starGiftInvalidErr()
 	}
 
+	if gift.Auction {
+		return &tg.PaymentsCheckCanSendGiftResultOk{}, nil
+	}
+
 	now := int(r.clock.Now().Unix())
 	switch {
-	// Добавляем проверку 0 остатка здесь (для лимитированных)
 	case gift.SoldOut || (gift.Limited && gift.AvailabilityRemains <= 0):
 		return &tg.PaymentsCheckCanSendGiftResultFail{Reason: tg.TextWithEntities{Text: "This gift is sold out."}}, nil
-	
-	// Если это аукцион — разрешаем Ok (чтобы открылось окно ставок)
-	if gift.Auction {
-	return &tg.PaymentsCheckCanSendGiftResultOk{}, nil
-	}
-		
 	case gift.LockedUntilDate > now:
 		return &tg.PaymentsCheckCanSendGiftResultFail{Reason: tg.TextWithEntities{Text: "This gift is not available yet."}}, nil
 	default:
