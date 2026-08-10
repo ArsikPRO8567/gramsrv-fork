@@ -707,7 +707,7 @@ func (s *Service) AuctionState(ctx context.Context, userID, giftID int64, slug s
 	}
 
 	if state.CurrentRound > 1 {
-		state.LastGiftNum = int64((state.CurrentRound - 1) * state.Gift.GiftsPerRound)
+		state.LastGiftNum = int((state.CurrentRound - 1) * state.Gift.GiftsPerRound)
 	}
 	
 	return state, nil
@@ -1028,14 +1028,44 @@ func (s *Service) checkWhitelistDB(ctx context.Context, userID int64, giftID int
 	return exists, nil
 }
 
-func (s *Service) GetPool() interface {
-	QueryRow(ctx context.Context, query string, args ...any) domain.Row
-} {
-	// Мы приводим s.store к интерфейсу, который умеет отдавать Pool (обычно это реализовано в postgres store)
+type databaseRow interface {
+	Scan(dest ...any) error
+}
+
+type databaseQuerier interface {
+	QueryRow(ctx context.Context, query string, args ...any) databaseRow
+}
+
+func (s *Service) checkWhitelistDB(ctx context.Context, userID int64, giftID int64) (bool, error) {
+	if s.lifecycle == nil {
+		return true, nil
+	}
+
+	pool := s.GetPool()
+	if pool == nil {
+		return true, nil
+	}
+
+	var exists bool
+	userIDStr := fmt.Sprintf("\"%d\"", userID)
+	query := `
+		SELECT EXISTS (
+			SELECT 1 FROM gift_whitelists 
+			WHERE gift_id = $1 AND allowed_buyers @> $2::jsonb
+		) OR NOT EXISTS (
+			SELECT 1 FROM gift_whitelists WHERE gift_id = $1
+		)`
+
+	err := pool.QueryRow(ctx, query, giftID, userIDStr).Scan(&exists)
+	if err != nil {
+		return false, err
+	}
+	return exists, nil
+}
+
+func (s *Service) GetPool() databaseQuerier {
 	if p, ok := s.store.(interface {
-		Pool() interface {
-			QueryRow(ctx context.Context, query string, args ...any) domain.Row
-		}
+		Pool() databaseQuerier
 	}); ok {
 		return p.Pool()
 	}
