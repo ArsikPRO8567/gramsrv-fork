@@ -962,8 +962,7 @@ func (s *StarGiftStore) IsWhitelisted(ctx context.Context, giftID, userID int64)
 	var allowed bool
 	err := s.db.QueryRow(ctx, query, giftID, userID).Scan(&allowed)
 	if err != nil {
-
-		return false, fmt.Errorf("whitelist db error (gift:%d, user:%d): %w", giftID, userID, err)
+		return false, err
 	}
 
 	return allowed, nil
