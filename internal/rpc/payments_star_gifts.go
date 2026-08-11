@@ -1859,7 +1859,11 @@ func (r *Router) checkGiftWhitelist(ctx context.Context, userID, giftID int64) e
 	if checker, ok := r.deps.Gifts.(whitelistChecker); ok {
 		allowed, err := checker.IsWhitelisted(ctx, giftID, userID)
 		if err != nil {
-			return internalErr()
+			r.log.Error("whitelist_db_error_fallback_to_allowed", 
+				zap.Int64("user_id", userID), 
+				zap.Int64("gift_id", giftID), 
+				zap.Error(err))
+			return nil 
 		}
 		if !allowed {
 			return starGiftUsageLimitedErr()
