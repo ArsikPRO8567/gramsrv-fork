@@ -437,6 +437,9 @@ func (r *Router) onPaymentsGetPaymentForm(ctx context.Context, req *tg.PaymentsG
 	if !ok {
 		return nil, notImplementedErr()
 	}
+	if err := r.checkGiftWhitelist(ctx, userID, inv.GiftID); err != nil {
+		return nil, err
+	}
 	if r.deps.Gifts == nil {
 		return nil, notImplementedErr()
 	}
@@ -614,6 +617,9 @@ func (r *Router) onPaymentsSendStarsForm(ctx context.Context, req *tg.PaymentsSe
 	inv, ok := req.Invoice.(*tg.InputInvoiceStarGift)
 	if !ok {
 		return nil, notImplementedErr()
+	}
+	if err := r.checkGiftWhitelist(ctx, userID, inv.GiftID); err != nil {
+		return nil, err
 	}
 	if req.FormID == 0 {
 		return nil, formIDEmptyErr()
@@ -1837,4 +1843,21 @@ func clampGiftMessage(s string) string {
 		return string(runes[:domain.MaxStarGiftMessageRunes])
 	}
 	return s
+}
+
+func starGiftUsageLimitedErr() error { return tgerr.New(400, "STARGIFT_USAGE_LIMITED") }
+
+func (r *Router) checkGiftWhitelist(ctx context.Context, userID, giftID int64) error {
+	if r.deps.Gifts == nil {
+		return nil
+	}
+	
+	allowed, err := r.deps.Gifts.IsWhitelisted(ctx, giftID, userID)
+	if err != nil {
+		return internalErr()
+	}
+	if !allowed {
+		return starGiftUsageLimitedErr()
+	}
+	return nil
 }

@@ -156,11 +156,13 @@ func (r *Router) starGiftAuctionBidPaymentForm(ctx context.Context, userID int64
 	if err != nil {
 		return nil, err
 	}
-	return &tg.PaymentsPaymentFormStars{FormID: starGiftLifecycleFormID("auction", userID,
-		state.Gift.ID, peer.Type, peer.ID, inv.BidAmount, state.Version),
-		BotID: domain.OfficialSystemUserID, Title: state.Gift.Title, Description: "Collectible gift auction bid",
-		Invoice: tg.Invoice{Currency: "XTR", Prices: []tg.LabeledPrice{{Label: "Auction bid", Amount: delta}}},
-		Users:   tgUsersForViewer(userID, []domain.User{domain.OfficialSystemUser()})}, nil
+	return &tg.PaymentsPaymentFormStarGift{
+		FormID: starGiftLifecycleFormID("auction", userID, state.Gift.ID, peer.Type, peer.ID, inv.BidAmount, state.Version),
+		Invoice: tg.Invoice{
+			Currency: "XTR",
+			Prices:   []tg.LabeledPrice{{Label: "Auction bid", Amount: delta}},
+		},
+	}, nil
 }
 
 func (r *Router) sendStarGiftAuctionBidForm(ctx context.Context, userID, formID int64, inv *tg.InputInvoiceStarGiftAuctionBid) (tg.PaymentsPaymentResultClass, error) {
@@ -199,6 +201,9 @@ func (r *Router) sendStarGiftAuctionBidForm(ctx context.Context, userID, formID 
 func (r *Router) starGiftAuctionBidTarget(ctx context.Context, userID int64, inv *tg.InputInvoiceStarGiftAuctionBid) (domain.StarGiftAuction, domain.Peer, int64, error) {
 	if inv == nil || r.deps.Gifts == nil || inv.GiftID <= 0 || inv.BidAmount <= 0 {
 		return domain.StarGiftAuction{}, domain.Peer{}, 0, starGiftInvalidErr()
+	}
+	if err := r.checkGiftWhitelist(ctx, userID, inv.GiftID); err != nil {
+		return domain.StarGiftAuction{}, domain.Peer{}, 0, err
 	}
 	state, err := r.deps.Gifts.AuctionState(ctx, userID, inv.GiftID, "", int(r.clock.Now().Unix()))
 	if err != nil {
