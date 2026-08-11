@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/jackc/pgx/v5"
@@ -951,6 +952,8 @@ func validStarGiftOwner(owner domain.Peer) bool {
 }
 
 func (s *StarGiftStore) IsWhitelisted(ctx context.Context, giftID, userID int64) (bool, error) {
+	userIDStr := strconv.FormatInt(userID, 10)
+
 	query := `
 		SELECT COALESCE(
 			(SELECT allowed_buyers @> jsonb_build_array($2::text) 
@@ -960,7 +963,7 @@ func (s *StarGiftStore) IsWhitelisted(ctx context.Context, giftID, userID int64)
 		);`
 
 	var allowed bool
-	err := s.db.QueryRow(ctx, query, giftID, userID).Scan(&allowed)
+	err := s.db.QueryRow(ctx, query, giftID, userIDStr).Scan(&allowed)
 	if err != nil {
 		return false, err
 	}
