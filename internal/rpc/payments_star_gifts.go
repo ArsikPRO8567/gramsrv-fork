@@ -1851,13 +1851,20 @@ func (r *Router) checkGiftWhitelist(ctx context.Context, userID, giftID int64) e
 	if r.deps.Gifts == nil {
 		return nil
 	}
+
+	type whitelistChecker interface {
+		IsWhitelisted(ctx context.Context, giftID, userID int64) (bool, error)
+	}
+
+	if checker, ok := r.deps.Gifts.(whitelistChecker); ok {
+		allowed, err := checker.IsWhitelisted(ctx, giftID, userID)
+		if err != nil {
+			return internalErr()
+		}
+		if !allowed {
+			return starGiftUsageLimitedErr()
+		}
+	}
 	
-	allowed, err := r.deps.Gifts.IsWhitelisted(ctx, giftID, userID)
-	if err != nil {
-		return internalErr()
-	}
-	if !allowed {
-		return starGiftUsageLimitedErr()
-	}
 	return nil
 }
