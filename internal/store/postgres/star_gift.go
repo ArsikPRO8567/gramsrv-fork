@@ -949,3 +949,23 @@ func validSavedStarGift(g domain.SavedStarGift) bool {
 func validStarGiftOwner(owner domain.Peer) bool {
 	return owner.ID != 0 && (owner.Type == domain.PeerTypeUser || owner.Type == domain.PeerTypeChannel)
 }
+
+func (s *StarGiftStore) IsWhitelisted(ctx context.Context, giftID, userID int64) (bool, error) {
+
+	query := `
+		SELECT NOT EXISTS (
+			SELECT 1 FROM gift_whitelists WHERE gift_id = $1
+		) OR EXISTS (
+			SELECT 1 FROM gift_whitelists 
+			WHERE gift_id = $1 
+			AND allowed_buyers @> jsonb_build_array($2::text)
+		);`
+
+	var allowed bool
+	err := s.db.QueryRow(ctx, query, giftID, userID).Scan(&allowed)
+	if err != nil {
+		return false, fmt.Errorf("check gift whitelist: %w", err)
+	}
+
+	return allowed, nil
+}
