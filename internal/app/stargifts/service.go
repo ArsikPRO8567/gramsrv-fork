@@ -8,10 +8,7 @@ import (
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
-	"errors"
-	"database/sql"
 	"fmt"
-	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -614,7 +611,7 @@ func validPurchaseForm(form domain.StarGiftPurchaseForm) bool {
 	return form.FormID == 0 && form.BuyerUserID > 0 && form.To.ID > 0 &&
 		(form.To.Type == domain.PeerTypeUser || form.To.Type == domain.PeerTypeChannel) &&
 		form.GiftID > 0 && form.RevisionID > 0 && form.ChargeStars > 0 && form.IssuedAt > 0 &&
-		form.ExpiresAt == form.IssuedAt+600
+		form.ExpiresAt == form.IssuedAt+600 && len([]rune(form.Message)) <= 128
 }
 
 func validatePurchaseFormIntent(form domain.StarGiftPurchaseForm, req domain.StarGiftPurchaseRequest) error {
@@ -703,18 +700,7 @@ func (s *Service) AuctionState(ctx context.Context, userID, giftID int64, slug s
 	if s == nil || s.lifecycle == nil {
 		return domain.StarGiftAuction{}, domain.ErrStarGiftAuctionUnavailable
 	}
-	
-	state, err := s.lifecycle.StarGiftAuctionState(ctx, userID, giftID, slug, now)
-	if err != nil {
-		return domain.StarGiftAuction{}, err
-	}
-
-	// ЛОГИКА СЖИГАНИЯ: номер следующей партии начнется с учетом емкости раундов
-	if state.CurrentRound > 1 {
-		state.LastGiftNum = int((state.CurrentRound - 1) * state.Gift.GiftsPerRound)
-	}
-	
-	return state, nil
+	return s.lifecycle.StarGiftAuctionState(ctx, userID, giftID, slug, now)
 }
 
 func (s *Service) ActiveAuctions(ctx context.Context, userID int64, now int) ([]domain.StarGiftAuction, error) {
@@ -735,23 +721,6 @@ func (s *Service) BidAuction(ctx context.Context, req domain.StarGiftAuctionBidR
 	if s == nil || s.lifecycle == nil {
 		return domain.StarGiftAuction{}, domain.StarsBalance{}, domain.ErrStarGiftAuctionUnavailable
 	}
-
-	// ПРОВЕРКА ВАЙТ-ЛИСТА
-	allowed, err := s.CheckWhitelistDB(ctx, req.UserID, req.GiftID)
-	if err != nil || !allowed {
-		return domain.StarGiftAuction{}, domain.StarsBalance{}, domain.ErrStarGiftInvalid
-	}
-
-	state, err := s.lifecycle.StarGiftAuctionState(ctx, req.UserID, req.GiftID, "", int(time.Now().Unix()))
-	if err != nil {
-		return domain.StarGiftAuction{}, domain.StarsBalance{}, err
-	}
-
-	// РАЗРЕШАЕМ СТАВКИ В PENDING:
-	if state.Finished {
-		return domain.StarGiftAuction{}, domain.StarsBalance{}, domain.ErrStarGiftAuctionUnavailable
-	}
-
 	return s.lifecycle.BidStarGiftAuction(ctx, req)
 }
 
@@ -1008,44 +977,4 @@ func randomPositiveInt64() (int64, error) {
 		id = 1
 	}
 	return id, nil
-}
-
-type databaseRow interface {
-	Scan(dest ...any) error
-}
-
-type databaseQuerier interface {
-	QueryRow(ctx context.Context, query string, args ...any) databaseRow
-}
-
-func (s *Service) CheckWhitelistDB(ctx context.Context, userID int64, giftID int64) (bool, error) {
-	pool := s.GetPool()
-	if pool == nil {
-		return true, nil
-	}
-
-	var exists bool
-	userIDStr := fmt.Sprintf("\"%d\"", userID)
-	query := `
-		SELECT EXISTS (
-			SELECT 1 FROM gift_whitelists 
-			WHERE gift_id = $1 AND allowed_buyers @> $2::jsonb
-		) OR NOT EXISTS (
-			SELECT 1 FROM gift_whitelists WHERE gift_id = $1
-		)`
-
-	err := pool.QueryRow(ctx, query, giftID, userIDStr).Scan(&exists)
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return false, err
-	}
-	return exists || err == sql.ErrNoRows, nil
-}
-
-func (s *Service) GetPool() databaseQuerier {
-	if p, ok := s.store.(interface {
-		Pool() databaseQuerier
-	}); ok {
-		return p.Pool()
-	}
-	return nil
 }
