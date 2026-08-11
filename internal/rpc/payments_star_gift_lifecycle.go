@@ -156,13 +156,11 @@ func (r *Router) starGiftAuctionBidPaymentForm(ctx context.Context, userID int64
 	if err != nil {
 		return nil, err
 	}
-	return &tg.PaymentsPaymentFormStarGift{
-		FormID: starGiftLifecycleFormID("auction", userID, state.Gift.ID, peer.Type, peer.ID, inv.BidAmount, state.Version),
-		Invoice: tg.Invoice{
-			Currency: "XTR",
-			Prices:   []tg.LabeledPrice{{Label: "Auction bid", Amount: delta}},
-		},
-	}, nil
+	return &tg.PaymentsPaymentFormStars{FormID: starGiftLifecycleFormID("auction", userID,
+		state.Gift.ID, peer.Type, peer.ID, inv.BidAmount, state.Version),
+		BotID: domain.OfficialSystemUserID, Title: state.Gift.Title, Description: "Collectible gift auction bid",
+		Invoice: tg.Invoice{Currency: "XTR", Prices: []tg.LabeledPrice{{Label: "Auction bid", Amount: delta}}},
+		Users:   tgUsersForViewer(userID, []domain.User{domain.OfficialSystemUser()})}, nil
 }
 
 func (r *Router) sendStarGiftAuctionBidForm(ctx context.Context, userID, formID int64, inv *tg.InputInvoiceStarGiftAuctionBid) (tg.PaymentsPaymentResultClass, error) {
@@ -202,22 +200,10 @@ func (r *Router) starGiftAuctionBidTarget(ctx context.Context, userID int64, inv
 	if inv == nil || r.deps.Gifts == nil || inv.GiftID <= 0 || inv.BidAmount <= 0 {
 		return domain.StarGiftAuction{}, domain.Peer{}, 0, starGiftInvalidErr()
 	}
-
-	// Проверка вайт-листа для аукциона
-	if checker, ok := r.deps.Gifts.(interface {
-		CheckWhitelistDB(context.Context, int64, int64) (bool, error)
-	}); ok {
-		allowed, _ := checker.CheckWhitelistDB(ctx, userID, inv.GiftID)
-		if !allowed {
-			return domain.StarGiftAuction{}, domain.Peer{}, 0, starGiftInvalidErr()
-		}
-	}
-
 	state, err := r.deps.Gifts.AuctionState(ctx, userID, inv.GiftID, "", int(r.clock.Now().Unix()))
 	if err != nil {
 		return domain.StarGiftAuction{}, domain.Peer{}, 0, starGiftLifecycleErr(err)
 	}
-
 	oldAmount := state.UserState.BidAmount
 	peer := domain.Peer{Type: domain.PeerTypeUser, ID: userID}
 	if inv.UpdateBid {
@@ -405,17 +391,14 @@ func (r *Router) onPaymentsCheckCanSendGift(ctx context.Context, req *tg.Payment
 	if !found {
 		return nil, starGiftInvalidErr()
 	}
-
-	if gift.Auction {
-		return &tg.PaymentsCheckCanSendGiftResultOk{}, nil
-	}
-
 	now := int(r.clock.Now().Unix())
 	switch {
-	case gift.SoldOut || (gift.Limited && gift.AvailabilityRemains <= 0):
+	case gift.SoldOut || gift.Limited && gift.AvailabilityRemains <= 0:
 		return &tg.PaymentsCheckCanSendGiftResultFail{Reason: tg.TextWithEntities{Text: "This gift is sold out."}}, nil
 	case gift.LockedUntilDate > now:
 		return &tg.PaymentsCheckCanSendGiftResultFail{Reason: tg.TextWithEntities{Text: "This gift is not available yet."}}, nil
+	case gift.Auction:
+		return &tg.PaymentsCheckCanSendGiftResultFail{Reason: tg.TextWithEntities{Text: "This gift is distributed through an auction."}}, nil
 	default:
 		return &tg.PaymentsCheckCanSendGiftResultOk{}, nil
 	}
@@ -504,7 +487,7 @@ func (r *Router) onPaymentsGetResaleStarGifts(ctx context.Context, req *tg.Payme
 		out.SetNextOffset(page.NextOffset)
 	}
 	viewerID, _, _ := r.currentUserID(ctx)
-	out.Users = r.tgUsersForViewer(viewerID, r.domainUsersForIDs(ctx, viewerID, uniqueInt64(userIDs)))
+	out.Users = tgUsersForViewer(viewerID, r.domainUsersForIDs(ctx, viewerID, uniqueInt64(userIDs)))
 	out.Chats = r.tgChatsForChannelIDs(ctx, viewerID, uniqueInt64(channelIDs))
 	if attributesHash, requested := req.GetAttributesHash(); requested {
 		preview, found, previewErr := r.deps.Gifts.CollectiblePreview(ctx, req.GiftID)
@@ -828,7 +811,7 @@ func (r *Router) onPaymentsGetStarGiftActiveAuctions(ctx context.Context, req *t
 			State: tgStarGiftAuctionState(state), UserState: tgStarGiftAuctionUserState(state.UserState)})
 		userIDs = append(userIDs, state.TopBidders...)
 	}
-	out.Users = r.tgUsersForViewer(userID, r.domainUsersForIDs(ctx, userID, uniqueInt64(userIDs)))
+	out.Users = tgUsersForViewer(userID, r.domainUsersForIDs(ctx, userID, uniqueInt64(userIDs)))
 	return out, nil
 }
 
@@ -863,7 +846,7 @@ func (r *Router) onPaymentsGetStarGiftAuctionAcquiredGifts(ctx context.Context, 
 			channelIDs = append(channelIDs, item.Peer.ID)
 		}
 	}
-	out.Users = r.tgUsersForViewer(userID, r.domainUsersForIDs(ctx, userID, uniqueInt64(userIDs)))
+	out.Users = tgUsersForViewer(userID, r.domainUsersForIDs(ctx, userID, uniqueInt64(userIDs)))
 	out.Chats = r.tgChatsForChannelIDs(ctx, userID, uniqueInt64(channelIDs))
 	return out, nil
 }
@@ -927,7 +910,7 @@ func (r *Router) auctionUsers(ctx context.Context, viewerID int64, state domain.
 	if state.UserState.BidPeer.Type == domain.PeerTypeUser {
 		ids = append(ids, state.UserState.BidPeer.ID)
 	}
-	return r.tgUsersForViewer(viewerID, r.domainUsersForIDs(ctx, viewerID, uniqueInt64(ids)))
+	return tgUsersForViewer(viewerID, r.domainUsersForIDs(ctx, viewerID, uniqueInt64(ids)))
 }
 
 func (r *Router) starGiftSendUpdates(ctx context.Context, viewerID int64, send domain.SendPrivateTextResult) *tg.Updates {
