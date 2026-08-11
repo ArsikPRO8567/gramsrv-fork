@@ -159,11 +159,6 @@ func (r *Router) starGiftAuctionBidPaymentForm(ctx context.Context, userID int64
 	if err := r.checkGiftWhitelist(ctx, userID, inv.GiftID); err != nil {
 		return nil, err
 	}
-
-	state, peer, delta, err := r.starGiftAuctionBidTarget(ctx, userID, inv)
-	if err != nil {
-		return nil, err
-	}
 	return &tg.PaymentsPaymentFormStarGift{
 		FormID: starGiftLifecycleFormID("auction", userID, state.Gift.ID, peer.Type, peer.ID, inv.BidAmount, state.Version),
 		Invoice: tg.Invoice{
@@ -179,11 +174,6 @@ func (r *Router) sendStarGiftAuctionBidForm(ctx context.Context, userID, formID 
 		return nil, err
 	}
 	if err := r.checkGiftWhitelist(ctx, userID, inv.GiftID); err != nil {
-		return nil, err
-	}
-
-	state, peer, _, err := r.starGiftAuctionBidTarget(ctx, userID, inv)
-	if err != nil {
 		return nil, err
 	}
 	wantFormID := starGiftLifecycleFormID("auction", userID,
