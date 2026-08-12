@@ -993,6 +993,7 @@ func (r *Router) sendStarGiftToChannel(ctx context.Context, senderID, channelID 
 			Sticker:           &sticker,
 			Message:           message,
 			FromUserID:        senderID,
+			To:                domain.Peer{Type: domain.PeerTypeChannel, ID: channelID},
 			NameHidden:        hideName,
 			Saved:             true,
 			CanUpgrade:        gift.UpgradeStars > 0,
@@ -1054,6 +1055,7 @@ func (r *Router) deliverStarGift(ctx context.Context, senderID, recipientID int6
 				Message:            message,
 				FromUserID:         senderID,
 				PeerUserID:         recipientID,
+				To:                 domain.Peer{Type: domain.PeerTypeUser, ID: recipientID},
 				NameHidden:         hideName,
 				Saved:              true,
 				CanUpgrade:         gift.UpgradeStars > 0,
@@ -1651,7 +1653,8 @@ func tgMessageActionStarGift(in *domain.MessageStarGiftAction) tg.MessageActionC
 	if in.Message != "" {
 		action.SetMessage(tg.TextWithEntities{Text: in.Message})
 	}
-	if in.FromUserID != 0 && !in.NameHidden {
+	isSelf := in.FromUserID != 0 && in.PeerUserID != 0 && in.FromUserID == in.PeerUserID
+	if in.FromUserID != 0 && !in.NameHidden && !isSelf {
 		action.SetFromID(&tg.PeerUser{UserID: in.FromUserID})
 	}
 	if in.PeerUserID != 0 {
