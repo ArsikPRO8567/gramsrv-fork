@@ -68,6 +68,7 @@ type StarGiftStore interface {
 	ReorderCollections(ctx context.Context, owner domain.Peer, collectionIDs []int) error
 	SetPinned(ctx context.Context, owner domain.Peer, savedGiftIDs []int64) error
 	IsWhitelisted(ctx context.Context, giftID, userID int64) (bool, error)
+    BurnAuctionGifts(ctx context.Context, giftID int64, count int) error
 }
 
 // StarGiftUpgradeStore owns the aggregate transaction spanning Stars, the
