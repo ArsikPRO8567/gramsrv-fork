@@ -993,10 +993,6 @@ func (r *Router) sendStarGiftToChannel(ctx context.Context, senderID, channelID 
 			Sticker:           &sticker,
 			Message:           message,
 			FromUserID:        senderID,
-			To:                domain.Peer{Type: domain.PeerTypeChannel, ID: channelID},
-			Limited:           gift.Limited,
-			AvailabilityTotal: gift.AvailabilityTotal,
-			GiftNum:           gift.GiftNum,
 			NameHidden:        hideName,
 			Saved:             true,
 			CanUpgrade:        gift.UpgradeStars > 0,
@@ -1058,11 +1054,6 @@ func (r *Router) deliverStarGift(ctx context.Context, senderID, recipientID int6
 				Message:            message,
 				FromUserID:         senderID,
 				PeerUserID:         recipientID,
-				To:                 domain.Peer{Type: domain.PeerTypeUser, ID: recipientID},
-				Limited:            gift.Limited,
-				AvailabilityTotal:  gift.AvailabilityTotal,
-				AvailabilityRemains: gift.AvailabilityRemains,
-				GiftNum:            gift.GiftNum,
 				NameHidden:         hideName,
 				Saved:              true,
 				CanUpgrade:         gift.UpgradeStars > 0,
@@ -1606,18 +1597,11 @@ func tgMessageActionStarGift(in *domain.MessageStarGiftAction) tg.MessageActionC
 	if in == nil {
 		return &tg.MessageActionEmpty{}
 	}
-	
 	gift := &tg.StarGift{
 		ID:           in.GiftID,
 		Stars:        in.Stars,
-		Limited:      in.Limited,
+		ConvertStars: in.ConvertStars,
 	}
-	
-	if in.Limited {
-		gift.SetAvailabilityTotal(in.AvailabilityTotal)
-		gift.SetAvailabilityRemains(in.AvailabilityRemains)
-	}
-
 	if in.Sticker != nil {
 		gift.Sticker = tgDocument(*in.Sticker)
 	} else {
@@ -1629,7 +1613,6 @@ func tgMessageActionStarGift(in *domain.MessageStarGiftAction) tg.MessageActionC
 	if in.UpgradePriceStars > 0 {
 		gift.SetUpgradeStars(in.UpgradePriceStars)
 	}
-
 	action := &tg.MessageActionStarGift{Gift: gift}
 	if in.NameHidden {
 		action.NameHidden = true
@@ -1640,12 +1623,10 @@ func tgMessageActionStarGift(in *domain.MessageStarGiftAction) tg.MessageActionC
 	if in.Converted {
 		action.Converted = true
 	}
-	
 	action.CanUpgrade = in.CanUpgrade
 	action.PrepaidUpgrade = in.PrepaidUpgrade
 	action.UpgradeSeparate = in.UpgradeSeparate
 	action.AuctionAcquired = in.AuctionAcquired
-	
 	if in.UpgradeStars > 0 {
 		action.SetUpgradeStars(in.UpgradeStars)
 	}
@@ -1658,29 +1639,21 @@ func tgMessageActionStarGift(in *domain.MessageStarGiftAction) tg.MessageActionC
 	if in.GiftMsgID > 0 {
 		action.SetGiftMsgID(in.GiftMsgID)
 	}
-	
 	if in.GiftNum > 0 {
 		action.SetGiftNum(in.GiftNum)
 	}
-
-	if in.PeerUserID != 0 {
-		action.SetToID(&tg.PeerUser{UserID: in.PeerUserID})
-	} else if to := tgPeer(in.To); to != nil {
+	if to := tgPeer(in.To); to != nil {
 		action.SetToID(to)
 	}
-
 	if in.ConvertStars > 0 {
 		action.SetConvertStars(in.ConvertStars)
 	}
 	if in.Message != "" {
 		action.SetMessage(tg.TextWithEntities{Text: in.Message})
 	}
-
-	isSelf := in.FromUserID != 0 && in.PeerUserID != 0 && in.FromUserID == in.PeerUserID
-	if in.FromUserID != 0 && !in.NameHidden && !isSelf {
+	if in.FromUserID != 0 && !in.NameHidden {
 		action.SetFromID(&tg.PeerUser{UserID: in.FromUserID})
 	}
-
 	if in.PeerUserID != 0 {
 		action.SetPeer(&tg.PeerUser{UserID: in.PeerUserID})
 	} else if in.PeerChannelID != 0 {

@@ -409,8 +409,6 @@ func (r *Router) onPaymentsCheckCanSendGift(ctx context.Context, req *tg.Payment
 	case gift.LockedUntilDate > now:
 		return &tg.PaymentsCheckCanSendGiftResultFail{Reason: tg.TextWithEntities{Text: "This gift is not available yet."}}, nil
 	case gift.Auction:
-		return &tg.PaymentsCheckCanSendGiftResultFail{Reason: tg.TextWithEntities{Text: "This gift is distributed through an auction."}}, nil
-	default:
 		return &tg.PaymentsCheckCanSendGiftResultOk{}, nil
 	}
 }
