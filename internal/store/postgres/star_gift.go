@@ -970,3 +970,26 @@ func (s *StarGiftStore) IsWhitelisted(ctx context.Context, giftID, userID int64)
 
 	return allowed, nil
 }
+
+func (s *StarGiftStore) BurnAuctionGifts(ctx context.Context, giftID int64, count int) error {
+	if count <= 0 {
+		return nil
+	}
+	
+	return withTx(ctx, s.db, "burn auction gifts", func(tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `
+			UPDATE star_gift_catalog 
+			SET availability_remains = GREATEST(0, availability_remains - $2) 
+			WHERE gift_id = $1`, giftID, count)
+		if err != nil {
+			return err
+		}
+
+		_, err = tx.Exec(ctx, `
+			UPDATE star_gift_auction_state 
+			SET last_gift_num = last_gift_num + $2 
+			WHERE gift_id = $1`, giftID, count)
+		return err
+	})
+}
+
