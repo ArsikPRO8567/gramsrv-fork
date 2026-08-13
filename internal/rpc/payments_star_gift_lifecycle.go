@@ -407,10 +407,14 @@ func (r *Router) onPaymentsCheckCanSendGift(ctx context.Context, req *tg.Payment
 	case gift.SoldOut || gift.Limited && gift.AvailabilityRemains <= 0:
 		return &tg.PaymentsCheckCanSendGiftResultFail{Reason: tg.TextWithEntities{Text: "This gift is sold out."}}, nil
 	case gift.LockedUntilDate > now:
+		if gift.Auction {
+			return &tg.PaymentsCheckCanSendGiftResultOk{}, nil
+		}
 		return &tg.PaymentsCheckCanSendGiftResultFail{Reason: tg.TextWithEntities{Text: "This gift is not available yet."}}, nil
 	case gift.Auction:
 		return &tg.PaymentsCheckCanSendGiftResultOk{}, nil
 	}
+	return &tg.PaymentsCheckCanSendGiftResultOk{}, nil
 }
 
 func (r *Router) onPaymentsGetUniqueStarGiftValueInfo(ctx context.Context, req *tg.PaymentsGetUniqueStarGiftValueInfoRequest) (*tg.PaymentsUniqueStarGiftValueInfo, error) {
