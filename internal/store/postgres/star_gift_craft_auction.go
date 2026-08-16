@@ -732,78 +732,6 @@ updated_at=now() WHERE gift_id=$1`, giftID, giftsLeft); err != nil {
 	})
 }
 
-// BidStarGiftAuction — разрешаем делать ставки в предстоящие аукционы.
-func (s *StarGiftLifecycleStore) BidStarGiftAuction(ctx context.Context, req domain.StarGiftAuctionBidRequest) (domain.StarGiftAuction, domain.StarsBalance, error) {
-	if s == nil || s.db == nil || req.UserID <= 0 || req.GiftID <= 0 || !validLifecyclePeer(req.Peer) ||
-		req.BidAmount <= 0 || req.FormID == 0 || req.Date <= 0 || len([]rune(req.Message)) > 128 {
-		return domain.StarGiftAuction{}, domain.StarsBalance{}, domain.ErrStarGiftAuctionUnavailable
-	}
-	if _, err := s.ensureStarGiftAuction(ctx, req.GiftID, "", req.Date); err != nil {
-		return domain.StarGiftAuction{}, domain.StarsBalance{}, err
-	}
-	if err := s.settleStarGiftAuction(ctx, req.GiftID, req.Date); err != nil {
-		return domain.StarGiftAuction{}, domain.StarsBalance{}, err
-	}
-	if balance, found, err := s.loadAuctionBidReplay(ctx, req.UserID, req.FormID, req.GiftID); err != nil || found {
-		if err != nil { return domain.StarGiftAuction{}, domain.StarsBalance{}, err }
-		state, stateErr := s.loadStarGiftAuction(ctx, req.UserID, req.GiftID)
-		return state, balance, stateErr
-	}
-	var balance domain.StarsBalance
-	err := withTx(ctx, s.db, "bid star gift auction", func(tx pgx.Tx) error {
-		var startDate, endDate int
-		var minimum int64
-		var status string
-		if err := tx.QueryRow(ctx, `SELECT start_date,end_date,min_bid_amount,status FROM star_gift_auctions WHERE gift_id=$1 FOR UPDATE`, req.GiftID).
-			Scan(&startDate, &endDate, &minimum, &status); err != nil {
-			return err
-		}
-		
-		// ИСПРАВЛЕНИЕ: Разрешаем ставки, если статус 'pending' (предстоящий) ИЛИ 'active'.
-		// Убираем жесткую проверку req.Date < startDate.
-		if (status != "active" && status != "pending") || req.Date >= endDate || req.BidAmount < minimum {
-			return domain.ErrStarGiftAuctionUnavailable
-		}
-		
-		var oldAmount int64
-		var oldActive bool
-		err := tx.QueryRow(ctx, `SELECT amount,active FROM star_gift_auction_bids WHERE gift_id=$1 AND bidder_user_id=$2 FOR UPDATE`, req.GiftID, req.UserID).Scan(&oldAmount, &oldActive)
-		if err != nil && !errors.Is(err, pgx.ErrNoRows) { return err }
-		if oldActive && (!req.UpdateBid || req.BidAmount <= oldAmount) || !oldActive && req.UpdateBid {
-			return domain.ErrStarGiftAuctionUnavailable
-		}
-		reserved := int64(0)
-		if oldActive { reserved = oldAmount }
-		delta := req.BidAmount - reserved
-		balance, err = s.debitLifecycleAmount(ctx, tx, req.UserID,
-			domain.StarGiftAmount{Currency: domain.StarGiftCurrencyStars, Amount: delta}, domain.StarsReasonGiftAuction,
-			req.Peer, req.Date, "Star gift auction bid")
-		if err != nil { return err }
-		
-		if _, err := tx.Exec(ctx, `INSERT INTO star_gift_auction_bids(gift_id,bidder_user_id,recipient_peer_type,recipient_peer_id,
-amount,bid_date,hide_name,message) VALUES($1,$2,$3,$4,$5,$6,$7,$8)
-ON CONFLICT(gift_id,bidder_user_id) DO UPDATE SET
-recipient_peer_type=CASE WHEN star_gift_auction_bids.active THEN star_gift_auction_bids.recipient_peer_type ELSE EXCLUDED.recipient_peer_type END,
-recipient_peer_id=CASE WHEN star_gift_auction_bids.active THEN star_gift_auction_bids.recipient_peer_id ELSE EXCLUDED.recipient_peer_id END,
-amount=EXCLUDED.amount,bid_date=EXCLUDED.bid_date,
-hide_name=CASE WHEN star_gift_auction_bids.active THEN star_gift_auction_bids.hide_name ELSE EXCLUDED.hide_name END,
-message=CASE WHEN star_gift_auction_bids.active THEN star_gift_auction_bids.message ELSE EXCLUDED.message END,
-returned=false,active=true,version=star_gift_auction_bids.version+1`,
-			req.GiftID, req.UserID, string(req.Peer.Type), req.Peer.ID, req.BidAmount, req.Date, req.HideName, req.Message); err != nil {
-			return err
-		}
-		if _, err := tx.Exec(ctx, `INSERT INTO star_gift_auction_bid_payments(user_id,form_id,gift_id,bid_amount,balance_after,created_at)
-VALUES($1,$2,$3,$4,$5,$6)`, req.UserID, req.FormID, req.GiftID, req.BidAmount, balance.Balance, req.Date); err != nil {
-			return err
-		}
-		_, err = tx.Exec(ctx, `UPDATE star_gift_auctions SET version=version+1,updated_at=now() WHERE gift_id=$1`, req.GiftID)
-		return err
-	})
-	if err != nil { return domain.StarGiftAuction{}, domain.StarsBalance{}, err }
-	state, err := s.loadStarGiftAuction(ctx, req.UserID, req.GiftID)
-	return state, balance, err
-}
-
 func (s *StarGiftLifecycleStore) refundUnreachableAuctionBids(ctx context.Context, tx pgx.Tx, giftID int64, giftsLeft int, all bool, date int) error {
 	offset := giftsLeft
 	if all {
@@ -1048,9 +976,7 @@ func (s *StarGiftLifecycleStore) BidStarGiftAuction(ctx context.Context, req dom
 		return domain.StarGiftAuction{}, domain.StarsBalance{}, err
 	}
 	if balance, found, err := s.loadAuctionBidReplay(ctx, req.UserID, req.FormID, req.GiftID); err != nil || found {
-		if err != nil {
-			return domain.StarGiftAuction{}, domain.StarsBalance{}, err
-		}
+		if err != nil { return domain.StarGiftAuction{}, domain.StarsBalance{}, err }
 		state, stateErr := s.loadStarGiftAuction(ctx, req.UserID, req.GiftID)
 		return state, balance, stateErr
 	}
@@ -1063,29 +989,28 @@ func (s *StarGiftLifecycleStore) BidStarGiftAuction(ctx context.Context, req dom
 			Scan(&startDate, &endDate, &minimum, &status); err != nil {
 			return err
 		}
-		if status != "active" || req.Date < startDate || req.Date >= endDate || req.BidAmount < minimum {
+		
+		// ИСПРАВЛЕНИЕ: Разрешаем ставки, если статус 'pending' (предстоящий) ИЛИ 'active'.
+		// Убираем жесткую проверку req.Date < startDate.
+		if (status != "active" && status != "pending") || req.Date >= endDate || req.BidAmount < minimum {
 			return domain.ErrStarGiftAuctionUnavailable
 		}
+		
 		var oldAmount int64
 		var oldActive bool
 		err := tx.QueryRow(ctx, `SELECT amount,active FROM star_gift_auction_bids WHERE gift_id=$1 AND bidder_user_id=$2 FOR UPDATE`, req.GiftID, req.UserID).Scan(&oldAmount, &oldActive)
-		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
-			return err
-		}
+		if err != nil && !errors.Is(err, pgx.ErrNoRows) { return err }
 		if oldActive && (!req.UpdateBid || req.BidAmount <= oldAmount) || !oldActive && req.UpdateBid {
 			return domain.ErrStarGiftAuctionUnavailable
 		}
 		reserved := int64(0)
-		if oldActive {
-			reserved = oldAmount
-		}
+		if oldActive { reserved = oldAmount }
 		delta := req.BidAmount - reserved
 		balance, err = s.debitLifecycleAmount(ctx, tx, req.UserID,
 			domain.StarGiftAmount{Currency: domain.StarGiftCurrencyStars, Amount: delta}, domain.StarsReasonGiftAuction,
 			req.Peer, req.Date, "Star gift auction bid")
-		if err != nil {
-			return err
-		}
+		if err != nil { return err }
+		
 		if _, err := tx.Exec(ctx, `INSERT INTO star_gift_auction_bids(gift_id,bidder_user_id,recipient_peer_type,recipient_peer_id,
 amount,bid_date,hide_name,message) VALUES($1,$2,$3,$4,$5,$6,$7,$8)
 ON CONFLICT(gift_id,bidder_user_id) DO UPDATE SET
@@ -1105,18 +1030,7 @@ VALUES($1,$2,$3,$4,$5,$6)`, req.UserID, req.FormID, req.GiftID, req.BidAmount, b
 		_, err = tx.Exec(ctx, `UPDATE star_gift_auctions SET version=version+1,updated_at=now() WHERE gift_id=$1`, req.GiftID)
 		return err
 	})
-	if err != nil {
-		if isUniqueViolation(err) {
-			if replayBalance, found, replayErr := s.loadAuctionBidReplay(ctx, req.UserID, req.FormID, req.GiftID); replayErr != nil || found {
-				state, stateErr := s.loadStarGiftAuction(ctx, req.UserID, req.GiftID)
-				if replayErr != nil {
-					return domain.StarGiftAuction{}, domain.StarsBalance{}, replayErr
-				}
-				return state, replayBalance, stateErr
-			}
-		}
-		return domain.StarGiftAuction{}, domain.StarsBalance{}, err
-	}
+	if err != nil { return domain.StarGiftAuction{}, domain.StarsBalance{}, err }
 	state, err := s.loadStarGiftAuction(ctx, req.UserID, req.GiftID)
 	return state, balance, err
 }
