@@ -156,7 +156,6 @@ func (r *Router) starGiftAuctionBidPaymentForm(ctx context.Context, userID int64
 		return nil, starGiftInvalidErr()
 	}
 
-	// hidden & whitelist check
 	allowed, hidden, _ := r.getGiftWhitelistData(ctx, inv.GiftID, userID)
 	
 	if hidden && !allowed {
@@ -181,10 +180,10 @@ func (r *Router) starGiftAuctionBidPaymentForm(ctx context.Context, userID int64
 }
 
 func (r *Router) sendStarGiftAuctionBidForm(ctx context.Context, userID, formID int64, inv *tg.InputInvoiceStarGiftAuctionBid) (tg.PaymentsPaymentResultClass, error) {
-	state, peer, _, err := r.starGiftAuctionBidTarget(ctx, userID, inv)
-	if err != nil {
-		return nil, err
+	if inv == nil {
+		return nil, starGiftInvalidErr()
 	}
+
 	allowed, hidden, _ := r.getGiftWhitelistData(ctx, inv.GiftID, userID)
 	
 	if hidden && !allowed {
@@ -194,35 +193,43 @@ func (r *Router) sendStarGiftAuctionBidForm(ctx context.Context, userID, formID 
 		return nil, starGiftUsageLimitedErr()
 	}
 
-	state, peer, _, err = r.starGiftAuctionBidTarget(ctx, userID, inv)
+	state, peer, _, err := r.starGiftAuctionBidTarget(ctx, userID, inv)
 	if err != nil {
 		return nil, err
 	}
+
 	wantFormID := starGiftLifecycleFormID("auction", userID,
 		state.Gift.ID, peer.Type, peer.ID, inv.BidAmount, state.Version)
 	if formID == 0 || formID != wantFormID {
 		return nil, starsFormAmountMismatchErr()
 	}
+
 	if r.deps.Stars != nil {
 		if _, err := r.deps.Stars.GetBalance(ctx, userID); err != nil {
 			return nil, starsErr(err)
 		}
 	}
+
 	message := ""
 	if text, ok := inv.GetMessage(); ok {
 		message = clampGiftMessage(text.Text)
 	}
-	newState, balance, err := r.deps.Gifts.BidAuction(ctx, domain.StarGiftAuctionBidRequest{UserID: userID,
-		GiftID: inv.GiftID, Peer: peer, BidAmount: inv.BidAmount, HideName: inv.HideName, Message: message,
-		UpdateBid: inv.UpdateBid, FormID: formID, Date: int(r.clock.Now().Unix())})
+
+	newState, balance, err := r.deps.Gifts.BidAuction(ctx, domain.StarGiftAuctionBidRequest{
+		UserID: userID, GiftID: inv.GiftID, Peer: peer, BidAmount: inv.BidAmount, 
+		HideName: inv.HideName, Message: message, UpdateBid: inv.UpdateBid, 
+		FormID: formID, Date: int(r.clock.Now().Unix()),
+	})
 	if err != nil {
 		return nil, starGiftLifecycleErr(err)
 	}
+
 	updates := emptyGiftUpdates(r.clock.Now().Unix())
 	updates.Updates = append(updates.Updates,
 		&tg.UpdateStarGiftAuctionState{GiftID: inv.GiftID, State: tgStarGiftAuctionState(newState)},
 		&tg.UpdateStarGiftAuctionUserState{GiftID: inv.GiftID, UserState: tgStarGiftAuctionUserState(newState.UserState)})
 	appendStarGiftBalanceUpdate(updates, domain.StarGiftCurrencyStars, balance.Balance)
+
 	return &tg.PaymentsPaymentResult{Updates: updates}, nil
 }
 
