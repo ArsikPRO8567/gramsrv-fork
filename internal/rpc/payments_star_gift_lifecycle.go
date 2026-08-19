@@ -152,13 +152,25 @@ func (r *Router) starGiftResaleTarget(ctx context.Context, userID int64, inv *tg
 }
 
 func (r *Router) starGiftAuctionBidPaymentForm(ctx context.Context, userID int64, inv *tg.InputInvoiceStarGiftAuctionBid) (tg.PaymentsPaymentFormClass, error) {
+	if inv == nil {
+		return nil, starGiftInvalidErr()
+	}
+
+	// hidden & whitelist check
+	allowed, hidden, _ := r.getGiftWhitelistData(ctx, inv.GiftID, userID)
+	
+	if hidden && !allowed {
+		return nil, starGiftInvalidErr()
+	}
+	if !allowed {
+		return nil, starGiftUsageLimitedErr()
+	}
+
 	state, peer, delta, err := r.starGiftAuctionBidTarget(ctx, userID, inv)
 	if err != nil {
 		return nil, err
 	}
-	if err := r.checkGiftWhitelist(ctx, userID, inv.GiftID); err != nil {
-		return nil, err
-	}
+	
 	return &tg.PaymentsPaymentFormStarGift{
 		FormID: starGiftLifecycleFormID("auction", userID, state.Gift.ID, peer.Type, peer.ID, inv.BidAmount, state.Version),
 		Invoice: tg.Invoice{
@@ -173,7 +185,17 @@ func (r *Router) sendStarGiftAuctionBidForm(ctx context.Context, userID, formID 
 	if err != nil {
 		return nil, err
 	}
-	if err := r.checkGiftWhitelist(ctx, userID, inv.GiftID); err != nil {
+	allowed, hidden, _ := r.getGiftWhitelistData(ctx, inv.GiftID, userID)
+	
+	if hidden && !allowed {
+		return nil, starGiftInvalidErr()
+	}
+	if !allowed {
+		return nil, starGiftUsageLimitedErr()
+	}
+
+	state, peer, _, err := r.starGiftAuctionBidTarget(ctx, userID, inv)
+	if err != nil {
 		return nil, err
 	}
 	wantFormID := starGiftLifecycleFormID("auction", userID,
@@ -398,13 +420,12 @@ func (r *Router) onPaymentsCheckCanSendGift(ctx context.Context, req *tg.Payment
 	userID, _, _ := r.currentUserID(ctx)
 	allowed, hidden, _, err := r.deps.Gifts.GetWhitelistInfo(ctx, req.GiftID, userID)
 	
-	if err == nil && hidden && !allowed {
+	if hidden && !allowed {
 		return nil, starGiftInvalidErr()
 	}
-	
-	if err == nil && !allowed {
+	if !allowed {
 		return &tg.PaymentsCheckCanSendGiftResultFail{
-			Reason: tg.TextWithEntities{Text: "Вы не включены в белый список для этого подарка."},
+			Reason: tg.TextWithEntities{Text: "This gift in white-listed."},
 		}, nil
 	}
 	gift, found, err := r.deps.Gifts.GiftByID(ctx, req.GiftID)
@@ -791,11 +812,11 @@ func (r *Router) onPaymentsGetStarGiftAuctionState(ctx context.Context, req *tg.
 	var giftID int64
 	var slug string
 	if giftID > 0 {
-		allowed, hidden, _, err := r.deps.Gifts.GetWhitelistInfo(ctx, giftID, userID)
-		if err == nil && hidden && !allowed {
-			return nil, starGiftInvalidErr() // Скрываем существование аукциона
+		allowed, hidden, _, _ := r.getGiftWhitelistData(ctx, giftID, userID)
+		if hidden && !allowed {
+			return nil, starGiftInvalidErr()
 		}
-		if err == nil && !allowed {
+		if !allowed {
 			return nil, starGiftUsageLimitedErr()
 		}
 	}
