@@ -395,6 +395,18 @@ func (r *Router) onPaymentsCheckCanSendGift(ctx context.Context, req *tg.Payment
 	if req == nil || req.GiftID <= 0 || r.deps.Gifts == nil {
 		return nil, starGiftInvalidErr()
 	}
+	userID, _, _ := r.currentUserID(ctx)
+	allowed, hidden, _, err := r.deps.Gifts.GetWhitelistInfo(ctx, req.GiftID, userID)
+	
+	if err == nil && hidden && !allowed {
+		return nil, starGiftInvalidErr()
+	}
+	
+	if err == nil && !allowed {
+		return &tg.PaymentsCheckCanSendGiftResultFail{
+			Reason: tg.TextWithEntities{Text: "Вы не включены в белый список для этого подарка."},
+		}, nil
+	}
 	gift, found, err := r.deps.Gifts.GiftByID(ctx, req.GiftID)
 	if err != nil {
 		return nil, internalErr()
@@ -410,7 +422,7 @@ func (r *Router) onPaymentsCheckCanSendGift(ctx context.Context, req *tg.Payment
 		if gift.Auction {
 			return &tg.PaymentsCheckCanSendGiftResultOk{}, nil
 		}
-		return &tg.PaymentsCheckCanSendGiftResultFail{Reason: tg.TextWithEntities{Text: "This gift is not available yet."}}, nil
+		return &tg.PaymentsCheckCanSendGiftResultFail{Reason: tg.TextWithEntities{Text: "Сейчас этот подарок недоступен."}}, nil
 	case gift.Auction:
 		return &tg.PaymentsCheckCanSendGiftResultOk{}, nil
 	}
@@ -778,6 +790,15 @@ func (r *Router) onPaymentsGetStarGiftAuctionState(ctx context.Context, req *tg.
 	}
 	var giftID int64
 	var slug string
+	if giftID > 0 {
+		allowed, hidden, _, err := r.deps.Gifts.GetWhitelistInfo(ctx, giftID, userID)
+		if err == nil && hidden && !allowed {
+			return nil, starGiftInvalidErr() // Скрываем существование аукциона
+		}
+		if err == nil && !allowed {
+			return nil, starGiftUsageLimitedErr()
+		}
+	}
 	switch value := req.Auction.(type) {
 	case *tg.InputStarGiftAuction:
 		if value != nil {

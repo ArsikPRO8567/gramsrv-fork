@@ -339,29 +339,35 @@ func (r *Router) onPaymentsGetStarGifts(ctx context.Context, hash int) (tg.Payme
 	if r.deps.Gifts == nil {
 		return &tg.PaymentsStarGifts{Gifts: []tg.StarGiftClass{}, Chats: []tg.ChatClass{}, Users: []tg.UserClass{}}, nil
 	}
-	catalogHash, err := r.deps.Gifts.CatalogHash(ctx)
-	if err != nil {
-		return nil, internalErr()
-	}
+	
+	userID, _, _ := r.currentUserID(ctx)
 	catalog, err := r.deps.Gifts.Catalog(ctx)
-	if err != nil {
-		return nil, internalErr()
+	if err != nil { return nil, internalErr() }
+
+	// hide gifts
+	filteredCatalog := make([]domain.StarGift, 0, len(catalog))
+	for _, g := range catalog {
+		allowed, hidden, _, err := r.deps.Gifts.GetWhitelistInfo(ctx, g.ID, userID)
+		if err != nil {
+			allowed, hidden = true, false 
+		}
+		
+		if hidden && !allowed {
+			continue
+		}
+		filteredCatalog = append(filteredCatalog, g)
 	}
 
-	sort.SliceStable(catalog, func(i, j int) bool {
-		soldI := catalog[i].SoldOut || (catalog[i].Limited && catalog[i].AvailabilityRemains <= 0)
-		soldJ := catalog[j].SoldOut || (catalog[j].Limited && catalog[j].AvailabilityRemains <= 0)
-		
-		if soldI != soldJ {
-			return !soldI
-		}
-		return catalog[i].ID > catalog[j].ID
+	sort.SliceStable(filteredCatalog, func(i, j int) bool {
+		soldI := filteredCatalog[i].SoldOut || (filteredCatalog[i].Limited && filteredCatalog[i].AvailabilityRemains <= 0)
+		soldJ := filteredCatalog[j].SoldOut || (filteredCatalog[j].Limited && filteredCatalog[j].AvailabilityRemains <= 0)
+		if soldI != soldJ { return !soldI }
+		return filteredCatalog[i].ID > filteredCatalog[j].ID
 	})
 
-	_ = catalogHash
 	return &tg.PaymentsStarGifts{
-		Hash:  catalogHash,
-		Gifts: tgStarGifts(catalog),
+		Hash:  domain.StarGiftCatalogHash(filteredCatalog),
+		Gifts: tgStarGifts(filteredCatalog),
 		Chats: []tg.ChatClass{},
 		Users: []tg.UserClass{},
 	}, nil
@@ -993,6 +999,7 @@ func (r *Router) sendStarGiftToChannel(ctx context.Context, senderID, channelID 
 			Sticker:           &sticker,
 			Message:           message,
 			FromUserID:        senderID,
+			To:                domain.Peer{Type: domain.PeerTypeChannel, ID: channelID},
 			NameHidden:        hideName,
 			Saved:             true,
 			CanUpgrade:        gift.UpgradeStars > 0,
@@ -1054,6 +1061,7 @@ func (r *Router) deliverStarGift(ctx context.Context, senderID, recipientID int6
 				Message:            message,
 				FromUserID:         senderID,
 				PeerUserID:         recipientID,
+				To:                 domain.Peer{Type: domain.PeerTypeUser, ID: recipientID},
 				NameHidden:         hideName,
 				Saved:              true,
 				CanUpgrade:         gift.UpgradeStars > 0,
@@ -1651,7 +1659,8 @@ func tgMessageActionStarGift(in *domain.MessageStarGiftAction) tg.MessageActionC
 	if in.Message != "" {
 		action.SetMessage(tg.TextWithEntities{Text: in.Message})
 	}
-	if in.FromUserID != 0 && !in.NameHidden {
+	isSelf := in.FromUserID != 0 && in.PeerUserID != 0 && in.FromUserID == in.PeerUserID
+	if in.FromUserID != 0 && !in.NameHidden && !isSelf {
 		action.SetFromID(&tg.PeerUser{UserID: in.FromUserID})
 	}
 	if in.PeerUserID != 0 {
