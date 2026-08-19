@@ -425,7 +425,7 @@ func (r *Router) onPaymentsCheckCanSendGift(ctx context.Context, req *tg.Payment
 		return nil, starGiftInvalidErr()
 	}
 	userID, _, _ := r.currentUserID(ctx)
-	allowed, hidden, _, err := r.deps.Gifts.GetWhitelistInfo(ctx, req.GiftID, userID)
+	allowed, hidden, _ := r.getGiftWhitelistData(ctx, req.GiftID, userID)
 	
 	if hidden && !allowed {
 		return nil, starGiftInvalidErr()
