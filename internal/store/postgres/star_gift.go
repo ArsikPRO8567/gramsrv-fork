@@ -959,16 +959,13 @@ func (s *StarGiftStore) GetWhitelistInfo(ctx context.Context, giftID, userID int
 			COALESCE((allowed_buyers @> jsonb_build_array($2::text)), TRUE) as allowed,
 			COALESCE(gift_hidden, FALSE) as hidden,
 			COALESCE(numbered, FALSE) as numbered
-		FROM (SELECT 1) as dummy
-		LEFT JOIN gift_whitelists ON gift_id = $1;`
+		FROM (SELECT $1::bigint as gid) as d
+		LEFT JOIN gift_whitelists ON gift_id = d.gid;`
 
 	var allowed, hidden, numbered bool
 	err := s.db.QueryRow(ctx, query, giftID, uIDStr).Scan(&allowed, &hidden, &numbered)
 	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return true, false, false, nil
-		}
-		return false, false, false, err
+		return true, false, false, nil
 	}
 
 	return allowed, hidden, numbered, nil
