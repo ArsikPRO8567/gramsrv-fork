@@ -346,7 +346,8 @@ func (r *Router) onPaymentsGetStarGifts(ctx context.Context, hash int) (tg.Payme
 
 	filteredCatalog := make([]domain.StarGift, 0, len(catalog))
 	for _, g := range catalog {
-		allowed, hidden, _, _ := r.getGiftWhitelistData(ctx, g.ID, userID)
+		allowed, hidden, _ := r.getGiftWhitelistData(ctx, g.ID, userID)
+		
 		if hidden && !allowed {
 			continue
 		}
@@ -1877,14 +1878,12 @@ func (r *Router) checkGiftWhitelist(ctx context.Context, userID, giftID int64) e
 	return nil
 }
 
-// getGiftWhitelistData безопасно извлекает данные вайтлиста, не ломая интерфейсы компилятора.
 func (r *Router) getGiftWhitelistData(ctx context.Context, giftID, userID int64) (allowed, hidden, numbered bool) {
-	allowed, hidden, numbered = true, false, false // Значения по умолчанию
+	allowed, hidden, numbered = true, false, false
 	if r.deps.Gifts == nil {
 		return
 	}
 
-	// Локальный интерфейс-детектор
 	type whitelistFetcher interface {
 		GetWhitelistInfo(ctx context.Context, giftID, userID int64) (bool, bool, bool, error)
 	}
