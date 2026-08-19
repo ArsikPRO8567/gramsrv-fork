@@ -979,16 +979,29 @@ func randomPositiveInt64() (int64, error) {
 	return id, nil
 }
 
-func (s *Service) IsWhitelisted(ctx context.Context, giftID, userID int64) (bool, error) {
+func (s *Service) GetWhitelistInfo(ctx context.Context, giftID, userID int64) (bool, bool, bool, error) {
 	if s == nil || s.store == nil {
-		return true, nil
+		return true, false, false, nil
 	}
 
 	if st, ok := s.store.(interface {
-		IsWhitelisted(context.Context, int64, int64) (bool, error)
+		GetWhitelistInfo(context.Context, int64, int64) (bool, bool, bool, error)
 	}); ok {
-		return st.IsWhitelisted(ctx, giftID, userID)
+		return st.GetWhitelistInfo(ctx, giftID, userID)
 	}
 
-	return true, nil
+	return true, false, false, nil
+}
+
+func (s *Service) ProcessAuctionRoundEnd(ctx context.Context, giftID int64, actualBids int) error {
+	gift, ok, err := s.GiftByID(ctx, giftID)
+	if err != nil || !ok {
+		return domain.ErrStarGiftNotFound
+	}
+
+	if actualBids < gift.GiftsPerRound {
+		burned := gift.GiftsPerRound - actualBids
+		return s.store.BurnAuctionGifts(ctx, giftID, burned)
+	}
+	return nil
 }
