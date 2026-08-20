@@ -456,13 +456,18 @@ WHERE collectible_revision_id=$1 AND crafted
 			}
 
 			num := revision.Issued + 1
+			if locked.GiftNum > 0 {
+				num = locked.GiftNum
+			}
 			var uniqueID int64
 			if err := tx.QueryRow(ctx, `SELECT nextval('unique_star_gift_id_seq')`).Scan(&uniqueID); err != nil {
 				return fmt.Errorf("allocate unique star gift id: %w", err)
 			}
 			var title string
-			if err := tx.QueryRow(ctx, `SELECT title FROM star_gift_catalog_revisions WHERE id=$1`, locked.RevisionID).Scan(&title); err != nil {
-				return fmt.Errorf("load upgrade gift title: %w", err)
+			var relType pgtype.Text // Используем типы pgx для корректной обработки NULL
+			var relID pgtype.Int8
+			if err := tx.QueryRow(ctx, `SELECT title, released_by_peer_type, released_by_peer_id FROM star_gift_catalog_revisions WHERE id=$1`, locked.RevisionID).Scan(&title, &relType, &relID); err != nil {
+				return fmt.Errorf("load upgrade gift metadata: %w", err)
 			}
 			slug := fmt.Sprintf("%s-%d", revision.SlugPrefix, num)
 			if _, err := tx.Exec(ctx, `
@@ -470,11 +475,12 @@ INSERT INTO unique_star_gifts
     (id, gift_id, collectible_revision_id, source_saved_gift_id, title, slug, num,
      owner_peer_type, owner_peer_id, model_attribute_id, pattern_attribute_id,
      backdrop_attribute_id, keep_original_details, original_owner_peer_type, original_owner_peer_id,
-     craft_chance_permille, offer_min_stars)
-VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)`,
+     craft_chance_permille, offer_min_stars, released_by_peer_type, released_by_peer_id)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17, $18, $19)`,
 				uniqueID, locked.GiftID, revision.ID, locked.ID, title, slug, num,
 				string(locked.Owner.Type), locked.Owner.ID, modelID, patternID, backdropID, req.KeepOriginalDetails,
-				string(locked.Owner.Type), locked.Owner.ID, craftChancePermille, s.lifecycle.OfferMinStars); err != nil {
+				string(locked.Owner.Type), locked.Owner.ID, craftChancePermille, s.lifecycle.OfferMinStars,
+    relType, relID); err != nil {
 				return fmt.Errorf("insert unique star gift: %w", err)
 			}
 			if _, err := tx.Exec(ctx, `UPDATE star_gift_collectible_revisions SET issued=issued+1 WHERE id=$1`, revision.ID); err != nil {

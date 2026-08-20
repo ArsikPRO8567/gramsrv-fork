@@ -283,9 +283,18 @@ last_sale_date=$2,updated_at=now() WHERE gift_id=$1`, gift.ID, req.Date); err !=
 	if err != nil {
 		return domain.StarGift{}, domain.SavedStarGift{}, domain.StarsBalance{}, err
 	}
+	_, _, numbered, err := NewStarGiftStore(tx).GetWhitelistInfo(ctx, gift.ID, req.BuyerUserID)
+	if err != nil {
+		return domain.StarGift{}, domain.SavedStarGift{}, domain.StarsBalance{}, err
+	}
+
+	giftNum := 0
+	if (gift.Auction || numbered) && gift.Limited {
+		giftNum = gift.AvailabilityTotal - remains + 1
+	}
 	saved := domain.SavedStarGift{Owner: req.To, FromUserID: req.BuyerUserID, GiftID: gift.ID, RevisionID: gift.RevisionID,
 		Date: req.Date, NameHidden: req.HideName, ConvertStars: gift.ConvertStars, PrepaidUpgradeStars: upgradePrice,
-		PrepaidUpgradeHash: prepayHash, Message: req.Message, Unsaved: req.RecipientUnsaved}
+		PrepaidUpgradeHash: prepayHash, Message: req.Message, Unsaved: req.RecipientUnsaved, GiftNum: giftNum}
 	return gift, saved, balance, nil
 }
 
