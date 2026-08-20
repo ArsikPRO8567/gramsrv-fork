@@ -195,10 +195,9 @@ func (r *Router) tgStarGiftUpgradeUpdates(ctx context.Context, ownerUserID int64
 }
 
 func starGiftUpgradeFormID(userID, savedGiftID, stars int64, keepOriginal bool) int64 {
+	
 	id := userID*0x9e3779b1 ^ savedGiftID<<11 ^ stars<<19 ^ 0x55504752414445
-	if keepOriginal {
-		id ^= 0x4b454550
-	}
+
 	if id < 0 {
 		id = ^id
 	}
