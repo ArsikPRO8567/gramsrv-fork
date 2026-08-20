@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgtype"
 
 	"telesrv/internal/domain"
 	"telesrv/internal/store"
@@ -464,7 +465,7 @@ WHERE collectible_revision_id=$1 AND crafted
 				return fmt.Errorf("allocate unique star gift id: %w", err)
 			}
 			var title string
-			var relType pgtype.Text // Используем типы pgx для корректной обработки NULL
+			var relType pgtype.Text
 			var relID pgtype.Int8
 			if err := tx.QueryRow(ctx, `SELECT title, released_by_peer_type, released_by_peer_id FROM star_gift_catalog_revisions WHERE id=$1`, locked.RevisionID).Scan(&title, &relType, &relID); err != nil {
 				return fmt.Errorf("load upgrade gift metadata: %w", err)
