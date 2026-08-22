@@ -228,7 +228,7 @@ func (s *StarGiftLifecycleStore) purchaseStarGiftToChannel(ctx context.Context, 
 				UpgradePriceStars:  gift.UpgradeStars,
 				UpgradeStars:       saved.PrepaidUpgradeStars,
 				GiftNum:            saved.GiftNum,
-				GiftMsgID:          id, // ID сообщения о подарке
+				GiftMsgID:          int(id), // ID сообщения о подарке
 			},
 		}
 		if err := NewChannelStore(tx).appendStarGiftAdminLogTx(ctx, tx, req.To.ID, req.BuyerUserID, id, req.Date, action); err != nil {
