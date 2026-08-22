@@ -640,7 +640,6 @@ func starGiftUpgradeUniqueAction(saved domain.SavedStarGift, unique domain.Uniqu
 		CanResellAt:              saved.CanResellAt,
 		DropOriginalDetailsStars: saved.DropOriginalDetailsStars,
 		CanCraftAt:               canCraftAt,
-		GiftNum:                  unique.Num,
 	}
 }
 
