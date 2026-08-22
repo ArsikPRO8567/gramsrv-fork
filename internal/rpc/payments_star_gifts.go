@@ -1508,38 +1508,38 @@ func tgStarGift(g domain.StarGift) *tg.StarGift {
 	isSoldOut := g.SoldOut || (g.Limited && g.AvailabilityRemains <= 0)
 
 	gift := &tg.StarGift{
-		Limited: g.Limited, 
-		SoldOut: isSoldOut,
-		Birthday: g.Birthday,
-		RequirePremium: g.RequirePremium, 
-		LimitedPerUser: g.LimitedPerUser,
-		PeerColorAvailable: g.PeerColorAvailable, 
-		Auction: g.Auction,
-		ID: g.ID, 
-		Sticker: tgDocument(g.Sticker), 
-		Stars: g.Stars, 
-		ConvertStars: g.ConvertStars,
+		Limited:            g.Limited,
+		SoldOut:            isSoldOut,
+		Birthday:           g.Birthday,
+		RequirePremium:     g.RequirePremium,
+		LimitedPerUser:     g.LimitedPerUser,
+		PeerColorAvailable: g.PeerColorAvailable,
+		Auction:            g.Auction,
+		ID:                 g.ID,
+		Sticker:            tgDocument(g.Sticker),
+		Stars:              g.Stars,
+		ConvertStars:       g.ConvertStars,
 	}
 
 	if g.Limited {
 		gift.SetAvailabilityRemains(g.AvailabilityRemains)
 		gift.SetAvailabilityTotal(g.AvailabilityTotal)
 	}
-
 	if g.AvailabilityResale > 0 {
 		gift.SetAvailabilityResale(g.AvailabilityResale)
 	}
-
 	if isSoldOut {
 		gift.SetFirstSaleDate(g.FirstSaleDate)
 		gift.SetLastSaleDate(g.LastSaleDate)
 	}
-
 	if g.Title != "" {
 		gift.SetTitle(g.Title)
 	}
 	if g.UpgradeStars > 0 && g.UpgradeIssued < g.UpgradeTotal {
 		gift.SetUpgradeStars(g.UpgradeStars)
+	}
+	if g.UpgradeVariants > 0 {
+		gift.SetUpgradeVariants(g.UpgradeVariants)
 	}
 	if g.ResellMinStars > 0 {
 		gift.SetResellMinStars(g.ResellMinStars)
@@ -1558,9 +1558,6 @@ func tgStarGift(g domain.StarGift) *tg.StarGift {
 		gift.SetAuctionSlug(g.AuctionSlug)
 		gift.SetGiftsPerRound(g.GiftsPerRound)
 		gift.SetAuctionStartDate(g.AuctionStartDate)
-	}
-	if g.UpgradeVariants > 0 {
-		gift.SetUpgradeVariants(g.UpgradeVariants)
 	}
 	if g.Background != nil {
 		gift.SetBackground(tg.StarGiftBackground{
@@ -1586,13 +1583,15 @@ func tgMessageActionStarGiftForViewer(in *domain.MessageStarGiftAction, viewerUs
 	}
 	projected := *in
 	if viewerUserID == ownerUserID {
-		// The owner upgrades through InputSavedStarGift. Exposing the separate
-		// prepayment hash makes DrKLO prefer the wrong invoice family and use the
-		// private dialog peer (the sender) as the alleged gift owner.
 		projected.PrepaidUpgradeHash = ""
+		projected.CanUpgrade = in.CanUpgrade
 	} else {
-		// Telegram defines messageActionStarGift.can_upgrade as receiver-only.
 		projected.CanUpgrade = false
+		if viewerUserID == in.FromUserID {
+			projected.PrepaidUpgradeHash = in.PrepaidUpgradeHash
+		} else {
+			projected.PrepaidUpgradeHash = ""
+		}
 	}
 	return tgMessageActionStarGift(&projected)
 }
@@ -1601,6 +1600,7 @@ func tgMessageActionStarGift(in *domain.MessageStarGiftAction) tg.MessageActionC
 	if in == nil {
 		return &tg.MessageActionEmpty{}
 	}
+	
 	gift := &tg.StarGift{
 		ID:           in.GiftID,
 		Stars:        in.Stars,
@@ -1617,7 +1617,9 @@ func tgMessageActionStarGift(in *domain.MessageStarGiftAction) tg.MessageActionC
 	if in.UpgradePriceStars > 0 {
 		gift.SetUpgradeStars(in.UpgradePriceStars)
 	}
+	
 	action := &tg.MessageActionStarGift{Gift: gift}
+	
 	if in.NameHidden {
 		action.NameHidden = true
 	}
@@ -1627,46 +1629,54 @@ func tgMessageActionStarGift(in *domain.MessageStarGiftAction) tg.MessageActionC
 	if in.Converted {
 		action.Converted = true
 	}
+	if in.AuctionAcquired {
+		action.AuctionAcquired = true
+	}
 	action.CanUpgrade = in.CanUpgrade
 	action.PrepaidUpgrade = in.PrepaidUpgrade
 	action.UpgradeSeparate = in.UpgradeSeparate
-	action.AuctionAcquired = in.AuctionAcquired
+	
 	if in.UpgradeStars > 0 {
 		action.SetUpgradeStars(in.UpgradeStars)
-	}
-	if in.UpgradeMsgID > 0 {
-		action.SetUpgradeMsgID(in.UpgradeMsgID)
-	}
-	if in.PrepaidUpgradeHash != "" {
-		action.SetPrepaidUpgradeHash(in.PrepaidUpgradeHash)
-	}
-	if in.GiftMsgID > 0 {
-		action.SetGiftMsgID(in.GiftMsgID)
 	}
 	if in.GiftNum > 0 {
 		action.SetGiftNum(in.GiftNum)
 	}
-	if to := tgPeer(in.To); to != nil {
-		action.SetToID(to)
+	if in.GiftMsgID > 0 {
+		action.SetGiftMsgID(in.GiftMsgID)
+	}
+	if in.UpgradeMsgID > 0 {
+		action.SetUpgradeMsgID(in.UpgradeMsgID)
+	}
+	if in.SavedID > 0 {
+		action.SetSavedID(in.SavedID)
+	}
+	if in.PrepaidUpgradeHash != "" {
+		action.SetPrepaidUpgradeHash(in.PrepaidUpgradeHash)
 	}
 	if in.ConvertStars > 0 {
 		action.SetConvertStars(in.ConvertStars)
 	}
+	
 	if in.Message != "" {
 		action.SetMessage(tg.TextWithEntities{Text: in.Message})
 	}
+	
+	if to := tgPeer(in.To); to != nil {
+		action.SetToID(to)
+	}
+	
 	isSelf := in.FromUserID != 0 && in.PeerUserID != 0 && in.FromUserID == in.PeerUserID
 	if in.FromUserID != 0 && !in.NameHidden && !isSelf {
 		action.SetFromID(&tg.PeerUser{UserID: in.FromUserID})
 	}
+	
 	if in.PeerUserID != 0 {
 		action.SetPeer(&tg.PeerUser{UserID: in.PeerUserID})
 	} else if in.PeerChannelID != 0 {
 		action.SetPeer(&tg.PeerChannel{ChannelID: in.PeerChannelID})
 	}
-	if in.SavedID != 0 {
-		action.SetSavedID(in.SavedID)
-	}
+	
 	return action
 }
 
@@ -1792,9 +1802,27 @@ func tgSavedStarGiftGift(g domain.SavedStarGift, catalog map[int64]domain.StarGi
 		}
 		out := tgStarGift(gift)
 		out.ConvertStars = g.ConvertStars
+		if gift.Limited {
+			out.SetAvailabilityRemains(gift.AvailabilityRemains)
+			out.SetAvailabilityTotal(gift.AvailabilityTotal)
+		}
+		if gift.UpgradeVariants > 0 {
+			out.SetUpgradeVariants(gift.UpgradeVariants)
+		}
+		if gift.ResellMinStars > 0 {
+			out.SetResellMinStars(gift.ResellMinStars)
+		}
+		if gift.LockedUntilDate > 0 {
+			out.SetLockedUntilDate(gift.LockedUntilDate)
+		}
+		if gift.Auction {
+			out.SetAuctionSlug(gift.AuctionSlug)
+			out.SetGiftsPerRound(gift.GiftsPerRound)
+			out.SetAuctionStartDate(gift.AuctionStartDate)
+		}
+		
 		return out
 	}
-	// resolveStarGiftCatalog 在进入投影前保证每个 revision 都存在；该分支仅保留类型完备性。
 	return &tg.StarGift{
 		ID:           g.GiftID,
 		Sticker:      &tg.DocumentEmpty{},
