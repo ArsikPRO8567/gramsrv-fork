@@ -121,13 +121,31 @@ func (s *StarGiftLifecycleStore) PurchaseStarGift(ctx context.Context, req domai
 				return err
 			}
 			sticker := gift.Sticker
-			send.Media = &domain.MessageMedia{Kind: domain.MessageMediaKindService, ServiceAction: &domain.MessageServiceAction{
-				Kind: domain.MessageServiceActionStarGift, StarGift: &domain.MessageStarGiftAction{GiftID: gift.ID,
-					Stars: gift.Stars, ConvertStars: saved.ConvertStars, Title: gift.Title, Sticker: &sticker, Message: req.Message,
-					FromUserID: req.BuyerUserID, PeerUserID: req.To.ID, To: req.To, NameHidden: req.HideName, Saved: true,
-					CanUpgrade: gift.UpgradeStars > 0, PrepaidUpgrade: saved.PrepaidUpgradeStars > 0,
-					PrepaidUpgradeHash: saved.PrepaidUpgradeHash, UpgradePriceStars: gift.UpgradeStars,
-					UpgradeStars: saved.PrepaidUpgradeStars}}}
+			send.Media = &domain.MessageMedia{
+				Kind: domain.MessageMediaKindService,
+				ServiceAction: &domain.MessageServiceAction{
+					Kind: domain.MessageServiceActionStarGift,
+					StarGift: &domain.MessageStarGiftAction{
+						GiftID:            gift.ID,
+						Stars:             gift.Stars,
+						ConvertStars:      saved.ConvertStars,
+						Title:             gift.Title,
+						Sticker:           &sticker,
+						Message:           req.Message,
+						FromUserID:        req.BuyerUserID,
+						PeerUserID:        req.To.ID,
+						To:                req.To,
+						NameHidden:        req.HideName,
+						Saved:             true,
+						CanUpgrade:        gift.UpgradeStars > 0,
+						PrepaidUpgrade:    saved.PrepaidUpgradeStars > 0,
+						PrepaidUpgradeHash: saved.PrepaidUpgradeHash,
+						UpgradePriceStars: gift.UpgradeStars,
+						UpgradeStars:      saved.PrepaidUpgradeStars,
+						GiftNum:           saved.GiftNum,
+					},
+				},
+			}
 			result.Gift, result.Saved, result.Balance = gift, saved, balance
 			return nil
 		},
@@ -141,6 +159,11 @@ func (s *StarGiftLifecycleStore) PurchaseStarGift(ctx context.Context, req domai
 			id, err := NewStarGiftStore(tx).Create(ctx, result.Saved)
 			if err != nil {
 				return err
+			}
+			action := send.Media.ServiceAction.StarGift
+			action.SavedID = saved.ID
+			if msgID > 0 {
+				action.GiftMsgID = msgID
 			}
 			result.Saved.ID = id
 			return s.insertStarGiftPurchaseCommand(ctx, tx, req, result.Saved.ID, result.Gift.Stars+result.Saved.PrepaidUpgradeStars, result.Balance.Balance)
@@ -179,13 +202,28 @@ func (s *StarGiftLifecycleStore) purchaseStarGiftToChannel(ctx context.Context, 
 		}
 		saved.ID, saved.SavedID = id, id
 		sticker := gift.Sticker
-		action := domain.ChannelMessageAction{Type: domain.ChannelActionStarGift, StarGift: &domain.MessageStarGiftAction{
-			GiftID: gift.ID, Stars: gift.Stars, ConvertStars: saved.ConvertStars, Title: gift.Title,
-			Sticker: &sticker, Message: saved.Message, FromUserID: req.BuyerUserID, PeerChannelID: req.To.ID,
-			SavedID: id, NameHidden: saved.NameHidden, Saved: true, CanUpgrade: gift.UpgradeStars > 0,
-			PrepaidUpgrade: saved.PrepaidUpgradeStars > 0, PrepaidUpgradeHash: saved.PrepaidUpgradeHash,
-			UpgradePriceStars: gift.UpgradeStars, UpgradeStars: saved.PrepaidUpgradeStars,
-		}}
+		action := domain.ChannelMessageAction{
+			Type: domain.ChannelActionStarGift,
+			StarGift: &domain.MessageStarGiftAction{
+				GiftID:            gift.ID,
+				Stars:             gift.Stars,
+				ConvertStars:      saved.ConvertStars,
+				Title:             gift.Title,
+				Sticker:           &sticker,
+				Message:           saved.Message,
+				FromUserID:        req.BuyerUserID,
+				PeerChannelID:     req.To.ID,
+				SavedID:           id,
+				NameHidden:        saved.NameHidden,
+				Saved:             true,
+				CanUpgrade:        gift.UpgradeStars > 0,
+				PrepaidUpgrade:    saved.PrepaidUpgradeStars > 0,
+				PrepaidUpgradeHash: saved.PrepaidUpgradeHash,
+				UpgradePriceStars: gift.UpgradeStars,
+				UpgradeStars:      saved.PrepaidUpgradeStars,
+				GiftNum:           saved.GiftNum,
+			},
+		}
 		if err := NewChannelStore(tx).appendStarGiftAdminLogTx(ctx, tx, req.To.ID, req.BuyerUserID, id, req.Date, action); err != nil {
 			return err
 		}

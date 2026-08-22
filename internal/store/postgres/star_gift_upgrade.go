@@ -615,32 +615,32 @@ func starGiftUpgradeUniqueAction(saved domain.SavedStarGift, unique domain.Uniqu
 		fromUserID = 0
 	}
 	if saved.Owner.Type == domain.PeerTypeChannel {
-		// The private envelope is sent by 777000, while action.from_id identifies
-		// the administrator who performed the upgrade. TDesktop uses that
-		// distinction to render "upgraded" instead of an unknown transfer.
 		fromUserID = req.UserID
 	}
 	peer := saved.Owner
 	savedID := saved.SavedID
 	canCraftAt := saved.CanCraftAt
 	if saved.Owner.Type == domain.PeerTypeUser {
-		// peer and saved_id share one TL flag and are defined for channel gifts.
-		// For user gifts both must be absent; official clients use the emitted
-		// service-message id (registered owner-locally by the send transaction).
 		peer = domain.Peer{}
 		savedID = 0
 	} else {
-		// The current Craft state machine is user-owned only. Android treats a
-		// positive can_craft_at as the channel Craft entry marker, so do not
-		// advertise a write path that the server cannot execute yet.
 		canCraftAt = 0
 	}
 	return &domain.MessageStarGiftUniqueAction{
-		Gift: unique, FromUserID: fromUserID, Peer: peer, SavedID: savedID,
-		Upgrade: true, Saved: !saved.Unsaved, PrepaidUpgrade: req.RequirePrepaid,
-		CanExportAt: saved.CanExportAt, TransferStars: saved.TransferStars,
-		CanTransferAt: saved.CanTransferAt, CanResellAt: saved.CanResellAt,
-		DropOriginalDetailsStars: saved.DropOriginalDetailsStars, CanCraftAt: canCraftAt,
+		Gift:                     unique,
+		FromUserID:               fromUserID,
+		Peer:                     peer,
+		SavedID:                  savedID,
+		Upgrade:                  true,
+		Saved:                    !saved.Unsaved,
+		PrepaidUpgrade:           req.RequirePrepaid,
+		CanExportAt:              saved.CanExportAt,
+		TransferStars:            saved.TransferStars,
+		CanTransferAt:            saved.CanTransferAt,
+		CanResellAt:              saved.CanResellAt,
+		DropOriginalDetailsStars: saved.DropOriginalDetailsStars,
+		CanCraftAt:               canCraftAt,
+		GiftNum:                  unique.Num,
 	}
 }
 
@@ -778,18 +778,22 @@ FOR UPDATE`, req.UserID, sourceMessageID).Scan(&peerType, &peerID)
 			if action == nil || action.GiftID != saved.GiftID {
 				return nil, fmt.Errorf("star gift source message %d has invalid media", box.BoxID)
 			}
+			
 			upgradeMessageID := upgradeMessageIDs[box.OwnerUserID]
 			if action.UpgradeMsgID != 0 && upgradeMessageID > 0 && action.UpgradeMsgID != upgradeMessageID {
 				return nil, fmt.Errorf("star gift source message %d has conflicting upgrade message %d", box.BoxID, action.UpgradeMsgID)
 			}
 			if upgradeMessageID > 0 {
 				action.UpgradeMsgID = upgradeMessageID
+			} else if box.OwnerUserID == req.UserID {
+				return nil, fmt.Errorf("upgrade service message missing owner box")
 			} else {
-				if box.OwnerUserID == req.UserID {
-					return nil, fmt.Errorf("upgrade service message missing owner box")
-				}
 				action.UpgradeMsgID = 0
 			}
+			action.CanUpgrade = false
+			action.PrepaidUpgradeHash = ""
+			action.PrepaidUpgrade = false
+			action.UpgradeSeparate = false
 			action.CanUpgrade = false
 			action.PrepaidUpgradeHash = ""
 			mediaJSON, err := encodeMessageMedia(media)
