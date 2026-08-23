@@ -1655,6 +1655,7 @@ func tgMessageActionStarGift(in *domain.MessageStarGiftAction) tg.MessageActionC
 	if in.AuctionAcquired {
 		action.AuctionAcquired = true
 	}
+	action.Saved = in.Saved
 	action.CanUpgrade = in.CanUpgrade
 	action.PrepaidUpgrade = in.PrepaidUpgrade
 	action.UpgradeSeparate = in.UpgradeSeparate
