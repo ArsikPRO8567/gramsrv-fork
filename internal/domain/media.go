@@ -740,6 +740,12 @@ type MessageStarGiftAction struct {
 	GiftNum           int   `json:"gift_num,omitempty"`
 	AuctionAcquired   bool  `json:"auction_acquired,omitempty"`
 	To                Peer  `json:"to,omitempty"`
+	ReleasedBy         *Peer     `json:"released_by,omitempty"`
+	AvailabilityTotal  int       `json:"availability_total,omitempty"`
+	AvailabilityRemains int      `json:"availability_remains,omitempty"`
+	UpgradeVariants    int       `json:"upgrade_variants,omitempty"`
+	ResellMinStars     int64     `json:"resell_min_stars,omitempty"`
+	LockedUntilDate    int       `json:"locked_until_date,omitempty"`
 }
 
 type MessageStarGiftUniqueAction struct {
