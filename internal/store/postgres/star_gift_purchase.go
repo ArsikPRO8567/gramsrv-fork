@@ -147,6 +147,7 @@ func (s *StarGiftLifecycleStore) PurchaseStarGift(ctx context.Context, req domai
 					ReleasedBy:         &gift.ReleasedBy,
 					AvailabilityTotal:  gift.AvailabilityTotal,
 					AvailabilityRemains: gift.AvailabilityRemains,
+					GiftMsgID:          saved.MsgID,
 				},
 			}}
 			result.Gift, result.Saved, result.Balance = gift, saved, balance
@@ -168,13 +169,8 @@ func (s *StarGiftLifecycleStore) PurchaseStarGift(ctx context.Context, req domai
 			// Обновляем SavedID и GiftMsgID в сохраненном подарке
 			savedGift.SavedID = id
 			if msgID > 0 {
-				// Устанавливаем GiftMsgID для связи с исходным сообщением
-				// Это будет использовано в проекции
-			}
 			result.Saved = savedGift
-			// Передаем обновленный savedGift в результат
 			result.Gift = resultGift
-			// Обновляем баланс в результате
 			return s.insertStarGiftPurchaseCommand(ctx, tx, req, result.Saved.ID, result.Gift.Stars+result.Saved.PrepaidUpgradeStars, result.Balance.Balance)
 		},
 	}
@@ -231,7 +227,7 @@ func (s *StarGiftLifecycleStore) purchaseStarGiftToChannel(ctx context.Context, 
 				UpgradePriceStars:  gift.UpgradeStars,
 				UpgradeStars:       saved.PrepaidUpgradeStars,
 				GiftNum:            saved.GiftNum,
-				GiftMsgID:          int(id), // ID сообщения о подарке
+				GiftMsgID:          int(id),
 			},
 		}
 		if err := NewChannelStore(tx).appendStarGiftAdminLogTx(ctx, tx, req.To.ID, req.BuyerUserID, id, req.Date, action); err != nil {
