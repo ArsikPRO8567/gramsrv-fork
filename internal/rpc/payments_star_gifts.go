@@ -1614,6 +1614,14 @@ func tgMessageActionStarGift(in *domain.MessageStarGiftAction) tg.MessageActionC
 	if in.Title != "" {
 		gift.SetTitle(in.Title)
 	}
+	if in.GiftNum > 0 {
+		gift.SetGiftNum(in.GiftNum)
+	}
+	if in.ReleasedBy != nil && in.ReleasedBy.ID > 0 {
+		if peer := tgPeer(*in.ReleasedBy); peer != nil {
+			gift.SetReleasedBy(peer)
+		}
+	}
 	if in.UpgradePriceStars > 0 {
 		gift.SetUpgradeStars(in.UpgradePriceStars)
 	}
