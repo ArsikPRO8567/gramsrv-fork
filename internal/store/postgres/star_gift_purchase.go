@@ -144,6 +144,9 @@ func (s *StarGiftLifecycleStore) PurchaseStarGift(ctx context.Context, req domai
 					UpgradePriceStars:  gift.UpgradeStars,
 					UpgradeStars:       saved.PrepaidUpgradeStars,
 					GiftNum:            saved.GiftNum,
+					ReleasedBy:         &gift.ReleasedBy,
+					AvailabilityTotal:  gift.AvailabilityTotal,
+					AvailabilityRemains: gift.AvailabilityRemains,
 				},
 			}}
 			result.Gift, result.Saved, result.Balance = gift, saved, balance
