@@ -113,7 +113,7 @@ func (s *StarGiftLifecycleStore) PurchaseStarGift(ctx context.Context, req domai
 	var result domain.StarGiftPurchaseResult
 	var savedGift domain.SavedStarGift
 	var resultGift domain.StarGift
-	hooks := privateSendTxHooks{
+hooks := privateSendTxHooks{
 		before: func(ctx context.Context, tx pgx.Tx, send *domain.SendPrivateTextRequest) error {
 			if err := validateStarGiftPurchaseForm(ctx, tx, req, true); err != nil {
 				return err
@@ -127,27 +127,27 @@ func (s *StarGiftLifecycleStore) PurchaseStarGift(ctx context.Context, req domai
 			sticker := gift.Sticker
 			send.Media = &domain.MessageMedia{Kind: domain.MessageMediaKindService, ServiceAction: &domain.MessageServiceAction{
 				Kind: domain.MessageServiceActionStarGift, StarGift: &domain.MessageStarGiftAction{
-					GiftID:             gift.ID,
-					Stars:              gift.Stars,
-					ConvertStars:       saved.ConvertStars,
-					Title:              gift.Title,
-					Sticker:            &sticker,
-					Message:            req.Message,
-					FromUserID:         req.BuyerUserID,
-					PeerUserID:         req.To.ID,
-					To:                 req.To,
-					NameHidden:         req.HideName,
-					Saved:              true,
-					CanUpgrade:         gift.UpgradeStars > 0,
-					PrepaidUpgrade:     saved.PrepaidUpgradeStars > 0,
-					PrepaidUpgradeHash: saved.PrepaidUpgradeHash,
-					UpgradePriceStars:  gift.UpgradeStars,
-					UpgradeStars:       saved.PrepaidUpgradeStars,
-					GiftNum:            saved.GiftNum,
-					ReleasedBy:         &gift.ReleasedBy,
-					AvailabilityTotal:  gift.AvailabilityTotal,
+					GiftID:              gift.ID,
+					Stars:               gift.Stars,
+					ConvertStars:        saved.ConvertStars,
+					Title:               gift.Title,
+					Sticker:             &sticker,
+					Message:             req.Message,
+					FromUserID:          req.BuyerUserID,
+					PeerUserID:          req.To.ID,
+					To:                  req.To,
+					NameHidden:          req.HideName,
+					Saved:               true,
+					CanUpgrade:          gift.UpgradeStars > 0,
+					PrepaidUpgrade:      saved.PrepaidUpgradeStars > 0,
+					PrepaidUpgradeHash:  saved.PrepaidUpgradeHash,
+					UpgradePriceStars:   gift.UpgradeStars,
+					UpgradeStars:        saved.PrepaidUpgradeStars,
+					GiftNum:             saved.GiftNum,
+					ReleasedBy:          &gift.ReleasedBy,
+					AvailabilityTotal:   gift.AvailabilityTotal,
 					AvailabilityRemains: gift.AvailabilityRemains,
-					GiftMsgID:          saved.MsgID,
+					GiftMsgID:           saved.MsgID,
 				},
 			}}
 			result.Gift, result.Saved, result.Balance = gift, saved, balance
@@ -166,9 +166,8 @@ func (s *StarGiftLifecycleStore) PurchaseStarGift(ctx context.Context, req domai
 			}
 			savedGift.ID = id
 			savedGift.Unique = nil
-			// Обновляем SavedID и GiftMsgID в сохраненном подарке
 			savedGift.SavedID = id
-			if msgID > 0 {
+			
 			result.Saved = savedGift
 			result.Gift = resultGift
 			return s.insertStarGiftPurchaseCommand(ctx, tx, req, result.Saved.ID, result.Gift.Stars+result.Saved.PrepaidUpgradeStars, result.Balance.Balance)
