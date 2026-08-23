@@ -1611,19 +1611,34 @@ func tgMessageActionStarGift(in *domain.MessageStarGiftAction) tg.MessageActionC
 	} else {
 		gift.Sticker = &tg.DocumentEmpty{}
 	}
+	
 	if in.Title != "" {
 		gift.SetTitle(in.Title)
 	}
-	if in.GiftNum > 0 {
-		gift.SetGiftNum(in.GiftNum)
+	
+	if in.UpgradePriceStars > 0 {
+		gift.SetUpgradeStars(in.UpgradePriceStars)
 	}
+	
 	if in.ReleasedBy != nil && in.ReleasedBy.ID > 0 {
 		if peer := tgPeer(*in.ReleasedBy); peer != nil {
 			gift.SetReleasedBy(peer)
 		}
 	}
-	if in.UpgradePriceStars > 0 {
-		gift.SetUpgradeStars(in.UpgradePriceStars)
+	if in.AvailabilityTotal > 0 {
+		gift.SetAvailabilityTotal(in.AvailabilityTotal)
+	}
+	if in.AvailabilityRemains > 0 {
+		gift.SetAvailabilityRemains(in.AvailabilityRemains)
+	}
+	if in.UpgradeVariants > 0 {
+		gift.SetUpgradeVariants(in.UpgradeVariants)
+	}
+	if in.ResellMinStars > 0 {
+		gift.SetResellMinStars(in.ResellMinStars)
+	}
+	if in.LockedUntilDate > 0 {
+		gift.SetLockedUntilDate(in.LockedUntilDate)
 	}
 	
 	action := &tg.MessageActionStarGift{Gift: gift}
@@ -1669,7 +1684,7 @@ func tgMessageActionStarGift(in *domain.MessageStarGiftAction) tg.MessageActionC
 	if in.Message != "" {
 		action.SetMessage(tg.TextWithEntities{Text: in.Message})
 	}
-	
+
 	if to := tgPeer(in.To); to != nil {
 		action.SetToID(to)
 	}
