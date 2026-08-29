@@ -1624,9 +1624,6 @@ func tgMessageActionStarGift(in *domain.MessageStarGiftAction) tg.MessageActionC
 	if in.AvailabilityRemains > 0 {
 		gift.SetAvailabilityRemains(in.AvailabilityRemains)
 	}
-	if in.GiftNum > 0 {
-		action.SetGiftNum(in.GiftNum)
-	}
 
 	action := &tg.MessageActionStarGift{
 		Gift:       gift,
@@ -1658,6 +1655,9 @@ func tgMessageActionStarGift(in *domain.MessageStarGiftAction) tg.MessageActionC
 	}
 	if in.SavedID > 0 {
 		action.SetSavedID(in.SavedID)
+	}
+	if in.GiftNum > 0 {
+		action.SetGiftNum(in.GiftNum)
 	}
 	if in.PrepaidUpgradeHash != "" {
 		action.SetPrepaidUpgradeHash(in.PrepaidUpgradeHash)

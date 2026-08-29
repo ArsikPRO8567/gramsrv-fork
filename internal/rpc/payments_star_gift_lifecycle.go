@@ -185,7 +185,7 @@ func (r *Router) sendStarGiftAuctionBidForm(ctx context.Context, userID, formID 
 		return nil, starGiftInvalidErr()
 	}
 
-	allowed, hidden, _ := r.getGiftWhitelistData(ctx, inv.GiftID, userID)
+	allowed, hidden, _, _ := r.getGiftWhitelistData(ctx, inv.GiftID, userID)
 	
 	if hidden && !allowed {
 		return nil, starGiftInvalidErr()
