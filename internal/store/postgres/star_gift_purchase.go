@@ -324,7 +324,7 @@ last_sale_date=$2,updated_at=now() WHERE gift_id=$1`, gift.ID, req.Date); err !=
 	if err != nil {
 		return domain.StarGift{}, domain.SavedStarGift{}, domain.StarsBalance{}, err
 	}
-	_, _, numbered, err := NewStarGiftStore(tx).GetWhitelistInfo(ctx, gift.ID, req.BuyerUserID)
+	_, _, numbered, _, err := NewStarGiftStore(tx).GetWhitelistInfo(ctx, gift.ID, req.BuyerUserID)
 	if err != nil {
 		return domain.StarGift{}, domain.SavedStarGift{}, domain.StarsBalance{}, err
 	}
