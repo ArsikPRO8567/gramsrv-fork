@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 	"hash/fnv"
 	"strings"
 
@@ -425,16 +426,13 @@ func (r *Router) onPaymentsCheckCanSendGift(ctx context.Context, req *tg.Payment
 		return nil, starGiftInvalidErr()
 	}
 	userID, _, _ := r.currentUserID(ctx)
-	allowed, hidden, _ := r.getGiftWhitelistData(ctx, req.GiftID, userID)
+	
+	allowed, hidden, _, hasWhitelist := r.getGiftWhitelistData(ctx, req.GiftID, userID)
 	
 	if hidden && !allowed {
 		return nil, starGiftInvalidErr()
 	}
-	if !allowed {
-		return &tg.PaymentsCheckCanSendGiftResultFail{
-			Reason: tg.TextWithEntities{Text: "This gift in white-listed."},
-		}, nil
-	}
+
 	gift, found, err := r.deps.Gifts.GiftByID(ctx, req.GiftID)
 	if err != nil {
 		return nil, internalErr()
@@ -442,18 +440,29 @@ func (r *Router) onPaymentsCheckCanSendGift(ctx context.Context, req *tg.Payment
 	if !found {
 		return nil, starGiftInvalidErr()
 	}
+
 	now := int(r.clock.Now().Unix())
-	switch {
-	case gift.SoldOut || gift.Limited && gift.AvailabilityRemains <= 0:
-		return &tg.PaymentsCheckCanSendGiftResultFail{Reason: tg.TextWithEntities{Text: "This gift is sold out."}}, nil
-	case gift.LockedUntilDate > now:
-		if gift.Auction {
-			return &tg.PaymentsCheckCanSendGiftResultOk{}, nil
+	
+	if gift.LockedUntilDate > now {
+		isWhitelisted := hasWhitelist && allowed
+
+		if !isWhitelisted {
+			if gift.Auction {
+				return &tg.PaymentsCheckCanSendGiftResultOk{}, nil
+			}
+			unlockTime := time.Unix(int64(gift.LockedUntilDate), 0).Format("02/01/2006 15:04")
+			reasonText := fmt.Sprintf("Этот подарок будет доступен %s.", unlockTime)
+			
+			return &tg.PaymentsCheckCanSendGiftResultFail{
+				Reason: tg.TextWithEntities{Text: reasonText},
+			}, nil
 		}
-		return &tg.PaymentsCheckCanSendGiftResultFail{Reason: tg.TextWithEntities{Text: "Сейчас этот подарок недоступен."}}, nil
-	case gift.Auction:
-		return &tg.PaymentsCheckCanSendGiftResultOk{}, nil
 	}
+
+	if gift.SoldOut || gift.Limited && gift.AvailabilityRemains <= 0 {
+		return &tg.PaymentsCheckCanSendGiftResultFail{Reason: tg.TextWithEntities{Text: "This gift is sold out."}}, nil
+	}
+
 	return &tg.PaymentsCheckCanSendGiftResultOk{}, nil
 }
 

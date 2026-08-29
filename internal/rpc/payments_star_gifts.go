@@ -1615,15 +1615,8 @@ func tgMessageActionStarGift(in *domain.MessageStarGiftAction) tg.MessageActionC
 	if in.Title != "" {
 		gift.SetTitle(in.Title)
 	}
-	
 	if in.UpgradePriceStars > 0 {
 		gift.SetUpgradeStars(in.UpgradePriceStars)
-	}
-	
-	if in.ReleasedBy != nil && in.ReleasedBy.ID > 0 {
-		if peer := tgPeer(*in.ReleasedBy); peer != nil {
-			gift.SetReleasedBy(peer)
-		}
 	}
 	if in.AvailabilityTotal > 0 {
 		gift.SetAvailabilityTotal(in.AvailabilityTotal)
@@ -1631,40 +1624,31 @@ func tgMessageActionStarGift(in *domain.MessageStarGiftAction) tg.MessageActionC
 	if in.AvailabilityRemains > 0 {
 		gift.SetAvailabilityRemains(in.AvailabilityRemains)
 	}
-	if in.UpgradeVariants > 0 {
-		gift.SetUpgradeVariants(in.UpgradeVariants)
+	if in.GiftNum > 0 {
+		gift.SetGiftNum(in.GiftNum)
 	}
-	if in.ResellMinStars > 0 {
-		gift.SetResellMinStars(in.ResellMinStars)
+
+	action := &tg.MessageActionStarGift{
+		Gift:       gift,
+		Saved:      true,
+		NameHidden: in.NameHidden,
+		CanUpgrade: in.CanUpgrade,
 	}
-	if in.LockedUntilDate > 0 {
-		gift.SetLockedUntilDate(in.LockedUntilDate)
-	}
-	
-	action := &tg.MessageActionStarGift{Gift: gift}
-	
-	if in.NameHidden {
-		action.NameHidden = true
-	}
-	if in.Saved {
-		action.Saved = true
-	}
+
 	if in.Converted {
-		action.Converted = true
+		action.SetConverted(true)
+	}
+	if in.PrepaidUpgrade {
+		action.SetPrepaidUpgrade(true)
+	}
+	if in.UpgradeSeparate {
+		action.SetUpgradeSeparate(true)
 	}
 	if in.AuctionAcquired {
-		action.AuctionAcquired = true
+		action.SetAuctionAcquired(true)
 	}
-	action.Saved = in.Saved
-	action.CanUpgrade = in.CanUpgrade
-	action.PrepaidUpgrade = in.PrepaidUpgrade
-	action.UpgradeSeparate = in.UpgradeSeparate
-	
 	if in.UpgradeStars > 0 {
 		action.SetUpgradeStars(in.UpgradeStars)
-	}
-	if in.GiftNum > 0 {
-		action.SetGiftNum(in.GiftNum)
 	}
 	if in.GiftMsgID > 0 {
 		action.SetGiftMsgID(in.GiftMsgID)
@@ -1678,29 +1662,25 @@ func tgMessageActionStarGift(in *domain.MessageStarGiftAction) tg.MessageActionC
 	if in.PrepaidUpgradeHash != "" {
 		action.SetPrepaidUpgradeHash(in.PrepaidUpgradeHash)
 	}
-	if in.ConvertStars > 0 {
-		action.SetConvertStars(in.ConvertStars)
-	}
-	
 	if in.Message != "" {
 		action.SetMessage(tg.TextWithEntities{Text: in.Message})
+	}
+
+	isSelf := in.FromUserID != 0 && in.PeerUserID != 0 && in.FromUserID == in.PeerUserID
+	if in.FromUserID != 0 && !in.NameHidden && !isSelf {
+		action.SetFromID(&tg.PeerUser{UserID: in.FromUserID})
+	}
+
+	if in.PeerChannelID != 0 {
+		action.SetPeer(&tg.PeerChannel{ChannelID: in.PeerChannelID})
+	} else if in.PeerUserID != 0 {
+		action.SetPeer(&tg.PeerUser{UserID: in.PeerUserID})
 	}
 
 	if to := tgPeer(in.To); to != nil {
 		action.SetToID(to)
 	}
-	
-	isSelf := in.FromUserID != 0 && in.PeerUserID != 0 && in.FromUserID == in.PeerUserID
-	if in.FromUserID != 0 && !in.NameHidden && !isSelf {
-		action.SetFromID(&tg.PeerUser{UserID: in.FromUserID})
-	}
-	
-	if in.PeerUserID != 0 {
-		action.SetPeer(&tg.PeerUser{UserID: in.PeerUserID})
-	} else if in.PeerChannelID != 0 {
-		action.SetPeer(&tg.PeerChannel{ChannelID: in.PeerChannelID})
-	}
-	
+
 	return action
 }
 
@@ -1904,48 +1884,39 @@ func clampGiftMessage(s string) string {
 
 func starGiftUsageLimitedErr() error { return tgerr.New(400, "STARGIFT_USAGE_LIMITED") }
 
-func (r *Router) checkGiftWhitelist(ctx context.Context, userID, giftID int64) error {
-	if r.deps.Gifts == nil {
-		return nil
-	}
-
-	type whitelistChecker interface {
-		IsWhitelisted(ctx context.Context, giftID, userID int64) (bool, error)
-	}
-
-	if checker, ok := r.deps.Gifts.(whitelistChecker); ok {
-		allowed, err := checker.IsWhitelisted(ctx, giftID, userID)
-		if err != nil {
-			r.log.Error("whitelist_db_error_fallback_to_allowed", 
-				zap.Int64("user_id", userID), 
-				zap.Int64("gift_id", giftID), 
-				zap.Error(err))
-			return nil 
-		}
-		if !allowed {
-			return starGiftUsageLimitedErr()
-		}
-	}
-	
-	return nil
-}
-
-func (r *Router) getGiftWhitelistData(ctx context.Context, giftID, userID int64) (allowed, hidden, numbered bool) {
-	allowed, hidden, numbered = true, false, false
+func (r *Router) getGiftWhitelistData(ctx context.Context, giftID, userID int64) (allowed, hidden, numbered, hasWhitelist bool) {
+	allowed, hidden, numbered, hasWhitelist = true, false, false, false
 	if r.deps.Gifts == nil {
 		return
 	}
 
 	type whitelistFetcher interface {
-		GetWhitelistInfo(ctx context.Context, giftID, userID int64) (bool, bool, bool, error)
+		GetWhitelistInfo(ctx context.Context, giftID, userID int64) (bool, bool, bool, bool, error)
 	}
 
 	if fetcher, ok := r.deps.Gifts.(whitelistFetcher); ok {
-		a, h, n, err := fetcher.GetWhitelistInfo(ctx, giftID, userID)
+		a, h, n, hw, err := fetcher.GetWhitelistInfo(ctx, giftID, userID)
 		if err == nil {
-			return a, h, n
+			return a, h, n, hw
 		}
 		r.log.Error("whitelist_fetch_failed", zap.Error(err))
 	}
 	return
+}
+
+func (r *Router) checkGiftWhitelist(ctx context.Context, userID, giftID int64) error {
+	if r.deps.Gifts == nil {
+		return nil
+	}
+
+	allowed, hidden, _, hasWhitelist := r.getGiftWhitelistData(ctx, giftID, userID)
+	
+	if hidden && !allowed {
+		return starGiftInvalidErr()
+	}
+	if hasWhitelist && !allowed {
+		return starGiftUsageLimitedErr()
+	}
+	
+	return nil
 }
