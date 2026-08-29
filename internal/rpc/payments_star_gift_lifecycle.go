@@ -157,7 +157,7 @@ func (r *Router) starGiftAuctionBidPaymentForm(ctx context.Context, userID int64
 		return nil, starGiftInvalidErr()
 	}
 
-	allowed, hidden, _ := r.getGiftWhitelistData(ctx, inv.GiftID, userID)
+	allowed, hidden, _, _ := r.getGiftWhitelistData(ctx, inv.GiftID, userID)
 	
 	if hidden && !allowed {
 		return nil, starGiftInvalidErr()
@@ -828,7 +828,7 @@ func (r *Router) onPaymentsGetStarGiftAuctionState(ctx context.Context, req *tg.
 	var giftID int64
 	var slug string
 	if giftID > 0 {
-		allowed, hidden, _ := r.getGiftWhitelistData(ctx, giftID, userID)
+		allowed, hidden, _, _ := r.getGiftWhitelistData(ctx, giftID, userID)
 		if hidden && !allowed {
 			return nil, starGiftInvalidErr()
 		}

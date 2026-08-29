@@ -346,7 +346,7 @@ func (r *Router) onPaymentsGetStarGifts(ctx context.Context, hash int) (tg.Payme
 
 	filteredCatalog := make([]domain.StarGift, 0, len(catalog))
 	for _, g := range catalog {
-		allowed, hidden, _ := r.getGiftWhitelistData(ctx, g.ID, userID)
+		allowed, hidden, _, _ := r.getGiftWhitelistData(ctx, g.ID, userID)
 		
 		if hidden && !allowed {
 			continue
@@ -1625,7 +1625,7 @@ func tgMessageActionStarGift(in *domain.MessageStarGiftAction) tg.MessageActionC
 		gift.SetAvailabilityRemains(in.AvailabilityRemains)
 	}
 	if in.GiftNum > 0 {
-		gift.SetGiftNum(in.GiftNum)
+		action.SetGiftNum(in.GiftNum)
 	}
 
 	action := &tg.MessageActionStarGift{
