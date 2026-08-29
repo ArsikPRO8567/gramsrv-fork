@@ -432,11 +432,6 @@ func (r *Router) onPaymentsCheckCanSendGift(ctx context.Context, req *tg.Payment
 	if hidden && !allowed {
 		return nil, starGiftInvalidErr()
 	}
-    if hasWhitelist && !allowed {
-        return &tg.PaymentsCheckCanSendGiftResultFail{
-			Reason: tg.TextWithEntities{Text: "This gift is whitelisted."},
-		}, nil
-    }
 
 	gift, found, err := r.deps.Gifts.GiftByID(ctx, req.GiftID)
 	if err != nil { return nil, internalErr() }
