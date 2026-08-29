@@ -262,9 +262,19 @@ func (s *StarGiftLifecycleStore) prepareStarGiftPurchase(ctx context.Context, tx
 		return domain.StarGift{}, domain.SavedStarGift{}, domain.StarsBalance{}, domain.ErrStarGiftInvalid
 	}
 	gift, found, err := NewStarGiftStore(tx).CatalogRevision(ctx, revisionID)
-	if err != nil || !found || !enabled || gift.ID != req.GiftID || gift.SoldOut || gift.Auction || gift.LockedUntilDate > req.Date ||
+	if err != nil || !found || !enabled || gift.ID != req.GiftID || gift.SoldOut || gift.Auction || 
 		gift.Limited && remains <= 0 {
 		return domain.StarGift{}, domain.SavedStarGift{}, domain.StarsBalance{}, domain.ErrStarGiftInvalid
+	}
+	allowed, _, numbered, hasWhitelist, err := NewStarGiftStore(tx).GetWhitelistInfo(ctx, gift.ID, req.BuyerUserID)
+	if err != nil {
+		return domain.StarGift{}, domain.SavedStarGift{}, domain.StarsBalance{}, err
+	}
+	if gift.LockedUntilDate > req.Date {
+		isWhitelisted := hasWhitelist && allowed
+		if !gift.Auction && !isWhitelisted {
+			return domain.StarGift{}, domain.SavedStarGift{}, domain.StarsBalance{}, domain.ErrStarGiftInvalid
+		}
 	}
 	if gift.RevisionID != req.RevisionID {
 		return domain.StarGift{}, domain.SavedStarGift{}, domain.StarsBalance{}, domain.ErrStarGiftFormAmountMismatch
@@ -321,10 +331,6 @@ last_sale_date=$2,updated_at=now() WHERE gift_id=$1`, gift.ID, req.Date); err !=
 	balance, err := s.debitLifecycleAmount(ctx, tx, req.BuyerUserID,
 		domain.StarGiftAmount{Currency: domain.StarGiftCurrencyStars, Amount: charge}, domain.StarsReasonGift,
 		req.To, req.Date, "Star gift")
-	if err != nil {
-		return domain.StarGift{}, domain.SavedStarGift{}, domain.StarsBalance{}, err
-	}
-	_, _, numbered, _, err := NewStarGiftStore(tx).GetWhitelistInfo(ctx, gift.ID, req.BuyerUserID)
 	if err != nil {
 		return domain.StarGift{}, domain.SavedStarGift{}, domain.StarsBalance{}, err
 	}
