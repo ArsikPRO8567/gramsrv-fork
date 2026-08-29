@@ -951,24 +951,30 @@ func validStarGiftOwner(owner domain.Peer) bool {
 	return owner.ID != 0 && (owner.Type == domain.PeerTypeUser || owner.Type == domain.PeerTypeChannel)
 }
 
-func (s *StarGiftStore) GetWhitelistInfo(ctx context.Context, giftID, userID int64) (bool, bool, bool, error) {
+
+func (s *StarGiftStore) GetWhitelistInfo(ctx context.Context, giftID, userID int64) (bool, bool, bool, bool, error) {
 	uIDStr := strconv.FormatInt(userID, 10)
 
 	query := `
 		SELECT 
-			COALESCE((allowed_buyers @> jsonb_build_array($2::text)), TRUE) as allowed,
+			(allowed_buyers @> jsonb_build_array($2::text)) as allowed,
 			COALESCE(gift_hidden, FALSE) as hidden,
-			COALESCE(numbered, FALSE) as numbered
-		FROM (SELECT $1::bigint as gid) as d
-		LEFT JOIN gift_whitelists ON gift_id = d.gid;`
+			COALESCE(numbered, FALSE) as numbered,
+			TRUE as has_whitelist
+		FROM gift_whitelists 
+		WHERE gift_id = $1;`
 
-	var allowed, hidden, numbered bool
-	err := s.db.QueryRow(ctx, query, giftID, uIDStr).Scan(&allowed, &hidden, &numbered)
+	var allowed, hidden, numbered, hasWhitelist bool
+	err := s.db.QueryRow(ctx, query, giftID, uIDStr).Scan(&allowed, &hidden, &numbered, &hasWhitelist)
+	
 	if err != nil {
-		return true, false, false, nil
+		if errors.Is(err, pgx.ErrNoRows) {
+			return true, false, false, false, nil
+		}
+		return true, false, false, false, err
 	}
 
-	return allowed, hidden, numbered, nil
+	return allowed, hidden, numbered, hasWhitelist, nil
 }
 
 func (s *StarGiftStore) BurnAuctionGifts(ctx context.Context, giftID int64, count int) error {
