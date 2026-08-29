@@ -346,7 +346,7 @@ func (r *Router) onPaymentsGetStarGifts(ctx context.Context, hash int) (tg.Payme
 
 	filteredCatalog := make([]domain.StarGift, 0, len(catalog))
 	for _, g := range catalog {
-		allowed, hidden, _, _ := r.getGiftWhitelistData(ctx, g.ID, userID)
+		allowed, hidden, _, hasWhitelist := r.getGiftWhitelistData(ctx, g.ID, userID)
 		
 		if hidden && !allowed {
 			continue
