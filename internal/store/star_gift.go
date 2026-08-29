@@ -67,7 +67,7 @@ type StarGiftStore interface {
 	DeleteCollection(ctx context.Context, owner domain.Peer, collectionID int) (bool, error)
 	ReorderCollections(ctx context.Context, owner domain.Peer, collectionIDs []int) error
 	SetPinned(ctx context.Context, owner domain.Peer, savedGiftIDs []int64) error
-	GetWhitelistInfo(ctx context.Context, giftID, userID int64) (allowed bool, hidden bool, numbered bool, err error)
+	GetWhitelistInfo(ctx context.Context, giftID, userID int64) (allowed bool, hidden bool, numbered bool, hasWhitelist bool, err error)
     BurnAuctionGifts(ctx context.Context, giftID int64, count int) error
 }
 
