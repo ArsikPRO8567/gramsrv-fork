@@ -432,14 +432,15 @@ func (r *Router) onPaymentsCheckCanSendGift(ctx context.Context, req *tg.Payment
 	if hidden && !allowed {
 		return nil, starGiftInvalidErr()
 	}
+    if hasWhitelist && !allowed {
+        return &tg.PaymentsCheckCanSendGiftResultFail{
+			Reason: tg.TextWithEntities{Text: "This gift is whitelisted."},
+		}, nil
+    }
 
 	gift, found, err := r.deps.Gifts.GiftByID(ctx, req.GiftID)
-	if err != nil {
-		return nil, internalErr()
-	}
-	if !found {
-		return nil, starGiftInvalidErr()
-	}
+	if err != nil { return nil, internalErr() }
+	if !found { return nil, starGiftInvalidErr() }
 
 	now := int(r.clock.Now().Unix())
 	
@@ -450,6 +451,7 @@ func (r *Router) onPaymentsCheckCanSendGift(ctx context.Context, req *tg.Payment
 			if gift.Auction {
 				return &tg.PaymentsCheckCanSendGiftResultOk{}, nil
 			}
+            
 			unlockTime := time.Unix(int64(gift.LockedUntilDate), 0).Format("02/01/2006 15:04")
 			reasonText := fmt.Sprintf("Этот подарок будет доступен %s.", unlockTime)
 			
@@ -459,7 +461,7 @@ func (r *Router) onPaymentsCheckCanSendGift(ctx context.Context, req *tg.Payment
 		}
 	}
 
-	if gift.SoldOut || gift.Limited && gift.AvailabilityRemains <= 0 {
+	if gift.SoldOut || (gift.Limited && gift.AvailabilityRemains <= 0) {
 		return &tg.PaymentsCheckCanSendGiftResultFail{Reason: tg.TextWithEntities{Text: "This gift is sold out."}}, nil
 	}
 
@@ -828,8 +830,8 @@ func (r *Router) onPaymentsGetStarGiftAuctionState(ctx context.Context, req *tg.
 	var giftID int64
 	var slug string
 	if giftID > 0 {
-		allowed, hidden, _, _ := r.getGiftWhitelistData(ctx, giftID, userID)
-		if hidden && !allowed {
+		allowed, hidden, _, hasWhitelist := r.getGiftWhitelistData(ctx, giftID, userID)
+		if (hidden && !allowed) || (hasWhitelist && !allowed) {
 			return nil, starGiftInvalidErr()
 		}
 		if !allowed {
