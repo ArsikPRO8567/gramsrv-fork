@@ -351,9 +351,6 @@ func (r *Router) onPaymentsGetStarGifts(ctx context.Context, hash int) (tg.Payme
 		if hidden && !allowed {
 			continue
 		}
-        if hasWhitelist && !allowed {
-            continue
-        }
 		filteredCatalog = append(filteredCatalog, g)
 	}
 
@@ -1913,7 +1910,7 @@ func (r *Router) checkGiftWhitelist(ctx context.Context, userID, giftID int64) e
 	}
 
 	allowed, hidden, _, hasWhitelist := r.getGiftWhitelistData(ctx, giftID, userID)
-
+	
 	if hidden && !allowed {
 		return starGiftInvalidErr()
 	}
