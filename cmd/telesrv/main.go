@@ -252,7 +252,6 @@ func startDebugServer(ctx context.Context, addr string, metricsHandler http.Hand
 	mux.HandleFunc("/debug/pprof/profile", pprof.Profile)
 	mux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
 	mux.HandleFunc("/debug/pprof/trace", pprof.Trace)
-	mux.HandleFunc("/payments/dev-stars", rpcRouter.HandlePaymentForm)
 	if metricsHandler != nil {
 		mux.Handle("/metrics", metricsHandler)
 	}
