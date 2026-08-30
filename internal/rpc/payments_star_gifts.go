@@ -1920,3 +1920,14 @@ func (r *Router) checkGiftWhitelist(ctx context.Context, userID, giftID int64) e
 	
 	return nil
 }
+
+package rpc
+
+import (
+	"net/http"
+)
+
+func (r *Router) HandlePaymentForm(w http.ResponseWriter, req *http.Request) {
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte("OK"))
+}
