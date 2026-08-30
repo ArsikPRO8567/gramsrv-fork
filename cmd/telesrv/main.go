@@ -1582,6 +1582,7 @@ func run(logger *zap.Logger) error {
 		GiftWithdrawals:   giftsService,
 		ModerationAppeals: moderationService,
 		TelegramLogin:     telegramLoginHTTPHandler,
+		PaymentForm:       router.HandlePaymentForm,
 	}, logger.Named("public-web")); err != nil {
 		return fmt.Errorf("start public Web: %w", err)
 	}
