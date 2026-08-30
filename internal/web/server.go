@@ -184,7 +184,7 @@ func newHandler(cfg Config, logger *zap.Logger) (http.Handler, error) {
 	mux.HandleFunc("GET /nft/{slug}/{$}", h.uniqueGift)
 	mux.HandleFunc("GET /gift-withdrawal/{requestID}", h.starGiftWithdrawal)
 	mux.HandleFunc("POST /gift-withdrawal/{requestID}", h.completeStarGiftWithdrawal)
-	mux.HandleFunc("POST /payments/dev-stars", config.PaymentForm)
+	mux.HandleFunc("POST /payments/dev-stars", cfg.PaymentForm)
 	if cfg.ModerationAppeals != nil {
 		mux.HandleFunc("GET /appeal/{token}", h.moderationAppeal)
 		mux.HandleFunc("POST /appeal/{token}", h.moderationAppeal)
