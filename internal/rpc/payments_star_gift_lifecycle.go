@@ -555,7 +555,14 @@ func (r *Router) onPaymentsGetResaleStarGifts(ctx context.Context, req *tg.Payme
 		}
 		if found {
 			hash := int64(preview.Revision)
-			out.SetAttributesHash(hash)
+			// payments.resaleStarGifts shares one flags bit (flags.1) between
+			// attributes and attributes_hash, so the layer 228 wire encoder
+			// rejects any response with the bit set while attributes is nil
+			// ("malformed canonical value: explicit flag has nil interface
+			// field attributes"). Fill the vector and the hash together and
+			// only when the client's cached hash is stale; when the hashes
+			// match, leave both fields unset so the client reuses its cached
+			// attributes and pagination via next_offset keeps working.
 			if attributesHash != hash {
 				attributes := make([]tg.StarGiftAttributeClass, 0, len(preview.Models)+len(preview.Patterns)+len(preview.Backdrops))
 				for _, attribute := range preview.Models {
@@ -568,6 +575,7 @@ func (r *Router) onPaymentsGetResaleStarGifts(ctx context.Context, req *tg.Payme
 					attributes = append(attributes, tgStarGiftAttribute(attribute))
 				}
 				out.SetAttributes(attributes)
+				out.SetAttributesHash(hash)
 			}
 		}
 	}
