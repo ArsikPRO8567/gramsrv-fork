@@ -346,7 +346,7 @@ func (r *Router) onPaymentsGetStarGifts(ctx context.Context, hash int) (tg.Payme
 
 	filteredCatalog := make([]domain.StarGift, 0, len(catalog))
 	for _, g := range catalog {
-		allowed, hidden, _, _ := r.getGiftWhitelistData(ctx, g.ID, userID)
+		allowed, hidden, _, hasWhitelist := r.getGiftWhitelistData(ctx, g.ID, userID)
 		
 		if hidden && !allowed {
 			continue
@@ -1919,15 +1919,4 @@ func (r *Router) checkGiftWhitelist(ctx context.Context, userID, giftID int64) e
 	}
 	
 	return nil
-}
-
-package rpc
-
-import (
-	"net/http"
-)
-
-func (r *Router) HandlePaymentForm(w http.ResponseWriter, req *http.Request) {
-	w.WriteHeader(http.StatusOK)
-	w.Write([]byte("OK"))
 }
