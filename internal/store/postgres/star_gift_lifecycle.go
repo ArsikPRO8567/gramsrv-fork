@@ -494,10 +494,11 @@ func (s *StarGiftLifecycleStore) PurchaseResaleStarGift(ctx context.Context, req
 	} else if !validLifecyclePeer(unique.Owner) || unique.Owner == req.To {
 		return domain.StarGiftTransferResult{}, domain.ErrStarGiftResaleUnavailable
 	}
-	messageSenderID := domain.OfficialSystemUserID
-	if seller.Type == domain.PeerTypeUser {
-		messageSenderID = seller.ID
-	}
+	// Сообщение о покупке с маркета отправляет ПОКУПАТЕЛЬ: официальные клиенты
+	// показывают «You bought this gift for X» в out-боксе отправителя и
+	// «{buyer} bought you a gift for X» в копии получателя подарка. Отправка
+	// от продавца переворачивала роли в подписи (продавец «покупал» подарок).
+	messageSenderID := req.BuyerUserID
 	messageRecipientID := req.BuyerUserID
 	if req.To.Type == domain.PeerTypeUser {
 		messageRecipientID = req.To.ID
@@ -583,6 +584,11 @@ func (s *StarGiftLifecycleStore) PurchaseResaleStarGift(ctx context.Context, req
 			msgID, savedID := sent.RecipientMessage.ID, int64(0)
 			if req.To.Type == domain.PeerTypeChannel {
 				msgID, savedID = 0, result.Saved.ID
+			}
+			if req.To.Type == domain.PeerTypeUser && msgID <= 0 {
+				// Покупка «себе» — само-сообщение: бокс получателя может быть
+				// пуст, владелец-бокс в этом случае отправительский.
+				msgID = sent.SenderMessage.ID
 			}
 			if req.To.Type == domain.PeerTypeUser && msgID <= 0 {
 				return domain.ErrStarGiftResaleUnavailable
@@ -1210,6 +1216,11 @@ func transferUniqueAction(unique domain.UniqueStarGift, fromUserID int64, to dom
 		// transferred gift is managed by this action message's id.
 		peer = domain.Peer{}
 		savedID = 0
+		// from_id у приватных копий должен отсутствовать: клиенты берут актора
+		// из messageService.from_id, иначе подписи строятся от неверной стороны
+		// («продавец купил вам подарок» вместо «вы купили подарок»). Поле
+		// сохраняется только для канальных admin-log действий.
+		fromUserID = 0
 	} else {
 		// Preserve the durable entitlement for a future transfer back to a user,
 		// but keep channel Craft hidden until its write/update path exists.

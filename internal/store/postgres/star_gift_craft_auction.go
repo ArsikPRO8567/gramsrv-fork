@@ -782,6 +782,16 @@ func minAuctionInt(a, b int) int {
 	return b
 }
 
+// bidAwardToPeer формирует to_id для сообщения о выигрыше в аукционе: по документации
+// поле присутствует только на копии победителя и только когда подарок назначен
+// другому peer (self-выигрыш поле не несёт).
+func bidAwardToPeer(bidderUserID int64, owner domain.Peer) domain.Peer {
+	if owner.Type == domain.PeerTypeUser && owner.ID == bidderUserID {
+		return domain.Peer{}
+	}
+	return owner
+}
+
 func (s *StarGiftLifecycleStore) dispatchStarGiftAuctionAwards(ctx context.Context, giftID int64) error {
 	if s.messages == nil {
 		return domain.ErrStarGiftAuctionUnavailable
@@ -836,10 +846,12 @@ WHERE gift_id=$1 AND saved_gift_id IS NULL ORDER BY id LIMIT 100`, giftID)
 				sent, err := s.messages.SendPrivateText(ctx, domain.SendPrivateTextRequest{SenderUserID: item.bidder,
 					RecipientUserID: owner.ID, RandomID: lifecycleCommandRandomID("auction-award", giftID, item.round, item.pos),
 					Date: item.date, Media: &domain.MessageMedia{Kind: domain.MessageMediaKindService, ServiceAction: &domain.MessageServiceAction{
-						Kind: domain.MessageServiceActionStarGift, StarGift: &domain.MessageStarGiftAction{GiftID: gift.ID,
+						Kind: domain.MessageServiceActionStarGift, StarGift: fillStarGiftSnapshot(&domain.MessageStarGiftAction{GiftID: gift.ID,
 							Stars: gift.Stars, ConvertStars: 0, Title: gift.Title, Sticker: &sticker, Message: item.message,
-							FromUserID: item.bidder, PeerUserID: owner.ID, To: owner, NameHidden: item.hide, Saved: true,
-							AuctionAcquired: true, GiftNum: item.giftNum}}}})
+							FromUserID: item.bidder, PeerUserID: owner.ID, NameHidden: item.hide, Saved: true,
+							// to_id нужен только копии победителя, когда подарок назначен другому peer.
+							To: bidAwardToPeer(item.bidder, owner),
+							AuctionAcquired: true, GiftNum: item.giftNum}, gift)}}})
 				if err != nil {
 					return err
 				}
@@ -864,11 +876,11 @@ WHERE gift_id=$1 AND saved_gift_id IS NULL ORDER BY id LIMIT 100`, giftID)
 				}
 				if owner.Type == domain.PeerTypeChannel {
 					sticker := gift.Sticker
-					action := domain.ChannelMessageAction{Type: domain.ChannelActionStarGift, StarGift: &domain.MessageStarGiftAction{
+					action := domain.ChannelMessageAction{Type: domain.ChannelActionStarGift, StarGift: fillStarGiftSnapshot(&domain.MessageStarGiftAction{
 						GiftID: gift.ID, Stars: gift.Stars, ConvertStars: 0, Title: gift.Title, Sticker: &sticker,
 						Message: item.message, FromUserID: item.bidder, PeerChannelID: owner.ID, SavedID: id,
 						NameHidden: item.hide, Saved: true, AuctionAcquired: true, GiftNum: item.giftNum,
-					}}
+					}, gift)}
 					if err := NewChannelStore(tx).appendStarGiftAdminLogTx(ctx, tx, owner.ID, item.bidder, id, item.date, action); err != nil {
 						return err
 					}

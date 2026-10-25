@@ -85,6 +85,47 @@ charge_stars,issued_at,expires_at FROM star_gift_purchase_forms WHERE buyer_user
 	return nil
 }
 
+// fillStarGiftSnapshot дополняет payload действия полным снимком каталога на момент
+// отправки: без availability/released_by у клиентов пропадает бейдж «N из M»,
+// номер выпуска и строка «выпущено {peer}» в блоке подарка.
+func fillStarGiftSnapshot(action *domain.MessageStarGiftAction, gift domain.StarGift) *domain.MessageStarGiftAction {
+	if action == nil {
+		return nil
+	}
+	if action.Stars == 0 {
+		action.Stars = gift.Stars
+	}
+	if action.Title == "" {
+		action.Title = gift.Title
+	}
+	if action.Sticker == nil && gift.Sticker.ID != 0 {
+		sticker := gift.Sticker
+		action.Sticker = &sticker
+	}
+	if gift.UpgradeStars > 0 {
+		action.CanUpgrade = action.CanUpgrade || gift.UpgradeIssued < gift.UpgradeTotal
+		action.UpgradePriceStars = gift.UpgradeStars
+	}
+	if gift.Limited || gift.AvailabilityTotal > 0 {
+		action.AvailabilityTotal = gift.AvailabilityTotal
+		action.AvailabilityRemains = gift.AvailabilityRemains
+	}
+	if releasedBy := gift.ReleasedBy; releasedBy.Type == domain.PeerTypeUser || releasedBy.Type == domain.PeerTypeChannel {
+		released := releasedBy
+		action.ReleasedBy = &released
+	}
+	if gift.UpgradeVariants > 0 {
+		action.UpgradeVariants = gift.UpgradeVariants
+	}
+	if gift.ResellMinStars > 0 {
+		action.ResellMinStars = gift.ResellMinStars
+	}
+	if gift.LockedUntilDate > 0 {
+		action.LockedUntilDate = gift.LockedUntilDate
+	}
+	return action
+}
+
 func (s *StarGiftLifecycleStore) PurchaseStarGift(ctx context.Context, req domain.StarGiftPurchaseRequest) (domain.StarGiftPurchaseResult, error) {
 	req.CommandKey = strings.TrimSpace(req.CommandKey)
 	if s == nil || s.db == nil || req.BuyerUserID <= 0 || !validLifecyclePeer(req.To) || req.GiftID <= 0 ||
@@ -113,7 +154,7 @@ func (s *StarGiftLifecycleStore) PurchaseStarGift(ctx context.Context, req domai
 	var result domain.StarGiftPurchaseResult
 	var savedGift domain.SavedStarGift
 	var resultGift domain.StarGift
-hooks := privateSendTxHooks{
+	hooks := privateSendTxHooks{
 		before: func(ctx context.Context, tx pgx.Tx, send *domain.SendPrivateTextRequest) error {
 			if err := validateStarGiftPurchaseForm(ctx, tx, req, true); err != nil {
 				return err
@@ -126,29 +167,26 @@ hooks := privateSendTxHooks{
 			savedGift = saved
 			sticker := gift.Sticker
 			send.Media = &domain.MessageMedia{Kind: domain.MessageMediaKindService, ServiceAction: &domain.MessageServiceAction{
-				Kind: domain.MessageServiceActionStarGift, StarGift: &domain.MessageStarGiftAction{
-					GiftID:              gift.ID,
-					Stars:               gift.Stars,
-					ConvertStars:        saved.ConvertStars,
-					Title:               gift.Title,
-					Sticker:             &sticker,
-					Message:             req.Message,
-					FromUserID:          req.BuyerUserID,
-					PeerUserID:          req.To.ID,
-					To:                  req.To,
-					NameHidden:          req.HideName,
-					Saved:               true,
-					CanUpgrade:          gift.UpgradeStars > 0,
-					PrepaidUpgrade:      saved.PrepaidUpgradeStars > 0,
-					PrepaidUpgradeHash:  saved.PrepaidUpgradeHash,
-					UpgradePriceStars:   gift.UpgradeStars,
-					UpgradeStars:        saved.PrepaidUpgradeStars,
-					GiftNum:             saved.GiftNum,
-					ReleasedBy:          &gift.ReleasedBy,
-					AvailabilityTotal:   gift.AvailabilityTotal,
-					AvailabilityRemains: gift.AvailabilityRemains,
-					GiftMsgID:           saved.MsgID,
-				},
+				Kind: domain.MessageServiceActionStarGift, StarGift: fillStarGiftSnapshot(&domain.MessageStarGiftAction{
+					GiftID:             gift.ID,
+					Stars:              gift.Stars,
+					ConvertStars:       saved.ConvertStars,
+					Title:              gift.Title,
+					Sticker:            &sticker,
+					Message:            req.Message,
+					FromUserID:         req.BuyerUserID,
+					PeerUserID:         req.To.ID,
+					To:                 req.To,
+					NameHidden:         req.HideName,
+					Saved:              true,
+					CanUpgrade:         gift.UpgradeStars > 0,
+					PrepaidUpgrade:     saved.PrepaidUpgradeStars > 0,
+					PrepaidUpgradeHash: saved.PrepaidUpgradeHash,
+					UpgradePriceStars:  gift.UpgradeStars,
+					UpgradeStars:       saved.PrepaidUpgradeStars,
+					GiftNum:            saved.GiftNum,
+					GiftMsgID:          saved.MsgID,
+				}, gift),
 			}}
 			result.Gift, result.Saved, result.Balance = gift, saved, balance
 			return nil
@@ -167,7 +205,7 @@ hooks := privateSendTxHooks{
 			savedGift.ID = id
 			savedGift.Unique = nil
 			savedGift.SavedID = id
-			
+
 			result.Saved = savedGift
 			result.Gift = resultGift
 			return s.insertStarGiftPurchaseCommand(ctx, tx, req, result.Saved.ID, result.Gift.Stars+result.Saved.PrepaidUpgradeStars, result.Balance.Balance)
@@ -208,7 +246,7 @@ func (s *StarGiftLifecycleStore) purchaseStarGiftToChannel(ctx context.Context, 
 		sticker := gift.Sticker
 		action := domain.ChannelMessageAction{
 			Type: domain.ChannelActionStarGift,
-			StarGift: &domain.MessageStarGiftAction{
+			StarGift: fillStarGiftSnapshot(&domain.MessageStarGiftAction{
 				GiftID:             gift.ID,
 				Stars:              gift.Stars,
 				ConvertStars:       saved.ConvertStars,
@@ -227,7 +265,7 @@ func (s *StarGiftLifecycleStore) purchaseStarGiftToChannel(ctx context.Context, 
 				UpgradeStars:       saved.PrepaidUpgradeStars,
 				GiftNum:            saved.GiftNum,
 				GiftMsgID:          int(id),
-			},
+			}, gift),
 		}
 		if err := NewChannelStore(tx).appendStarGiftAdminLogTx(ctx, tx, req.To.ID, req.BuyerUserID, id, req.Date, action); err != nil {
 			return err
@@ -262,7 +300,7 @@ func (s *StarGiftLifecycleStore) prepareStarGiftPurchase(ctx context.Context, tx
 		return domain.StarGift{}, domain.SavedStarGift{}, domain.StarsBalance{}, domain.ErrStarGiftInvalid
 	}
 	gift, found, err := NewStarGiftStore(tx).CatalogRevision(ctx, revisionID)
-	if err != nil || !found || !enabled || gift.ID != req.GiftID || gift.SoldOut || gift.Auction || 
+	if err != nil || !found || !enabled || gift.ID != req.GiftID || gift.SoldOut || gift.Auction ||
 		gift.Limited && remains <= 0 {
 		return domain.StarGift{}, domain.SavedStarGift{}, domain.StarsBalance{}, domain.ErrStarGiftInvalid
 	}

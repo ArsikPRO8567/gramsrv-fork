@@ -361,11 +361,17 @@ func (s *StarGiftUpgradeStore) UpgradeStarGift(ctx context.Context, req domain.S
 		"telesrv:star-gift-upgrade:v1:%s:%d:%d:%t:%d:%t",
 		commandKey, saved.ID, req.ChargeStars, req.RequirePrepaid, req.FormID, req.KeepOriginalDetails,
 	)))
-	messageSenderID := saved.FromUserID
+	// Сообщение об апгрейде отправляет сам владелец (апгрейдер): официальные
+	// клиенты рендерят «You turned the gift from {sender} into a unique
+	// collectible» в его out-боксе и «{upgrader} turned the gift from you...»
+	// в боксе исходного отправителя. Диалог тот же (owner ↔ original sender).
+	messageSenderID := req.UserID
+	messageRecipientID := saved.FromUserID
 	if saved.Owner.Type == domain.PeerTypeChannel {
 		messageSenderID = domain.OfficialSystemUserID
+		messageRecipientID = req.UserID
 	}
-	randomID := starGiftUpgradeRandomID(messageSenderID, req.UserID, commandKey)
+	randomID := starGiftUpgradeRandomID(messageSenderID, messageRecipientID, commandKey)
 	placeholder := &domain.MessageMedia{
 		Kind: domain.MessageMediaKindService,
 		ServiceAction: &domain.MessageServiceAction{
@@ -375,7 +381,7 @@ func (s *StarGiftUpgradeStore) UpgradeStarGift(ctx context.Context, req domain.S
 	}
 	messageReq := domain.SendPrivateTextRequest{
 		SenderUserID:           messageSenderID,
-		RecipientUserID:        req.UserID,
+		RecipientUserID:        messageRecipientID,
 		RandomID:               randomID,
 		Media:                  placeholder,
 		Date:                   req.Date,
@@ -537,7 +543,8 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`, req.UserID, commandKey, locked.ID, req.For
 		},
 		after: func(ctx context.Context, tx pgx.Tx, sent domain.SendPrivateTextResult) error {
 			ownerMessageID := sent.RecipientMessage.ID
-			if result.Saved.Owner.Type == domain.PeerTypeUser && saved.FromUserID == req.UserID {
+			if result.Saved.Owner.Type == domain.PeerTypeUser {
+				// Отправитель сообщения — апгрейдер, его бокс и есть owner-бокс.
 				ownerMessageID = sent.SenderMessage.ID
 			}
 			if ownerMessageID <= 0 {
@@ -610,10 +617,13 @@ WHERE user_id=$1 AND command_key=$2`, req.UserID, commandKey, ownerEditPts)
 }
 
 func starGiftUpgradeUniqueAction(saved domain.SavedStarGift, unique domain.UniqueStarGift, req domain.StarGiftUpgradeRequest) *domain.MessageStarGiftUniqueAction {
-	fromUserID := saved.FromUserID
-	if saved.NameHidden {
-		fromUserID = 0
-	}
+	// from_id у messageActionStarGiftUnique — «отправитель подарка». Для апгрейда
+	// своими руками он должен отсутствовать: клиенты выводят актора из
+	// messageService.from_id (отправителя сообщения), а заданный from_id
+	// подставлялся в подпись не на той стороне, из-за чего отправитель и
+	// получатель менялись местами. Оставляем from_id только для канальных
+	// уведомлений, где подпись строится как «{user} turned ... {channel}».
+	fromUserID := int64(0)
 	if saved.Owner.Type == domain.PeerTypeChannel {
 		fromUserID = req.UserID
 	}

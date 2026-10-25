@@ -113,24 +113,24 @@ VALUES($1,$2,$3,$4,$5,$6,$7)`, req.PayerUserID, req.CommandKey, locked.ID, req.F
 			return domain.ErrStarGiftCollectibleUnavailable
 		}
 		sticker := gift.Sticker
-		action := &domain.MessageStarGiftAction{
+		// Полный снимок каталога обязателен: клиенты рисуют стоимость и бейдж
+		// «N из M» из этого payload, а без released_by блок неполон.
+		action := fillStarGiftSnapshot(&domain.MessageStarGiftAction{
 			GiftID: gift.ID, Stars: gift.Stars, ConvertStars: locked.ConvertStars, Title: gift.Title, Sticker: &sticker,
 			FromUserID: req.PayerUserID, To: req.Owner, SavedID: locked.SavedID, Saved: true, CanUpgrade: true,
 			PrepaidUpgrade: true, UpgradeSeparate: true, UpgradePriceStars: req.ChargeStars,
 			UpgradeStars: req.ChargeStars, GiftMsgID: locked.MsgID,
-		}
+		}, gift)
 		if req.Owner.Type == domain.PeerTypeChannel {
 			action.PeerChannelID = req.Owner.ID
 		} else {
 			action.PeerUserID = req.Owner.ID
 		}
+		// Переиспользуем action как есть: он уже несёт полный снимок
+		// (availability/released_by); ручное копирование поля-за-полем
+		// исторически теряло новые атрибуты payload.
 		messageReq.Media = &domain.MessageMedia{Kind: domain.MessageMediaKindService, ServiceAction: &domain.MessageServiceAction{
-			Kind: domain.MessageServiceActionStarGift, StarGift: &domain.MessageStarGiftAction{
-				GiftID: action.GiftID, Stars: action.Stars, ConvertStars: action.ConvertStars, Title: action.Title,
-				Sticker: action.Sticker, FromUserID: action.FromUserID, PeerUserID: action.PeerUserID,
-				PeerChannelID: action.PeerChannelID, To: action.To, SavedID: action.SavedID, Saved: action.Saved,
-				CanUpgrade: action.CanUpgrade, PrepaidUpgrade: action.PrepaidUpgrade, UpgradeSeparate: action.UpgradeSeparate,
-				UpgradePriceStars: action.UpgradePriceStars, UpgradeStars: action.UpgradeStars, GiftMsgID: action.GiftMsgID}}}
+			Kind: domain.MessageServiceActionStarGift, StarGift: action}}
 		locked.PrepaidUpgradeStars, locked.PrepaidUpgradeHash = req.ChargeStars, ""
 		result.Saved, result.Balance = locked, balance
 		return nil
