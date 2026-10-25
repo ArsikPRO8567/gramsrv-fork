@@ -339,16 +339,23 @@ func (r *Router) onPaymentsGetStarGifts(ctx context.Context, hash int) (tg.Payme
 	if r.deps.Gifts == nil {
 		return &tg.PaymentsStarGifts{Gifts: []tg.StarGiftClass{}, Chats: []tg.ChatClass{}, Users: []tg.UserClass{}}, nil
 	}
-	
+
 	userID, _, _ := r.currentUserID(ctx)
 	catalog, err := r.deps.Gifts.Catalog(ctx)
-	if err != nil { return nil, internalErr() }
+	if err != nil {
+		return nil, internalErr()
+	}
 
 	filteredCatalog := make([]domain.StarGift, 0, len(catalog))
 	for _, g := range catalog {
-		allowed, hidden, _, _ := r.getGiftWhitelistData(ctx, g.ID, userID)
-		
+		allowed, hidden, _, hasWhitelist := r.getGiftWhitelistData(ctx, g.ID, userID)
+
 		if hidden && !allowed {
+			continue
+		}
+		// Whitelist-only подарки не показываются в каталоге тем, кто не входит
+		// в список (та же логика, что и в checkGiftWhitelist на покупке).
+		if hasWhitelist && !allowed {
 			continue
 		}
 		filteredCatalog = append(filteredCatalog, g)
@@ -357,7 +364,9 @@ func (r *Router) onPaymentsGetStarGifts(ctx context.Context, hash int) (tg.Payme
 	sort.SliceStable(filteredCatalog, func(i, j int) bool {
 		soldI := filteredCatalog[i].SoldOut || (filteredCatalog[i].Limited && filteredCatalog[i].AvailabilityRemains <= 0)
 		soldJ := filteredCatalog[j].SoldOut || (filteredCatalog[j].Limited && filteredCatalog[j].AvailabilityRemains <= 0)
-		if soldI != soldJ { return !soldI }
+		if soldI != soldJ {
+			return !soldI
+		}
 		return filteredCatalog[i].ID > filteredCatalog[j].ID
 	})
 
@@ -987,7 +996,7 @@ func (r *Router) sendStarGiftToChannel(ctx context.Context, senderID, channelID 
 	sticker := gift.Sticker
 	action := domain.ChannelMessageAction{
 		Type: domain.ChannelActionStarGift,
-		StarGift: &domain.MessageStarGiftAction{
+		StarGift: applyStarGiftSnapshot(&domain.MessageStarGiftAction{
 			GiftID:            gift.ID,
 			Stars:             gift.Stars,
 			ConvertStars:      gift.ConvertStars,
@@ -1002,7 +1011,7 @@ func (r *Router) sendStarGiftToChannel(ctx context.Context, senderID, channelID 
 			PrepaidUpgrade:    prepaidUpgradeStars > 0,
 			UpgradePriceStars: gift.UpgradeStars,
 			UpgradeStars:      prepaidUpgradeStars,
-		},
+		}, gift),
 	}
 	savedID, err := r.deps.Gifts.RecordSavedGift(ctx, domain.SavedStarGift{
 		Owner:               domain.Peer{Type: domain.PeerTypeChannel, ID: channelID},
@@ -1036,6 +1045,47 @@ func (r *Router) sendStarGiftToChannel(ctx context.Context, senderID, channelID 
 	return ref, nil, nil
 }
 
+// applyStarGiftSnapshot заполняет протокольно-нейтральный payload полным снимком
+// каталога на момент покупки: без availability/released_by клиенты теряют бейдж
+// «N из M», номер выпуска и строку «выпущено {peer}» в блоке подарка.
+func applyStarGiftSnapshot(action *domain.MessageStarGiftAction, gift domain.StarGift) *domain.MessageStarGiftAction {
+	if action == nil {
+		return nil
+	}
+	if action.Stars == 0 {
+		action.Stars = gift.Stars
+	}
+	if action.Title == "" {
+		action.Title = gift.Title
+	}
+	if action.Sticker == nil && gift.Sticker.ID != 0 {
+		sticker := gift.Sticker
+		action.Sticker = &sticker
+	}
+	if gift.UpgradeStars > 0 {
+		action.CanUpgrade = action.CanUpgrade || gift.UpgradeIssued < gift.UpgradeTotal
+		action.UpgradePriceStars = gift.UpgradeStars
+	}
+	if gift.Limited || gift.AvailabilityTotal > 0 {
+		action.AvailabilityTotal = gift.AvailabilityTotal
+		action.AvailabilityRemains = gift.AvailabilityRemains
+	}
+	if releasedBy := gift.ReleasedBy; releasedBy.Type == domain.PeerTypeUser || releasedBy.Type == domain.PeerTypeChannel {
+		released := releasedBy
+		action.ReleasedBy = &released
+	}
+	if gift.UpgradeVariants > 0 {
+		action.UpgradeVariants = gift.UpgradeVariants
+	}
+	if gift.ResellMinStars > 0 {
+		action.ResellMinStars = gift.ResellMinStars
+	}
+	if gift.LockedUntilDate > 0 {
+		action.LockedUntilDate = gift.LockedUntilDate
+	}
+	return action
+}
+
 // deliverStarGift 经 SendPrivateText 把 messageActionStarGift 服务消息投递到收礼人私聊。
 func (r *Router) deliverStarGift(ctx context.Context, senderID, recipientID int64, gift domain.StarGift, hideName bool, message string, prepaidUpgradeStars int64, prepaidUpgradeHash string) (domain.SendPrivateTextResult, error) {
 	recipientBlocked, err := r.peerBlocksUser(ctx, senderID, recipientID)
@@ -1048,7 +1098,7 @@ func (r *Router) deliverStarGift(ctx context.Context, senderID, recipientID int6
 		Kind: domain.MessageMediaKindService,
 		ServiceAction: &domain.MessageServiceAction{
 			Kind: domain.MessageServiceActionStarGift,
-			StarGift: &domain.MessageStarGiftAction{
+			StarGift: applyStarGiftSnapshot(&domain.MessageStarGiftAction{
 				GiftID:             gift.ID,
 				Stars:              gift.Stars,
 				ConvertStars:       gift.ConvertStars,
@@ -1065,7 +1115,7 @@ func (r *Router) deliverStarGift(ctx context.Context, senderID, recipientID int6
 				PrepaidUpgradeHash: prepaidUpgradeHash,
 				UpgradePriceStars:  gift.UpgradeStars,
 				UpgradeStars:       prepaidUpgradeStars,
-			},
+			}, gift),
 		},
 	}
 	return r.deps.Messages.SendPrivateText(ctx, senderID, domain.SendPrivateTextRequest{
@@ -1600,7 +1650,7 @@ func tgMessageActionStarGift(in *domain.MessageStarGiftAction) tg.MessageActionC
 	if in == nil {
 		return &tg.MessageActionEmpty{}
 	}
-	
+
 	gift := &tg.StarGift{
 		ID:           in.GiftID,
 		Stars:        in.Stars,
@@ -1611,18 +1661,32 @@ func tgMessageActionStarGift(in *domain.MessageStarGiftAction) tg.MessageActionC
 	} else {
 		gift.Sticker = &tg.DocumentEmpty{}
 	}
-	
+
 	if in.Title != "" {
 		gift.SetTitle(in.Title)
 	}
 	if in.UpgradePriceStars > 0 {
 		gift.SetUpgradeStars(in.UpgradePriceStars)
 	}
-	if in.AvailabilityTotal > 0 {
+	// limited/availability_remains/availability_total share flag 0: the
+	// "N of M" badge renders only when both counters are present.
+	if in.AvailabilityTotal > 0 && in.AvailabilityRemains > 0 {
 		gift.SetAvailabilityTotal(in.AvailabilityTotal)
-	}
-	if in.AvailabilityRemains > 0 {
 		gift.SetAvailabilityRemains(in.AvailabilityRemains)
+	}
+	if in.UpgradeVariants > 0 {
+		gift.SetUpgradeVariants(in.UpgradeVariants)
+	}
+	if in.ResellMinStars > 0 {
+		gift.SetResellMinStars(in.ResellMinStars)
+	}
+	if in.LockedUntilDate > 0 {
+		gift.SetLockedUntilDate(in.LockedUntilDate)
+	}
+	if in.ReleasedBy != nil {
+		if releasedBy := tgPeer(*in.ReleasedBy); releasedBy != nil {
+			gift.SetReleasedBy(releasedBy)
+		}
 	}
 
 	action := &tg.MessageActionStarGift{
@@ -1666,8 +1730,10 @@ func tgMessageActionStarGift(in *domain.MessageStarGiftAction) tg.MessageActionC
 		action.SetMessage(tg.TextWithEntities{Text: in.Message})
 	}
 
-	isSelf := in.FromUserID != 0 && in.PeerUserID != 0 && in.FromUserID == in.PeerUserID
-	if in.FromUserID != 0 && !in.NameHidden && !isSelf {
+	// from_id is the sender of the gift. It is omitted only for anonymous
+	// gifts (name_hidden): self-purchases keep it because clients render the
+	// caption from the containing messageService, never from this field.
+	if in.FromUserID != 0 && !in.NameHidden {
 		action.SetFromID(&tg.PeerUser{UserID: in.FromUserID})
 	}
 
@@ -1677,8 +1743,14 @@ func tgMessageActionStarGift(in *domain.MessageStarGiftAction) tg.MessageActionC
 		action.SetPeer(&tg.PeerUser{UserID: in.PeerUserID})
 	}
 
-	if to := tgPeer(in.To); to != nil {
-		action.SetToID(to)
+	// to_id is documented for auction-acquired gifts only: the peer the gift
+	// was assigned to, present on the bidder's copy when it differs from the
+	// bidder. Emitting it on regular purchases makes clients pick the wrong
+	// caption (sender/recipient appear swapped).
+	if in.AuctionAcquired {
+		if to := tgPeer(in.To); to != nil {
+			action.SetToID(to)
+		}
 	}
 
 	return action
@@ -1824,7 +1896,7 @@ func tgSavedStarGiftGift(g domain.SavedStarGift, catalog map[int64]domain.StarGi
 			out.SetGiftsPerRound(gift.GiftsPerRound)
 			out.SetAuctionStartDate(gift.AuctionStartDate)
 		}
-		
+
 		return out
 	}
 	return &tg.StarGift{
@@ -1910,13 +1982,13 @@ func (r *Router) checkGiftWhitelist(ctx context.Context, userID, giftID int64) e
 	}
 
 	allowed, hidden, _, hasWhitelist := r.getGiftWhitelistData(ctx, giftID, userID)
-	
+
 	if hidden && !allowed {
 		return starGiftInvalidErr()
 	}
 	if hasWhitelist && !allowed {
 		return starGiftUsageLimitedErr()
 	}
-	
+
 	return nil
 }
