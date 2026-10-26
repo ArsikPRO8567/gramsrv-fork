@@ -1107,10 +1107,13 @@ func (r *Router) deliverStarGift(ctx context.Context, senderID, recipientID int6
 			StarGift: applyStarGiftSnapshot(&domain.MessageStarGiftAction{
 				GiftID: gift.ID,
 				// Покупка с включённым улучшением — это обычное сообщение о дарении:
-				// цена в объекте равна сумме цены подарка и апгрейда, а флаги
-				// prepaid_upgrade не выставляются. Предоплата остаётся на saved gift,
-				// где клиент по-прежнему видит бесплатное улучшение.
-				Stars:              gift.Stars + prepaidUpgradeStars,
+				// флаги prepaid_upgrade не выставляются, внутренний gift.stars несёт
+				// чистую цену подарка, а сумма предоплаты выносится во внешний
+				// action upgrade_stars. Клиенты сами складывают gift.stars +
+				// upgrade_stars (суммарная цена в блоке не меняется), а внешний
+				// upgrade_stars > 0 включает у получателя кнопку бесплатного
+				// «Распаковать» вместо повторной оплаты улучшения.
+				Stars:              gift.Stars,
 				ConvertStars:       gift.ConvertStars,
 				Title:              gift.Title,
 				Sticker:            &sticker,
@@ -1123,6 +1126,7 @@ func (r *Router) deliverStarGift(ctx context.Context, senderID, recipientID int6
 				CanUpgrade:         gift.UpgradeStars > 0,
 				PrepaidUpgradeHash: prepaidUpgradeHash,
 				UpgradePriceStars:  gift.UpgradeStars,
+				UpgradeStars:       prepaidUpgradeStars,
 			}, gift),
 		},
 	}
