@@ -514,9 +514,20 @@ WHERE target_user_id=$1 AND pts=$2 AND event_type='user_emoji_status'`, resaleBu
 		t.Fatalf("purchase second prepaid gift: %v", err)
 	}
 	prepaidAction := secondPurchase.Send.RecipientMessage.Media.ServiceAction.StarGift
-	if prepaidAction == nil || prepaidAction.PrepaidUpgrade || prepaidAction.UpgradePriceStars != 100 || prepaidAction.UpgradeStars != 0 ||
-		prepaidAction.Stars != 150 {
-		t.Fatalf("prepaid purchase action must look like an ordinary gift with the summed price: %+v", prepaidAction)
+	// Официальный wire-формат предоплаченного улучшения: prepaid_upgrade не
+	// выставляется (иначе подпись «отправил улучшение»), внутренний
+	// gift.stars несёт чистую цену подарка, а сумма предоплаты лежит во
+	// внешнем action upgrade_stars. Клиенты сами складывают gift.stars +
+	// upgrade_stars (в блоке по-прежнему 50 + 100 = 150), а внешний
+	// upgrade_stars > 0 включает у получателя кнопку бесплатного
+	// «Распаковать» вместо повторной оплаты улучшения.
+	if prepaidAction == nil || prepaidAction.PrepaidUpgrade || prepaidAction.UpgradePriceStars != 100 || prepaidAction.UpgradeStars != 100 ||
+		prepaidAction.Stars != 50 || !prepaidAction.CanUpgrade {
+		t.Fatalf("prepaid purchase action must carry the prepaid amount in the outer upgrade_stars for the free unpack button: %+v", prepaidAction)
+	}
+	if senderPrepaidAction := secondPurchase.Send.SenderMessage.Media.ServiceAction.StarGift; senderPrepaidAction == nil ||
+		senderPrepaidAction.UpgradeStars != 100 || senderPrepaidAction.Stars != 50 {
+		t.Fatalf("prepaid sender action must keep the prepaid amount for the free-upgrade caption: %+v", senderPrepaidAction)
 	}
 	secondUpgrade, err := upgrades.UpgradeStarGift(ctx, domain.StarGiftUpgradeRequest{UserID: owner.ID,
 		Ref: domain.SavedStarGiftRef{Owner: ownerPeer, MsgID: secondPurchase.Saved.MsgID}, RequirePrepaid: true,

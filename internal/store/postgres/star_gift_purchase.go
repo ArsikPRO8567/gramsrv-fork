@@ -170,10 +170,17 @@ func (s *StarGiftLifecycleStore) PurchaseStarGift(ctx context.Context, req domai
 				Kind: domain.MessageServiceActionStarGift, StarGift: fillStarGiftSnapshot(&domain.MessageStarGiftAction{
 					GiftID: gift.ID,
 					// Покупка — всегда обычное сообщение о дарении редкого подарка.
-					// Включённое улучшение не делает сообщение «апгрейдом»: цена в
-					// объекте равна сумме цены подарка и апгрейда, предоплата остаётся
-					// на saved gift (клиент видит бесплатное улучшение в профиле).
-					Stars:              gift.Stars + saved.PrepaidUpgradeStars,
+					// Включённое улучшение не делает сообщение «апгрейдом» (флаг
+					// prepaid_upgrade не выставляется, иначе клиенты рисуют подпись
+					// «отправил улучшение»). Официальный wire-формат предоплаты:
+					// внутренний gift.stars несёт чистую цену подарка, а стоимость
+					// предоплаченного улучшения выносится во внешний action
+					// upgrade_stars. Клиенты сами складывают gift.stars +
+					// upgrade_stars и показывают суммарную цену, а внешний
+					// upgrade_stars > 0 включает у получателя кнопку бесплатного
+					// «Распаковать» (payments.upgradeStarGift без списания звёзд:
+					// entitlement уже лежит в saved gift prepaid_upgrade_stars).
+					Stars:              gift.Stars,
 					ConvertStars:       saved.ConvertStars,
 					Title:              gift.Title,
 					Sticker:            &sticker,
@@ -186,6 +193,7 @@ func (s *StarGiftLifecycleStore) PurchaseStarGift(ctx context.Context, req domai
 					CanUpgrade:         gift.UpgradeStars > 0,
 					PrepaidUpgradeHash: saved.PrepaidUpgradeHash,
 					UpgradePriceStars:  gift.UpgradeStars,
+					UpgradeStars:       saved.PrepaidUpgradeStars,
 					GiftNum:            saved.GiftNum,
 					GiftMsgID:          saved.MsgID,
 				}, gift),
