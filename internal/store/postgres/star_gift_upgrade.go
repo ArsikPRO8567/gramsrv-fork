@@ -431,7 +431,11 @@ WHERE collectible_revision_id=$1 AND crafted
 					canCraftAt = starGiftCraftReadyAt(req.Date, s.lifecycle.CraftDelaySeconds)
 				}
 			}
-			if revision.Issued >= revision.SupplyTotal {
+			if revision.Issued >= revision.SupplyTotal && !req.RequirePrepaid {
+				// Sold out blocks fresh paid upgrades only. A prepayment captured
+				// at purchase time is an entitlement: it must survive a later
+				// sellout, exactly like a later price change must not
+				// retroactively invalidate it.
 				return domain.ErrStarGiftCollectibleSoldOut
 			}
 			if req.RequirePrepaid {
@@ -487,7 +491,7 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17, $18, $19)`,
 				uniqueID, locked.GiftID, revision.ID, locked.ID, title, slug, num,
 				string(locked.Owner.Type), locked.Owner.ID, modelID, patternID, backdropID, req.KeepOriginalDetails,
 				string(locked.Owner.Type), locked.Owner.ID, craftChancePermille, s.lifecycle.OfferMinStars,
-    relType, relID); err != nil {
+				relType, relID); err != nil {
 				return fmt.Errorf("insert unique star gift: %w", err)
 			}
 			if _, err := tx.Exec(ctx, `UPDATE star_gift_collectible_revisions SET issued=issued+1 WHERE id=$1`, revision.ID); err != nil {
@@ -787,7 +791,7 @@ FOR UPDATE`, req.UserID, sourceMessageID).Scan(&peerType, &peerID)
 			if action == nil || action.GiftID != saved.GiftID {
 				return nil, fmt.Errorf("star gift source message %d has invalid media", box.BoxID)
 			}
-			
+
 			upgradeMessageID := upgradeMessageIDs[box.OwnerUserID]
 			if action.UpgradeMsgID != 0 && upgradeMessageID > 0 && action.UpgradeMsgID != upgradeMessageID {
 				return nil, fmt.Errorf("star gift source message %d has conflicting upgrade message %d", box.BoxID, action.UpgradeMsgID)

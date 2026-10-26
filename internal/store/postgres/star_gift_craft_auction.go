@@ -687,12 +687,12 @@ acquired_count=acquired_count+1,version=version+1 WHERE gift_id=$1 AND bidder_us
 						return err
 					}
 				}
-				
-				// ЛОГИКА СЖИГАНИЯ: даже если победителей 5, а лимит 7, мы увеличиваем 
+
+				// ЛОГИКА СЖИГАНИЯ: даже если победителей 5, а лимит 7, мы увеличиваем
 				// lastGiftNum на 7. Номера 6 и 7 «пропускаются».
 				burnedInRound := awardLimit - len(winners)
 				lastGiftNum += awardLimit // Увеличиваем на весь лимит раунда
-				giftsLeft -= awardLimit    // Уменьшаем остаток на весь лимит раунда
+				giftsLeft -= awardLimit   // Уменьшаем остаток на весь лимит раунда
 				totalBurnedInThisExecution += burnedInRound
 			}
 
@@ -720,7 +720,7 @@ last_gift_num=$5,gifts_left=$6,version=version+1,updated_at=now() WHERE gift_id=
 				minAuctionInt(currentRound, totalRounds), minAuctionInt(nextRoundAt, endDate), lastGiftNum, giftsLeft); err != nil {
 				return err
 			}
-			// ОБЯЗАТЕЛЬНО: Синхронизируем availability_remains в каталоге, вычитая из него ВСЕ 
+			// ОБЯЗАТЕЛЬНО: Синхронизируем availability_remains в каталоге, вычитая из него ВСЕ
 			// ушедшие из аукциона подарки (и выигранные, и сгоревшие).
 			// awardedCount здесь заменен на расчет на базе gifts_left.
 			if _, err := tx.Exec(ctx, `UPDATE star_gift_catalog SET availability_remains=$2, 
@@ -850,7 +850,7 @@ WHERE gift_id=$1 AND saved_gift_id IS NULL ORDER BY id LIMIT 100`, giftID)
 							Stars: gift.Stars, ConvertStars: 0, Title: gift.Title, Sticker: &sticker, Message: item.message,
 							FromUserID: item.bidder, PeerUserID: owner.ID, NameHidden: item.hide, Saved: true,
 							// to_id нужен только копии победителя, когда подарок назначен другому peer.
-							To: bidAwardToPeer(item.bidder, owner),
+							To:              bidAwardToPeer(item.bidder, owner),
 							AuctionAcquired: true, GiftNum: item.giftNum}, gift)}}})
 				if err != nil {
 					return err
@@ -876,8 +876,10 @@ WHERE gift_id=$1 AND saved_gift_id IS NULL ORDER BY id LIMIT 100`, giftID)
 				}
 				if owner.Type == domain.PeerTypeChannel {
 					sticker := gift.Sticker
+					// item.amount — выигрышная ставка: блок подарка в admin log
+					// и уведомлениях показывает её, а не цену каталога.
 					action := domain.ChannelMessageAction{Type: domain.ChannelActionStarGift, StarGift: fillStarGiftSnapshot(&domain.MessageStarGiftAction{
-						GiftID: gift.ID, Stars: gift.Stars, ConvertStars: 0, Title: gift.Title, Sticker: &sticker,
+						GiftID: gift.ID, Stars: item.amount, ConvertStars: 0, Title: gift.Title, Sticker: &sticker,
 						Message: item.message, FromUserID: item.bidder, PeerChannelID: owner.ID, SavedID: id,
 						NameHidden: item.hide, Saved: true, AuctionAcquired: true, GiftNum: item.giftNum,
 					}, gift)}
@@ -988,7 +990,9 @@ func (s *StarGiftLifecycleStore) BidStarGiftAuction(ctx context.Context, req dom
 		return domain.StarGiftAuction{}, domain.StarsBalance{}, err
 	}
 	if balance, found, err := s.loadAuctionBidReplay(ctx, req.UserID, req.FormID, req.GiftID); err != nil || found {
-		if err != nil { return domain.StarGiftAuction{}, domain.StarsBalance{}, err }
+		if err != nil {
+			return domain.StarGiftAuction{}, domain.StarsBalance{}, err
+		}
 		state, stateErr := s.loadStarGiftAuction(ctx, req.UserID, req.GiftID)
 		return state, balance, stateErr
 	}
@@ -1001,28 +1005,34 @@ func (s *StarGiftLifecycleStore) BidStarGiftAuction(ctx context.Context, req dom
 			Scan(&startDate, &endDate, &minimum, &status); err != nil {
 			return err
 		}
-		
+
 		// ИСПРАВЛЕНИЕ: Разрешаем ставки, если статус 'pending' (предстоящий) ИЛИ 'active'.
 		// Убираем жесткую проверку req.Date < startDate.
 		if (status != "active" && status != "pending") || req.Date >= endDate || req.BidAmount < minimum {
 			return domain.ErrStarGiftAuctionUnavailable
 		}
-		
+
 		var oldAmount int64
 		var oldActive bool
 		err := tx.QueryRow(ctx, `SELECT amount,active FROM star_gift_auction_bids WHERE gift_id=$1 AND bidder_user_id=$2 FOR UPDATE`, req.GiftID, req.UserID).Scan(&oldAmount, &oldActive)
-		if err != nil && !errors.Is(err, pgx.ErrNoRows) { return err }
+		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			return err
+		}
 		if oldActive && (!req.UpdateBid || req.BidAmount <= oldAmount) || !oldActive && req.UpdateBid {
 			return domain.ErrStarGiftAuctionUnavailable
 		}
 		reserved := int64(0)
-		if oldActive { reserved = oldAmount }
+		if oldActive {
+			reserved = oldAmount
+		}
 		delta := req.BidAmount - reserved
 		balance, err = s.debitLifecycleAmount(ctx, tx, req.UserID,
 			domain.StarGiftAmount{Currency: domain.StarGiftCurrencyStars, Amount: delta}, domain.StarsReasonGiftAuction,
 			req.Peer, req.Date, "Star gift auction bid")
-		if err != nil { return err }
-		
+		if err != nil {
+			return err
+		}
+
 		if _, err := tx.Exec(ctx, `INSERT INTO star_gift_auction_bids(gift_id,bidder_user_id,recipient_peer_type,recipient_peer_id,
 amount,bid_date,hide_name,message) VALUES($1,$2,$3,$4,$5,$6,$7,$8)
 ON CONFLICT(gift_id,bidder_user_id) DO UPDATE SET
@@ -1042,7 +1052,9 @@ VALUES($1,$2,$3,$4,$5,$6)`, req.UserID, req.FormID, req.GiftID, req.BidAmount, b
 		_, err = tx.Exec(ctx, `UPDATE star_gift_auctions SET version=version+1,updated_at=now() WHERE gift_id=$1`, req.GiftID)
 		return err
 	})
-	if err != nil { return domain.StarGiftAuction{}, domain.StarsBalance{}, err }
+	if err != nil {
+		return domain.StarGiftAuction{}, domain.StarsBalance{}, err
+	}
 	state, err := s.loadStarGiftAuction(ctx, req.UserID, req.GiftID)
 	return state, balance, err
 }
