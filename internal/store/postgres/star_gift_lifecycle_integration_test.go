@@ -90,11 +90,11 @@ func TestStarGiftLifecycleAggregatePostgres(t *testing.T) {
 	ordinaryAction := purchased.Send.RecipientMessage.Media.ServiceAction.StarGift
 	if ordinaryAction == nil || !ordinaryAction.CanUpgrade || ordinaryAction.PrepaidUpgrade ||
 		ordinaryAction.UpgradePriceStars != 100 || ordinaryAction.UpgradeStars != 0 ||
-		ordinaryAction.PrepaidUpgradeHash != "" {
+		ordinaryAction.PrepaidUpgradeHash != "" || ordinaryAction.Saved {
 		t.Fatalf("ordinary purchase action mixed paid price with prepaid amount: %+v", ordinaryAction)
 	}
 	senderOrdinaryAction := purchased.Send.SenderMessage.Media.ServiceAction.StarGift
-	if senderOrdinaryAction == nil || !senderOrdinaryAction.CanUpgrade ||
+	if senderOrdinaryAction == nil || !senderOrdinaryAction.CanUpgrade || senderOrdinaryAction.Saved ||
 		senderOrdinaryAction.PrepaidUpgradeHash != purchased.Saved.PrepaidUpgradeHash {
 		t.Fatalf("ordinary sender purchase projection = %+v", senderOrdinaryAction)
 	}
@@ -121,7 +121,7 @@ func TestStarGiftLifecycleAggregatePostgres(t *testing.T) {
 	prepaySenderAction := prepaid.Send.SenderMessage.Media.ServiceAction.StarGift
 	prepayOwnerAction := prepaid.Send.RecipientMessage.Media.ServiceAction.StarGift
 	if prepaySenderAction == nil || prepayOwnerAction == nil ||
-		prepaySenderAction.GiftMsgID != 0 ||
+		prepaySenderAction.GiftMsgID != 0 || !prepayOwnerAction.Saved ||
 		prepayOwnerAction.GiftMsgID != purchased.Send.RecipientMessage.ID {
 		t.Fatalf("prepay gift_msg_id is not owner-only: sender=%+v owner=%+v purchase=%+v",
 			prepaySenderAction, prepayOwnerAction, purchased.Send)

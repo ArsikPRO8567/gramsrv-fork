@@ -150,7 +150,7 @@ func (s *StarGiftLifecycleStore) PurchaseStarGift(ctx context.Context, req domai
 		OriginAuthKeyID: req.OriginAuthKeyID, OriginSessionID: req.OriginSessionID, OriginUserID: req.BuyerUserID,
 		RecipientBlocked: req.RecipientBlocked, IdempotencyFingerprint: fingerprint[:],
 		Media: &domain.MessageMedia{Kind: domain.MessageMediaKindService, ServiceAction: &domain.MessageServiceAction{
-			Kind: domain.MessageServiceActionStarGift, StarGift: &domain.MessageStarGiftAction{Saved: true}}}}
+			Kind: domain.MessageServiceActionStarGift, StarGift: &domain.MessageStarGiftAction{}}}}
 	var result domain.StarGiftPurchaseResult
 	var savedGift domain.SavedStarGift
 	var resultGift domain.StarGift
@@ -180,16 +180,20 @@ func (s *StarGiftLifecycleStore) PurchaseStarGift(ctx context.Context, req domai
 					// upgrade_stars > 0 включает у получателя кнопку бесплатного
 					// «Распаковать» (payments.upgradeStarGift без списания звёзд:
 					// entitlement уже лежит в saved gift prepaid_upgrade_stars).
-					Stars:              gift.Stars,
-					ConvertStars:       saved.ConvertStars,
-					Title:              gift.Title,
-					Sticker:            &sticker,
-					Message:            req.Message,
-					FromUserID:         req.BuyerUserID,
-					PeerUserID:         req.To.ID,
-					To:                 req.To,
-					NameHidden:         req.HideName,
-					Saved:              true,
+					Stars:        gift.Stars,
+					ConvertStars: saved.ConvertStars,
+					Title:        gift.Title,
+					Sticker:      &sticker,
+					Message:      req.Message,
+					FromUserID:   req.BuyerUserID,
+					PeerUserID:   req.To.ID,
+					To:           req.To,
+					NameHidden:   req.HideName,
+					// Свежий подарок ещё не отображается в профиле получателя:
+					// Saved=false — иначе клиент получателя показывает «сейчас
+					// подарок виден в вашем профиле» вместо подсказки об
+					// улучшении до уникального коллекционного.
+					Saved:              false,
 					CanUpgrade:         gift.UpgradeStars > 0,
 					PrepaidUpgradeHash: saved.PrepaidUpgradeHash,
 					UpgradePriceStars:  gift.UpgradeStars,
