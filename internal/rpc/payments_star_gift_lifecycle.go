@@ -86,6 +86,11 @@ func (r *Router) starGiftResalePaymentForm(ctx context.Context, userID int64, in
 	if err != nil {
 		return nil, err
 	}
+	// require_premium наследуется от исходного подарка: форма покупки коллекции
+	// недоступна без Premium (тот же гейт, что у обычной покупки подарка).
+	if gift.RequirePremium && !r.viewerPremium(ctx, userID) {
+		return nil, tgerr400("PREMIUM_ACCOUNT_REQUIRED")
+	}
 	currency := string(amount.Currency)
 	return &tg.PaymentsPaymentFormStarGift{FormID: starGiftLifecycleFormID("resale", userID,
 		gift.ID, gift.Owner.Type, gift.Owner.ID, to.Type, to.ID, amount.Currency, amount.Amount, gift.ResellVersion),
@@ -96,6 +101,10 @@ func (r *Router) sendStarGiftResaleForm(ctx context.Context, userID, formID int6
 	gift, to, amount, err := r.starGiftResaleTarget(ctx, userID, inv)
 	if err != nil {
 		return nil, err
+	}
+	buyerPremium := r.viewerPremium(ctx, userID)
+	if gift.RequirePremium && !buyerPremium {
+		return nil, tgerr400("PREMIUM_ACCOUNT_REQUIRED")
 	}
 	wantFormID := starGiftLifecycleFormID("resale", userID,
 		gift.ID, gift.Owner.Type, gift.Owner.ID, to.Type, to.ID, amount.Currency, amount.Amount, gift.ResellVersion)
@@ -116,8 +125,9 @@ func (r *Router) sendStarGiftResaleForm(ctx context.Context, userID, formID int6
 		return nil, err
 	}
 	result, err := r.deps.Gifts.PurchaseResale(ctx, domain.StarGiftResalePurchaseRequest{BuyerUserID: userID,
-		Slug: gift.Slug, To: to, Amount: amount, FormID: formID, CommandKey: fmt.Sprintf("resale:%d:%d", gift.ID, formID),
-		Date: int(r.clock.Now().Unix()), RecipientUnsaved: recipientUnsaved,
+		BuyerPremium: buyerPremium, Slug: gift.Slug, To: to, Amount: amount, FormID: formID,
+		CommandKey: fmt.Sprintf("resale:%d:%d", gift.ID, formID),
+		Date:       int(r.clock.Now().Unix()), RecipientUnsaved: recipientUnsaved,
 		OriginAuthKeyID: rawAuthKeyIDForOrigin(ctx), OriginSessionID: sessionIDOrZero(ctx)})
 	if err != nil {
 		return nil, starGiftLifecycleErr(err)
@@ -703,8 +713,8 @@ func (r *Router) onPaymentsSendStarGiftOffer(ctx context.Context, req *tg.Paymen
 		return nil, starGiftInvalidErr()
 	}
 	now := int(r.clock.Now().Unix())
-	result, err := r.deps.Gifts.SendOffer(ctx, domain.StarGiftOfferRequest{BuyerUserID: userID, Owner: owner,
-		Slug: req.Slug, Price: price, Duration: req.Duration, RandomID: req.RandomID, Date: now,
+	result, err := r.deps.Gifts.SendOffer(ctx, domain.StarGiftOfferRequest{BuyerUserID: userID, BuyerPremium: r.viewerPremium(ctx, userID),
+		Owner: owner, Slug: req.Slug, Price: price, Duration: req.Duration, RandomID: req.RandomID, Date: now,
 		OriginAuthKeyID: rawAuthKeyIDForOrigin(ctx), OriginSessionID: sessionIDOrZero(ctx)})
 	if err != nil {
 		return nil, starGiftLifecycleErr(err)

@@ -1832,7 +1832,7 @@ func tgSavedStarGifts(viewerUserID int64, gifts []domain.SavedStarGift, catalog 
 	for _, g := range gifts {
 		item := tg.SavedStarGift{
 			Date: g.Date,
-			Gift: tgSavedStarGiftGift(g, catalog, availability),
+			Gift: tgSavedStarGiftGift(g, viewerUserID, catalog, availability),
 		}
 		if g.NameHidden {
 			item.NameHidden = true
@@ -1916,9 +1916,11 @@ func tgSavedStarGifts(viewerUserID int64, gifts []domain.SavedStarGift, catalog 
 }
 
 // tgSavedStarGiftGift 按收到时的不可变 revision 投影，目录停用或后续改版不影响历史显示。
-func tgSavedStarGiftGift(g domain.SavedStarGift, catalog map[int64]domain.StarGift, availability map[int64]domain.StarGiftCollectibleAvailability) tg.StarGiftClass {
+// viewerUserID нужен, чтобы не отдавать владельцу его же offer_min_stars (кнопка
+// «Предложить сделку» на собственном подарке).
+func tgSavedStarGiftGift(g domain.SavedStarGift, viewerUserID int64, catalog map[int64]domain.StarGift, availability map[int64]domain.StarGiftCollectibleAvailability) tg.StarGiftClass {
 	if g.Unique != nil {
-		return tgUniqueStarGift(*g.Unique)
+		return tgUniqueStarGiftForViewer(*g.Unique, viewerUserID)
 	}
 	if gift, ok := catalog[g.RevisionID]; ok {
 		if current, ok := availability[g.GiftID]; ok {

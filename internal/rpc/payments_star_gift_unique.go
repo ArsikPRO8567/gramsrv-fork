@@ -280,7 +280,7 @@ func (r *Router) onPaymentsGetUniqueStarGift(ctx context.Context, slug string) (
 		return nil, starGiftInvalidErr()
 	}
 	out := &tg.PaymentsUniqueStarGift{
-		Gift:  tgUniqueStarGift(unique),
+		Gift:  tgUniqueStarGiftForViewer(unique, viewerUserID),
 		Chats: []tg.ChatClass{},
 		Users: []tg.UserClass{},
 	}
@@ -426,6 +426,20 @@ func tgUniqueStarGift(unique domain.UniqueStarGift) *tg.StarGiftUnique {
 	}
 	if unique.CraftChancePermille > 0 {
 		out.SetCraftChancePermille(unique.CraftChancePermille)
+	}
+	return out
+}
+
+// tgUniqueStarGiftForViewer проецирует уникальный подарок с учётом зрителя.
+// offer_min_stars управляет кнопкой «Предложить сделку» в клиенте: владелец
+// не должен видеть этот флаг на собственном подарке (иначе клиент предлагает
+// ему сделку с самим собой), остальным зрителям он нужен для минимальной цены.
+func tgUniqueStarGiftForViewer(unique domain.UniqueStarGift, viewerUserID int64) *tg.StarGiftUnique {
+	out := tgUniqueStarGift(unique)
+	if unique.Owner.Type == domain.PeerTypeUser && unique.Owner.ID == viewerUserID {
+		// flag 13 = offer_min_stars; сбрасываем и бит, и значение.
+		out.Flags.Unset(13)
+		out.OfferMinStars = 0
 	}
 	return out
 }
