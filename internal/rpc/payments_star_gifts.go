@@ -1113,16 +1113,20 @@ func (r *Router) deliverStarGift(ctx context.Context, senderID, recipientID int6
 				// upgrade_stars (суммарная цена в блоке не меняется), а внешний
 				// upgrade_stars > 0 включает у получателя кнопку бесплатного
 				// «Распаковать» вместо повторной оплаты улучшения.
-				Stars:              gift.Stars,
-				ConvertStars:       gift.ConvertStars,
-				Title:              gift.Title,
-				Sticker:            &sticker,
-				Message:            message,
-				FromUserID:         senderID,
-				PeerUserID:         recipientID,
-				To:                 domain.Peer{Type: domain.PeerTypeUser, ID: recipientID},
-				NameHidden:         hideName,
-				Saved:              true,
+				Stars:        gift.Stars,
+				ConvertStars: gift.ConvertStars,
+				Title:        gift.Title,
+				Sticker:      &sticker,
+				Message:      message,
+				FromUserID:   senderID,
+				PeerUserID:   recipientID,
+				To:           domain.Peer{Type: domain.PeerTypeUser, ID: recipientID},
+				NameHidden:   hideName,
+				// Свежий подарок ещё не отображается в профиле получателя:
+				// Saved=false — иначе клиент получателя показывает «сейчас
+				// подарок виден в вашем профиле» вместо подсказки об
+				// улучшении до уникального коллекционного.
+				Saved:              false,
 				CanUpgrade:         gift.UpgradeStars > 0,
 				PrepaidUpgradeHash: prepaidUpgradeHash,
 				UpgradePriceStars:  gift.UpgradeStars,
@@ -1715,8 +1719,15 @@ func tgMessageActionStarGift(in *domain.MessageStarGiftAction) tg.MessageActionC
 	}
 
 	action := &tg.MessageActionStarGift{
-		Gift:       gift,
-		Saved:      true,
+		Gift: gift,
+		// saved = «подарок уже отображается в профиле получателя» (официальная
+		// семантика флага). Свежевысланный подарок ещё не добавлен в профиль,
+		// поэтому приватные покупки уходят с Saved=false: захардкоженный true
+		// заставлял клиента получателя показывать подпись «сейчас подарок виден
+		// в вашем профиле» вместо подсказки «вы можете добавить этот подарок в
+		// профиль или превратить в уникальный коллекционный». Канальные покупки
+		// и предоплата улучшения выставляют Saved=true у себя в продюсерах.
+		Saved:      in.Saved,
 		NameHidden: in.NameHidden,
 		CanUpgrade: in.CanUpgrade,
 	}

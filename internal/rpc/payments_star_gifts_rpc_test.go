@@ -891,6 +891,59 @@ func TestMessageStarGiftProjectionSeparatesPaidPriceFromPrepaidAmount(t *testing
 	}
 }
 
+// Свежевысланный приватный подарок ещё не добавлен в профиль получателя, поэтому
+// флаг saved (flag 2) не выставляется: захардкоженный true заставлял клиента
+// получателя показывать «сейчас подарок виден в вашем профиле» вместо подсказки
+// «вы можете добавить этот подарок в профиль или превратить в уникальный
+// коллекционный». Канальные покупки и предоплата улучшения по-прежнему уходят
+// с saved=true.
+func TestMessageStarGiftSavedFlagFollowsDomainAction(t *testing.T) {
+	fresh, ok := tgMessageActionStarGift(&domain.MessageStarGiftAction{
+		GiftID: 8001, Stars: 50, ConvertStars: 20, CanUpgrade: true, UpgradePriceStars: 75,
+	}).(*tg.MessageActionStarGift)
+	if !ok {
+		t.Fatalf("fresh action = %T", fresh)
+	}
+	if fresh.Saved {
+		t.Fatalf("fresh private gift action carries saved flag: %#v", fresh)
+	}
+
+	savedAction, ok := tgMessageActionStarGift(&domain.MessageStarGiftAction{
+		GiftID: 8001, Stars: 50, Saved: true, CanUpgrade: true,
+	}).(*tg.MessageActionStarGift)
+	if !ok {
+		t.Fatalf("saved action = %T", savedAction)
+	}
+	if !savedAction.Saved {
+		t.Fatalf("channel/prepay gift action lost saved flag: %#v", savedAction)
+	}
+
+	decode := func(in *tg.MessageActionStarGift) *tg.MessageActionStarGift {
+		t.Helper()
+		wire := &bin.Buffer{}
+		if err := tlprofile.EncodeObject(tlprofile.Profile228, in, wire); err != nil {
+			t.Fatalf("encode action: %v", err)
+		}
+		decodedObject, err := tlprofile.DecodeObject(tlprofile.Profile228, &bin.Buffer{Buf: wire.Buf}, tlprofile.Limits{})
+		if err != nil {
+			t.Fatalf("decode action: %v", err)
+		}
+		decoded, ok := decodedObject.(*tg.MessageActionStarGift)
+		if !ok {
+			t.Fatalf("decoded action = %T", decodedObject)
+		}
+		return decoded
+	}
+	// Бит saved (flag 2) пересчитывается из поля при кодировании, поэтому
+	// wire-контракт проверяем полным roundtrip'ом.
+	if decoded := decode(fresh); decoded.Saved {
+		t.Fatalf("decoded fresh action sets saved flag: %#v", decoded)
+	}
+	if decoded := decode(savedAction); !decoded.Saved {
+		t.Fatalf("decoded saved action lost saved flag: %#v", decoded)
+	}
+}
+
 func TestStarGiftPrepaidUpgradeProjectionIsViewerScoped(t *testing.T) {
 	const (
 		senderID = int64(7101)
