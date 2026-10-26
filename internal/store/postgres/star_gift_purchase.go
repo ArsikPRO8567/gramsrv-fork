@@ -168,8 +168,12 @@ func (s *StarGiftLifecycleStore) PurchaseStarGift(ctx context.Context, req domai
 			sticker := gift.Sticker
 			send.Media = &domain.MessageMedia{Kind: domain.MessageMediaKindService, ServiceAction: &domain.MessageServiceAction{
 				Kind: domain.MessageServiceActionStarGift, StarGift: fillStarGiftSnapshot(&domain.MessageStarGiftAction{
-					GiftID:             gift.ID,
-					Stars:              gift.Stars,
+					GiftID: gift.ID,
+					// Покупка — всегда обычное сообщение о дарении редкого подарка.
+					// Включённое улучшение не делает сообщение «апгрейдом»: цена в
+					// объекте равна сумме цены подарка и апгрейда, предоплата остаётся
+					// на saved gift (клиент видит бесплатное улучшение в профиле).
+					Stars:              gift.Stars + saved.PrepaidUpgradeStars,
 					ConvertStars:       saved.ConvertStars,
 					Title:              gift.Title,
 					Sticker:            &sticker,
@@ -180,10 +184,8 @@ func (s *StarGiftLifecycleStore) PurchaseStarGift(ctx context.Context, req domai
 					NameHidden:         req.HideName,
 					Saved:              true,
 					CanUpgrade:         gift.UpgradeStars > 0,
-					PrepaidUpgrade:     saved.PrepaidUpgradeStars > 0,
 					PrepaidUpgradeHash: saved.PrepaidUpgradeHash,
 					UpgradePriceStars:  gift.UpgradeStars,
-					UpgradeStars:       saved.PrepaidUpgradeStars,
 					GiftNum:            saved.GiftNum,
 					GiftMsgID:          saved.MsgID,
 				}, gift),
@@ -247,26 +249,27 @@ func (s *StarGiftLifecycleStore) purchaseStarGiftToChannel(ctx context.Context, 
 		action := domain.ChannelMessageAction{
 			Type: domain.ChannelActionStarGift,
 			StarGift: fillStarGiftSnapshot(&domain.MessageStarGiftAction{
-				GiftID:         gift.ID,
-				Stars:          gift.Stars,
-				ConvertStars:   saved.ConvertStars,
-				Title:          gift.Title,
-				Sticker:        &sticker,
-				Message:        saved.Message,
-				FromUserID:     req.BuyerUserID,
-				PeerChannelID:  req.To.ID,
-				SavedID:        id,
-				NameHidden:     saved.NameHidden,
-				Saved:          true,
-				CanUpgrade:     gift.UpgradeStars > 0,
-				PrepaidUpgrade: saved.PrepaidUpgradeStars > 0,
+				GiftID: gift.ID,
+				// Канальная покупка — тоже обычное сообщение о дарении: цена в
+				// объекте равна сумме цены подарка и апгрейда, флаги prepaid_upgrade
+				// не выставляются.
+				Stars:         gift.Stars + saved.PrepaidUpgradeStars,
+				ConvertStars:  saved.ConvertStars,
+				Title:         gift.Title,
+				Sticker:       &sticker,
+				Message:       saved.Message,
+				FromUserID:    req.BuyerUserID,
+				PeerChannelID: req.To.ID,
+				SavedID:       id,
+				NameHidden:    saved.NameHidden,
+				Saved:         true,
+				CanUpgrade:    gift.UpgradeStars > 0,
 				// PrepaidUpgradeHash сознательно не включается: hash — это инвойс
 				// «оплатить улучшение чужого подарка», он привязан к приватному диалогу
 				// плательщика. В канальном действии он заставляет клиентов отправлять
 				// prepay invoice с peer = сервисный аккаунт/канал (STARGIFT_INVALID
 				// либо нежелательную предоплату вместо обычного улучшения).
 				UpgradePriceStars: gift.UpgradeStars,
-				UpgradeStars:      saved.PrepaidUpgradeStars,
 				GiftNum:           saved.GiftNum,
 				GiftMsgID:         int(id),
 			}, gift),

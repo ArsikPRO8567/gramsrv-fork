@@ -76,8 +76,9 @@ func projectPrivateStarGiftSourceRef(
 // an ordinary user gift to the correct account-local message box:
 //   - the gift owner/receiver may upgrade it and must not receive the separate
 //     prepayment hash;
-//   - the non-owner sender may use the hash to prepay for the owner's upgrade,
-//     but must not receive the receiver-only can_upgrade capability.
+//   - the non-owner sender keeps can_upgrade (official servers expose it to
+//     both participants so clients render the upgradable caption on the sender
+//     side too) and may use the hash to prepay for the owner's upgrade.
 //
 // The shared logical envelope carries neither viewer-only field. This keeps a
 // future read/replay path from accidentally treating it as either participant's
@@ -125,9 +126,11 @@ func projectPrivateStarGiftPurchase(
 	sharedAction.CanUpgrade = false
 	if req.SenderUserID == ownerUserID {
 		senderAction.PrepaidUpgradeHash = ""
-	} else {
-		senderAction.CanUpgrade = false
 	}
+	// can_upgrade остаётся и на копии отправителя: официальные серверы отдают
+	// его обеим сторонам, чтобы клиенты показывали отправителю подпись
+	// «{user} может превратить подарок в уникальный коллекционный».
+	// Само действие апгрейда по-прежнему доступно только владельцу подарка.
 	recipientAction.PrepaidUpgradeHash = ""
 	return privateSendMediaProjection{Shared: shared, Sender: sender, Recipient: recipient}, nil
 }

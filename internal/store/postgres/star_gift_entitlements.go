@@ -115,8 +115,11 @@ VALUES($1,$2,$3,$4,$5,$6,$7)`, req.PayerUserID, req.CommandKey, locked.ID, req.F
 		sticker := gift.Sticker
 		// Полный снимок каталога обязателен: клиенты рисуют стоимость и бейдж
 		// «N из M» из этого payload, а без released_by блок неполон.
+		// Stars несёт цену улучшения: отдельная отправка улучшения — это
+		// сообщение об апгрейде, и цена в объекте должна равняться цене
+		// улучшения, а не цене самого подарка.
 		action := fillStarGiftSnapshot(&domain.MessageStarGiftAction{
-			GiftID: gift.ID, Stars: gift.Stars, ConvertStars: locked.ConvertStars, Title: gift.Title, Sticker: &sticker,
+			GiftID: gift.ID, Stars: req.ChargeStars, ConvertStars: locked.ConvertStars, Title: gift.Title, Sticker: &sticker,
 			FromUserID: req.PayerUserID, To: req.Owner, SavedID: locked.SavedID, Saved: true, CanUpgrade: true,
 			PrepaidUpgrade: true, UpgradeSeparate: true, UpgradePriceStars: req.ChargeStars,
 			UpgradeStars: req.ChargeStars, GiftMsgID: locked.MsgID,

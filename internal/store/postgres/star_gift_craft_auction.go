@@ -847,7 +847,11 @@ WHERE gift_id=$1 AND saved_gift_id IS NULL ORDER BY id LIMIT 100`, giftID)
 					RecipientUserID: owner.ID, RandomID: lifecycleCommandRandomID("auction-award", giftID, item.round, item.pos),
 					Date: item.date, Media: &domain.MessageMedia{Kind: domain.MessageMediaKindService, ServiceAction: &domain.MessageServiceAction{
 						Kind: domain.MessageServiceActionStarGift, StarGift: fillStarGiftSnapshot(&domain.MessageStarGiftAction{GiftID: gift.ID,
-							Stars: gift.Stars, ConvertStars: 0, Title: gift.Title, Sticker: &sticker, Message: item.message,
+							// item.amount — последняя выигрышная ставка победителя:
+							// цена в объекте подарка и в сервисном сообщении должна
+							// показывать её, а не общую цену каталога (как и в
+							// канальной ветке ниже).
+							Stars: item.amount, ConvertStars: 0, Title: gift.Title, Sticker: &sticker, Message: item.message,
 							FromUserID: item.bidder, PeerUserID: owner.ID, NameHidden: item.hide, Saved: true,
 							// to_id нужен только копии победителя, когда подарок назначен другому peer.
 							To:              bidAwardToPeer(item.bidder, owner),

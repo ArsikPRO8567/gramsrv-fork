@@ -29,8 +29,10 @@ func TestProjectPrivateStarGiftPurchaseScopesViewerCapabilities(t *testing.T) {
 	if shared == nil || shared.CanUpgrade || shared.PrepaidUpgradeHash != "" {
 		t.Fatalf("shared projection retained viewer capability: %+v", shared)
 	}
-	if sender == nil || sender.CanUpgrade || sender.PrepaidUpgradeHash == "" {
-		t.Fatalf("sender projection = %+v, want hash without can_upgrade", sender)
+	// Official servers keep can_upgrade on the sender copy so clients render
+	// the upgradable caption on both sides; only the owner may act on it.
+	if sender == nil || !sender.CanUpgrade || sender.PrepaidUpgradeHash == "" {
+		t.Fatalf("sender projection = %+v, want hash with can_upgrade caption flag", sender)
 	}
 	if recipient == nil || !recipient.CanUpgrade || recipient.PrepaidUpgradeHash != "" {
 		t.Fatalf("recipient projection = %+v, want can_upgrade without hash", recipient)

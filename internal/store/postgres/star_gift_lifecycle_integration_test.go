@@ -94,7 +94,7 @@ func TestStarGiftLifecycleAggregatePostgres(t *testing.T) {
 		t.Fatalf("ordinary purchase action mixed paid price with prepaid amount: %+v", ordinaryAction)
 	}
 	senderOrdinaryAction := purchased.Send.SenderMessage.Media.ServiceAction.StarGift
-	if senderOrdinaryAction == nil || senderOrdinaryAction.CanUpgrade ||
+	if senderOrdinaryAction == nil || !senderOrdinaryAction.CanUpgrade ||
 		senderOrdinaryAction.PrepaidUpgradeHash != purchased.Saved.PrepaidUpgradeHash {
 		t.Fatalf("ordinary sender purchase projection = %+v", senderOrdinaryAction)
 	}
@@ -514,8 +514,9 @@ WHERE target_user_id=$1 AND pts=$2 AND event_type='user_emoji_status'`, resaleBu
 		t.Fatalf("purchase second prepaid gift: %v", err)
 	}
 	prepaidAction := secondPurchase.Send.RecipientMessage.Media.ServiceAction.StarGift
-	if prepaidAction == nil || !prepaidAction.PrepaidUpgrade || prepaidAction.UpgradePriceStars != 100 || prepaidAction.UpgradeStars != 100 {
-		t.Fatalf("prepaid purchase action lost price/entitlement split: %+v", prepaidAction)
+	if prepaidAction == nil || prepaidAction.PrepaidUpgrade || prepaidAction.UpgradePriceStars != 100 || prepaidAction.UpgradeStars != 0 ||
+		prepaidAction.Stars != 150 {
+		t.Fatalf("prepaid purchase action must look like an ordinary gift with the summed price: %+v", prepaidAction)
 	}
 	secondUpgrade, err := upgrades.UpgradeStarGift(ctx, domain.StarGiftUpgradeRequest{UserID: owner.ID,
 		Ref: domain.SavedStarGiftRef{Owner: ownerPeer, MsgID: secondPurchase.Saved.MsgID}, RequirePrepaid: true,
