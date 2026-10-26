@@ -176,15 +176,17 @@ WHERE collectible_revision_id=$1 AND crafted
 				return fmt.Errorf("allocate admin unique star gift id: %w", err)
 			}
 			slug := fmt.Sprintf("%s-%d", revision.SlugPrefix, num)
+			// require_premium наследуется от исходного подарка каталога (актуальная
+			// ревизия уже загружена в gift.RequirePremium).
 			if _, err := tx.Exec(ctx, `
 INSERT INTO unique_star_gifts
     (id, gift_id, collectible_revision_id, source_saved_gift_id, title, slug, num,
      owner_peer_type, owner_peer_id, model_attribute_id, pattern_attribute_id,
-     backdrop_attribute_id, keep_original_details, original_owner_peer_type, original_owner_peer_id,
+     backdrop_attribute_id, require_premium, keep_original_details, original_owner_peer_type, original_owner_peer_id,
      craft_chance_permille, offer_min_stars)
-VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,true,$13,$14,$15,$16)`,
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,true,$14,$15,$16,$17)`,
 				uniqueID, gift.ID, revision.ID, savedID, gift.Title, slug, num,
-				string(req.Recipient.Type), req.Recipient.ID, modelID, patternID, backdropID,
+				string(req.Recipient.Type), req.Recipient.ID, modelID, patternID, backdropID, gift.RequirePremium,
 				string(req.Recipient.Type), req.Recipient.ID, craftChancePermille, s.lifecycle.OfferMinStars); err != nil {
 				return fmt.Errorf("insert admin unique star gift: %w", err)
 			}
@@ -477,7 +479,15 @@ WHERE collectible_revision_id=$1 AND crafted
 			var title string
 			var relType pgtype.Text
 			var relID pgtype.Int8
-			if err := tx.QueryRow(ctx, `SELECT title, released_by_peer_type, released_by_peer_id FROM star_gift_catalog_revisions WHERE id=$1`, locked.RevisionID).Scan(&title, &relType, &relID); err != nil {
+			// require_premium наследуется от исходного подарка: берём актуальное
+			// состояние каталога (active_revision), а не ревизию покупки — флаг
+			// управляет и вторичной покупкой коллекции на маркете.
+			var requirePremium bool
+			if err := tx.QueryRow(ctx, `SELECT r.title, r.released_by_peer_type, r.released_by_peer_id,
+COALESCE((SELECT ar.require_premium FROM star_gift_catalog c
+          JOIN star_gift_catalog_revisions ar ON ar.id = c.active_revision_id
+          WHERE c.gift_id = r.gift_id), r.require_premium)
+FROM star_gift_catalog_revisions r WHERE r.id=$1`, locked.RevisionID).Scan(&title, &relType, &relID, &requirePremium); err != nil {
 				return fmt.Errorf("load upgrade gift metadata: %w", err)
 			}
 			slug := fmt.Sprintf("%s-%d", revision.SlugPrefix, num)
@@ -485,11 +495,11 @@ WHERE collectible_revision_id=$1 AND crafted
 INSERT INTO unique_star_gifts
     (id, gift_id, collectible_revision_id, source_saved_gift_id, title, slug, num,
      owner_peer_type, owner_peer_id, model_attribute_id, pattern_attribute_id,
-     backdrop_attribute_id, keep_original_details, original_owner_peer_type, original_owner_peer_id,
+     backdrop_attribute_id, require_premium, keep_original_details, original_owner_peer_type, original_owner_peer_id,
      craft_chance_permille, offer_min_stars, released_by_peer_type, released_by_peer_id)
-VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17, $18, $19)`,
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)`,
 				uniqueID, locked.GiftID, revision.ID, locked.ID, title, slug, num,
-				string(locked.Owner.Type), locked.Owner.ID, modelID, patternID, backdropID, req.KeepOriginalDetails,
+				string(locked.Owner.Type), locked.Owner.ID, modelID, patternID, backdropID, requirePremium, req.KeepOriginalDetails,
 				string(locked.Owner.Type), locked.Owner.ID, craftChancePermille, s.lifecycle.OfferMinStars,
 				relType, relID); err != nil {
 				return fmt.Errorf("insert unique star gift: %w", err)

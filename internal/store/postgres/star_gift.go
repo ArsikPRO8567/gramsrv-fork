@@ -496,7 +496,8 @@ func (s *StarGiftStore) ListByOwnerFiltered(ctx context.Context, filter domain.S
 	joins := `
 JOIN star_gift_catalog c ON c.gift_id = p.gift_id
 LEFT JOIN star_gift_collectible_revisions acr
-  ON acr.id = c.collectible_revision_id AND acr.status = 'published'`
+  ON acr.id = c.collectible_revision_id AND acr.status = 'published'
+LEFT JOIN star_gift_catalog_revisions ir ON ir.id = p.catalog_revision_id`
 	conditions := []string{"p.owner_peer_type = $1", "p.owner_peer_id = $2", "p.lifecycle_status = 'active'"}
 	args := []any{string(owner.Type), owner.ID}
 	if filter.ExcludeUnsaved {
@@ -508,17 +509,26 @@ LEFT JOIN star_gift_collectible_revisions acr
 	if filter.ExcludeUnique {
 		conditions = append(conditions, "p.unique_gift_id IS NULL")
 	}
-	// telesrv ordinary catalog gifts are currently unlimited. Unique gifts are
-	// collectibles and therefore survive exclude_unlimited.
+	// Четыре непересекающиеся категории карточек профиля: обычные (бесконечные),
+	// редкие без улучшения, редкие с доступным улучшением и уникальные. Клиент
+	// комбинирует exclude-флаги, поэтому каждая карточка попадает ровно в одну
+	// категорию: ограниченность берём из ревизии покупки (тот же флаг рендерится
+	// на карточке), а улучшаемость — из активной ревизии коллекции.
+	// exclude_unlimited оставляет ограниченные и уникальные; исключение
+	// upgradable/unupgradable действует только внутри ограниченных.
 	if filter.ExcludeUnlimited {
-		conditions = append(conditions, "p.unique_gift_id IS NOT NULL")
+		conditions = append(conditions, "(p.unique_gift_id IS NOT NULL OR COALESCE(ir.limited, false))")
 	}
-	upgradable := `(p.unique_gift_id IS NULL AND acr.id IS NOT NULL AND acr.upgrade_stars > 0 AND acr.issued < acr.supply_total)`
+	// Категоризация: уникальные / обычные (не ограниченные) / редкие с доступным
+	// улучшением / редкие без улучшения. exclude_upgradable и exclude_unupgradable
+	// удаляют только две редкие категории, не задевая обычные и уникальные.
+	rare := `(p.unique_gift_id IS NULL AND COALESCE(ir.limited, false))`
+	upgradable := `(` + rare + ` AND acr.id IS NOT NULL AND acr.upgrade_stars > 0 AND acr.issued < acr.supply_total)`
 	if filter.ExcludeUpgradable {
 		conditions = append(conditions, "NOT "+upgradable)
 	}
 	if filter.ExcludeUnupgradable {
-		conditions = append(conditions, upgradable)
+		conditions = append(conditions, "NOT ("+rare+" AND NOT "+upgradable+")")
 	}
 	if filter.CollectionID > 0 {
 		args = append(args, filter.CollectionID)

@@ -539,6 +539,11 @@ func (s *StarGiftLifecycleStore) PurchaseResaleStarGift(ctx context.Context, req
 			if err != nil || !found || gift.Burned || gift.Owner != saved.Owner {
 				return domain.ErrStarGiftResaleUnavailable
 			}
+			// require_premium наследуется от исходного подарка: покупать коллекцию
+			// с маркета может только владелец Premium-подписки.
+			if gift.RequirePremium && !req.BuyerPremium {
+				return domain.ErrPremiumRequired
+			}
 			balance, err := s.debitLifecycleAmount(ctx, tx, req.BuyerUserID, req.Amount, domain.StarsReasonGiftResale,
 				saved.Owner, req.Date, "Collectible gift purchase")
 			if err != nil {
@@ -717,6 +722,10 @@ func (s *StarGiftLifecycleStore) SendStarGiftOffer(ctx context.Context, req doma
 	if err != nil || !found || unique.Owner != req.Owner || unique.Burned || unique.OwnerAddress != "" || unique.OfferMinStars <= 0 {
 		return domain.StarGiftOfferResult{}, domain.ErrStarGiftOfferInvalid
 	}
+	// Оффер — предоплата будущей покупки: require_premium действует и здесь.
+	if unique.RequirePremium && !req.BuyerPremium {
+		return domain.StarGiftOfferResult{}, domain.ErrPremiumRequired
+	}
 	messageReq := domain.SendPrivateTextRequest{
 		SenderUserID: req.BuyerUserID, RecipientUserID: req.Owner.ID, RandomID: req.RandomID, Date: req.Date,
 		OriginAuthKeyID: req.OriginAuthKeyID, OriginSessionID: req.OriginSessionID, OriginUserID: req.BuyerUserID,
@@ -737,6 +746,9 @@ func (s *StarGiftLifecycleStore) SendStarGiftOffer(ctx context.Context, req doma
 			gift, found, err := NewStarGiftStore(tx).UniqueByID(ctx, unique.ID)
 			if err != nil || !found || gift.Owner != req.Owner || gift.Burned || gift.OwnerAddress != "" || gift.OfferMinStars <= 0 {
 				return domain.ErrStarGiftOfferInvalid
+			}
+			if gift.RequirePremium && !req.BuyerPremium {
+				return domain.ErrPremiumRequired
 			}
 			if req.Price.Currency == domain.StarGiftCurrencyStars && gift.OfferMinStars > 0 && req.Price.Amount < int64(gift.OfferMinStars) {
 				return domain.ErrStarGiftOfferInvalid
