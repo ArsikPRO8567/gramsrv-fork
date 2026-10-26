@@ -586,6 +586,7 @@ type StarGiftListingRequest struct {
 
 type StarGiftResalePurchaseRequest struct {
 	BuyerUserID      int64
+	BuyerPremium     bool // require_premium у коллекционного подарка наследуется от исходного; покупка с маркета только для Premium
 	Slug             string
 	To               Peer
 	Amount           StarGiftAmount
@@ -599,6 +600,7 @@ type StarGiftResalePurchaseRequest struct {
 
 type StarGiftOfferRequest struct {
 	BuyerUserID     int64
+	BuyerPremium    bool // оффер — предоплата будущей покупки; require_premium действует и здесь
 	Owner           Peer
 	Slug            string
 	Price           StarGiftAmount
