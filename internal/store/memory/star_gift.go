@@ -406,19 +406,29 @@ func (s *StarGiftStore) ListByOwnerFiltered(_ context.Context, filter domain.Sav
                 if filter.ExcludeUnique && g.UniqueGiftID != 0 {
                         continue
                 }
-                if filter.ExcludeUnlimited && g.UniqueGiftID == 0 {
+                // Те же четыре непересекающиеся категории, что и в postgres-сторе:
+                // обычные (бесконечные) / редкие без улучшения / редкие с доступным
+                // улучшением / уникальные. exclude_unlimited оставляет ограниченные
+                // и уникальные; upgradable/unupgradable действует только среди
+                // ограниченных подарков.
+                catalogLimited := false
+                if gift, ok := s.catalog[g.GiftID]; ok {
+                        catalogLimited = gift.Limited
+                }
+                if filter.ExcludeUnlimited && g.UniqueGiftID == 0 && !catalogLimited {
                         continue
                 }
+                rare := g.UniqueGiftID == 0 && catalogLimited
                 upgradable := false
-                if g.UniqueGiftID == 0 {
+                if rare {
                         if gift, ok := s.catalog[g.GiftID]; ok {
                                 upgradable = gift.UpgradeStars > 0 && gift.UpgradeIssued < gift.UpgradeTotal
                         }
                 }
-                if filter.ExcludeUpgradable && upgradable {
+                if filter.ExcludeUpgradable && rare && upgradable {
                         continue
                 }
-                if filter.ExcludeUnupgradable && !upgradable {
+                if filter.ExcludeUnupgradable && rare && !upgradable {
                         continue
                 }
                 if filter.CollectionID > 0 && !containsInt(g.CollectionIDs, filter.CollectionID) {
