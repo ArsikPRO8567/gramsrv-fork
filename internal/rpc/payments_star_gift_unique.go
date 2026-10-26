@@ -91,10 +91,14 @@ func (r *Router) onPaymentsUpgradeStarGift(ctx context.Context, req *tg.Payments
 			return nil, starGiftInvalidErr()
 		}
 	} else {
-		if _, err := r.starGiftUpgradePreviewForSaved(ctx, saved); err != nil {
-			return nil, err
-		}
+		// A prepayment captured at purchase time stays valid even when the
+		// collectible supply is later exhausted or the revision changes: the
+		// paid upgrade was already reserved for this gift. The preview gate
+		// applies only to fresh paid upgrades.
 		if saved.PrepaidUpgradeStars <= 0 {
+			if _, err := r.starGiftUpgradePreviewForSaved(ctx, saved); err != nil {
+				return nil, err
+			}
 			return nil, starGiftInvalidErr()
 		}
 	}
@@ -195,7 +199,7 @@ func (r *Router) tgStarGiftUpgradeUpdates(ctx context.Context, ownerUserID int64
 }
 
 func starGiftUpgradeFormID(userID, savedGiftID, stars int64, keepOriginal bool) int64 {
-	
+
 	id := userID*0x9e3779b1 ^ savedGiftID<<11 ^ stars<<19 ^ 0x55504752414445
 
 	if id < 0 {

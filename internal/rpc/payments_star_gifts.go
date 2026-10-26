@@ -348,14 +348,12 @@ func (r *Router) onPaymentsGetStarGifts(ctx context.Context, hash int) (tg.Payme
 
 	filteredCatalog := make([]domain.StarGift, 0, len(catalog))
 	for _, g := range catalog {
-		allowed, hidden, _, hasWhitelist := r.getGiftWhitelistData(ctx, g.ID, userID)
+		allowed, hidden, _, _ := r.getGiftWhitelistData(ctx, g.ID, userID)
 
+		// Скрытие управляется ТОЛЬКО флагом gift_hidden: при True подарок виден
+		// только вайтлист-пользователям (allowed). Запись в gift_whitelists без
+		// gift_hidden ни на что не влияет — подарок виден всем.
 		if hidden && !allowed {
-			continue
-		}
-		// Whitelist-only подарки не показываются в каталоге тем, кто не входит
-		// в список (та же логика, что и в checkGiftWhitelist на покупке).
-		if hasWhitelist && !allowed {
 			continue
 		}
 		filteredCatalog = append(filteredCatalog, g)
@@ -1637,7 +1635,11 @@ func tgMessageActionStarGiftForViewer(in *domain.MessageStarGiftAction, viewerUs
 		projected.CanUpgrade = in.CanUpgrade
 	} else {
 		projected.CanUpgrade = false
-		if viewerUserID == in.FromUserID {
+		// A private gift service message is only readable by its two
+		// participants, so the non-owner viewer is the payer side of a
+		// separate upgrade prepayment and keeps the hash. (Legacy actions
+		// may omit from_id entirely; the payer-side rule still holds.)
+		if viewerUserID == in.FromUserID || in.FromUserID == 0 {
 			projected.PrepaidUpgradeHash = in.PrepaidUpgradeHash
 		} else {
 			projected.PrepaidUpgradeHash = ""
@@ -1668,10 +1670,14 @@ func tgMessageActionStarGift(in *domain.MessageStarGiftAction) tg.MessageActionC
 	if in.UpgradePriceStars > 0 {
 		gift.SetUpgradeStars(in.UpgradePriceStars)
 	}
-	// limited/availability_remains/availability_total share flag 0: the
-	// "N of M" badge renders only when both counters are present.
-	if in.AvailabilityTotal > 0 && in.AvailabilityRemains > 0 {
+	// limited/availability_remains/availability_total share flag 0. The
+	// counters must survive a sold-out catalog (availability_remains == 0
+	// after the final auction round): clients render the "N of M" ribbon
+	// from these fields, so emit them whenever a total is known.
+	if in.AvailabilityTotal > 0 {
 		gift.SetAvailabilityTotal(in.AvailabilityTotal)
+		gift.SetAvailabilityRemains(in.AvailabilityRemains)
+	} else if in.AvailabilityRemains > 0 {
 		gift.SetAvailabilityRemains(in.AvailabilityRemains)
 	}
 	if in.UpgradeVariants > 0 {
@@ -1730,17 +1736,26 @@ func tgMessageActionStarGift(in *domain.MessageStarGiftAction) tg.MessageActionC
 		action.SetMessage(tg.TextWithEntities{Text: in.Message})
 	}
 
-	// from_id is the sender of the gift. It is omitted only for anonymous
-	// gifts (name_hidden): self-purchases keep it because clients render the
-	// caption from the containing messageService, never from this field.
-	if in.FromUserID != 0 && !in.NameHidden {
+	// from_id is the gift sender. hide_name only hides the sender on the
+	// receiver's profile (original details); the chat service message still
+	// shows who sent the gift, so from_id is projected regardless of
+	// NameHidden -- including self-purchases where sender == receiver.
+	if in.FromUserID != 0 {
 		action.SetFromID(&tg.PeerUser{UserID: in.FromUserID})
 	}
 
+	// peer+saved_id share TL flag 12, and official servers emit that flag only
+	// for channel gifts (saved_id is "ID to use in inputSavedStarGiftChat").
+	// Official Android treats flag 12 as the channel-gift namespace: when it is
+	// set on a private-chat gift message the client builds a broken
+	// inputSavedStarGiftChat{user peer, saved_id=0} for every gift operation
+	// (upgrade/save/delete), which the server then rejects. User-owned gifts
+	// resolve through gift_msg_id instead, so peer must stay unset here.
 	if in.PeerChannelID != 0 {
 		action.SetPeer(&tg.PeerChannel{ChannelID: in.PeerChannelID})
-	} else if in.PeerUserID != 0 {
-		action.SetPeer(&tg.PeerUser{UserID: in.PeerUserID})
+		if in.SavedID > 0 {
+			action.SetSavedID(in.SavedID)
+		}
 	}
 
 	// to_id is documented for auction-acquired gifts only: the peer the gift
@@ -1823,8 +1838,13 @@ func tgSavedStarGifts(viewerUserID int64, gifts []domain.SavedStarGift, catalog 
 			// This hash starts the separate "prepay someone else's upgrade"
 			// invoice. The owner must use InputSavedStarGift instead; otherwise
 			// DrKLO prefers the hash path and substitutes the private dialog peer.
+			// Channel-owned gifts never advertise it: their admins upgrade via
+			// InputSavedStarGiftChat, and a hash here makes the client send the
+			// prepay invoice (peer = the profile/service dialog) that cannot
+			// resolve to the channel gift.
 			ownerIsViewer := g.Owner.Type == domain.PeerTypeUser && g.Owner.ID == viewerUserID
-			if g.PrepaidUpgradeHash != "" && g.PrepaidUpgradeStars == 0 && canIssue && !ownerIsViewer {
+			if g.Owner.Type == domain.PeerTypeUser && !ownerIsViewer &&
+				g.PrepaidUpgradeHash != "" && g.PrepaidUpgradeStars == 0 && canIssue {
 				item.SetPrepaidUpgradeHash(g.PrepaidUpgradeHash)
 			}
 		}
@@ -1954,8 +1974,6 @@ func clampGiftMessage(s string) string {
 	return s
 }
 
-func starGiftUsageLimitedErr() error { return tgerr.New(400, "STARGIFT_USAGE_LIMITED") }
-
 func (r *Router) getGiftWhitelistData(ctx context.Context, giftID, userID int64) (allowed, hidden, numbered, hasWhitelist bool) {
 	allowed, hidden, numbered, hasWhitelist = true, false, false, false
 	if r.deps.Gifts == nil {
@@ -1981,13 +1999,12 @@ func (r *Router) checkGiftWhitelist(ctx context.Context, userID, giftID int64) e
 		return nil
 	}
 
-	allowed, hidden, _, hasWhitelist := r.getGiftWhitelistData(ctx, giftID, userID)
+	allowed, hidden, _, _ := r.getGiftWhitelistData(ctx, giftID, userID)
 
+	// Ограничение покупки определяется исключительно парой (gift_hidden, allowed):
+	// скрытый подарок недоступен тем, кого нет в вайтлисте.
 	if hidden && !allowed {
 		return starGiftInvalidErr()
-	}
-	if hasWhitelist && !allowed {
-		return starGiftUsageLimitedErr()
 	}
 
 	return nil

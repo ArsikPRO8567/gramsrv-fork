@@ -4,9 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"time"
 	"hash/fnv"
 	"strings"
+	"time"
 
 	"github.com/iamxvbaba/td/tg"
 	"github.com/iamxvbaba/td/tgerr"
@@ -157,20 +157,19 @@ func (r *Router) starGiftAuctionBidPaymentForm(ctx context.Context, userID int64
 		return nil, starGiftInvalidErr()
 	}
 
+	// Скрытие определяется только флагом gift_hidden: скрытый подарок
+	// недоступен ставкам не-вайтлист пользователей.
 	allowed, hidden, _, _ := r.getGiftWhitelistData(ctx, inv.GiftID, userID)
-	
+
 	if hidden && !allowed {
 		return nil, starGiftInvalidErr()
-	}
-	if !allowed {
-		return nil, starGiftUsageLimitedErr()
 	}
 
 	state, peer, delta, err := r.starGiftAuctionBidTarget(ctx, userID, inv)
 	if err != nil {
 		return nil, err
 	}
-	
+
 	return &tg.PaymentsPaymentFormStarGift{
 		FormID: starGiftLifecycleFormID("auction", userID, state.Gift.ID, peer.Type, peer.ID, inv.BidAmount, state.Version),
 		Invoice: tg.Invoice{
@@ -185,13 +184,12 @@ func (r *Router) sendStarGiftAuctionBidForm(ctx context.Context, userID, formID 
 		return nil, starGiftInvalidErr()
 	}
 
+	// Скрытие определяется только флагом gift_hidden: скрытый подарок
+	// недоступен ставкам не-вайтлист пользователей.
 	allowed, hidden, _, _ := r.getGiftWhitelistData(ctx, inv.GiftID, userID)
-	
+
 	if hidden && !allowed {
 		return nil, starGiftInvalidErr()
-	}
-	if !allowed {
-		return nil, starGiftUsageLimitedErr()
 	}
 
 	state, peer, _, err := r.starGiftAuctionBidTarget(ctx, userID, inv)
@@ -217,8 +215,8 @@ func (r *Router) sendStarGiftAuctionBidForm(ctx context.Context, userID, formID 
 	}
 
 	newState, balance, err := r.deps.Gifts.BidAuction(ctx, domain.StarGiftAuctionBidRequest{
-		UserID: userID, GiftID: inv.GiftID, Peer: peer, BidAmount: inv.BidAmount, 
-		HideName: inv.HideName, Message: message, UpdateBid: inv.UpdateBid, 
+		UserID: userID, GiftID: inv.GiftID, Peer: peer, BidAmount: inv.BidAmount,
+		HideName: inv.HideName, Message: message, UpdateBid: inv.UpdateBid,
 		FormID: formID, Date: int(r.clock.Now().Unix()),
 	})
 	if err != nil {
@@ -426,19 +424,23 @@ func (r *Router) onPaymentsCheckCanSendGift(ctx context.Context, req *tg.Payment
 		return nil, starGiftInvalidErr()
 	}
 	userID, _, _ := r.currentUserID(ctx)
-	
+
 	allowed, hidden, _, hasWhitelist := r.getGiftWhitelistData(ctx, req.GiftID, userID)
-	
+
 	if hidden && !allowed {
 		return nil, starGiftInvalidErr()
 	}
 
 	gift, found, err := r.deps.Gifts.GiftByID(ctx, req.GiftID)
-	if err != nil { return nil, internalErr() }
-	if !found { return nil, starGiftInvalidErr() }
+	if err != nil {
+		return nil, internalErr()
+	}
+	if !found {
+		return nil, starGiftInvalidErr()
+	}
 
 	now := int(r.clock.Now().Unix())
-	
+
 	if gift.LockedUntilDate > now {
 		isWhitelisted := hasWhitelist && allowed
 
@@ -446,10 +448,10 @@ func (r *Router) onPaymentsCheckCanSendGift(ctx context.Context, req *tg.Payment
 			if gift.Auction {
 				return &tg.PaymentsCheckCanSendGiftResultOk{}, nil
 			}
-            
+
 			unlockTime := time.Unix(int64(gift.LockedUntilDate), 0).Format("02/01/2006 15:04")
 			reasonText := fmt.Sprintf("Этот подарок будет доступен %s.", unlockTime)
-			
+
 			return &tg.PaymentsCheckCanSendGiftResultFail{
 				Reason: tg.TextWithEntities{Text: reasonText},
 			}, nil
@@ -833,12 +835,9 @@ func (r *Router) onPaymentsGetStarGiftAuctionState(ctx context.Context, req *tg.
 	var giftID int64
 	var slug string
 	if giftID > 0 {
-		allowed, hidden, _, hasWhitelist := r.getGiftWhitelistData(ctx, giftID, userID)
-		if (hidden && !allowed) || (hasWhitelist && !allowed) {
+		allowed, hidden, _, _ := r.getGiftWhitelistData(ctx, giftID, userID)
+		if hidden && !allowed {
 			return nil, starGiftInvalidErr()
-		}
-		if !allowed {
-			return nil, starGiftUsageLimitedErr()
 		}
 	}
 	switch value := req.Auction.(type) {
