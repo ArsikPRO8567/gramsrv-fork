@@ -26,6 +26,12 @@ import (
 
 func starGiftInvalidErr() error { return tgerr.New(400, "STARGIFT_INVALID") }
 
+// stargiftUsageLimitedErr mirrors the official server response for gifts whose
+// gift_whitelists row restricts sending/bidding to a specific account list:
+// anyone outside the list may still SEE the gift and its send window, but the
+// actual send/bid attempt must fail with STARGIFT_USAGE_LIMITED.
+func stargiftUsageLimitedErr() error { return tgerr.New(400, "STARGIFT_USAGE_LIMITED") }
+
 func devStarsTopupOptions() []tg.StarsTopupOption {
 	return []tg.StarsTopupOption{
 		{Stars: 1000, Currency: "USD", Amount: 99},
@@ -446,9 +452,10 @@ func (r *Router) onPaymentsGetPaymentForm(ctx context.Context, req *tg.PaymentsG
 	if !ok {
 		return nil, notImplementedErr()
 	}
-	if err := r.checkGiftWhitelist(ctx, userID, inv.GiftID); err != nil {
-		return nil, err
-	}
+	// Вайтлист НЕ проверяется здесь намеренно: окно отправки должно открываться
+	// любому пользователю (в том числе не-вайтлистному). Ограничение
+	// STARGIFT_USAGE_LIMITED срабатывает только на реальной отправке —
+	// в onPaymentsSendStarsForm (checkGiftWhitelist).
 	if r.deps.Gifts == nil {
 		return nil, notImplementedErr()
 	}
@@ -995,8 +1002,11 @@ func (r *Router) sendStarGiftToChannel(ctx context.Context, senderID, channelID 
 	action := domain.ChannelMessageAction{
 		Type: domain.ChannelActionStarGift,
 		StarGift: applyStarGiftSnapshot(&domain.MessageStarGiftAction{
-			GiftID:            gift.ID,
-			Stars:             gift.Stars,
+			GiftID: gift.ID,
+			// Покупка с включённым улучшением — это обычное сообщение о дарении:
+			// цена в объекте равна сумме цены подарка и апгрейда, а флаги
+			// prepaid_upgrade не выставляются.
+			Stars:             gift.Stars + prepaidUpgradeStars,
 			ConvertStars:      gift.ConvertStars,
 			Title:             gift.Title,
 			Sticker:           &sticker,
@@ -1006,9 +1016,7 @@ func (r *Router) sendStarGiftToChannel(ctx context.Context, senderID, channelID 
 			NameHidden:        hideName,
 			Saved:             true,
 			CanUpgrade:        gift.UpgradeStars > 0,
-			PrepaidUpgrade:    prepaidUpgradeStars > 0,
 			UpgradePriceStars: gift.UpgradeStars,
-			UpgradeStars:      prepaidUpgradeStars,
 		}, gift),
 	}
 	savedID, err := r.deps.Gifts.RecordSavedGift(ctx, domain.SavedStarGift{
@@ -1097,8 +1105,12 @@ func (r *Router) deliverStarGift(ctx context.Context, senderID, recipientID int6
 		ServiceAction: &domain.MessageServiceAction{
 			Kind: domain.MessageServiceActionStarGift,
 			StarGift: applyStarGiftSnapshot(&domain.MessageStarGiftAction{
-				GiftID:             gift.ID,
-				Stars:              gift.Stars,
+				GiftID: gift.ID,
+				// Покупка с включённым улучшением — это обычное сообщение о дарении:
+				// цена в объекте равна сумме цены подарка и апгрейда, а флаги
+				// prepaid_upgrade не выставляются. Предоплата остаётся на saved gift,
+				// где клиент по-прежнему видит бесплатное улучшение.
+				Stars:              gift.Stars + prepaidUpgradeStars,
 				ConvertStars:       gift.ConvertStars,
 				Title:              gift.Title,
 				Sticker:            &sticker,
@@ -1109,10 +1121,8 @@ func (r *Router) deliverStarGift(ctx context.Context, senderID, recipientID int6
 				NameHidden:         hideName,
 				Saved:              true,
 				CanUpgrade:         gift.UpgradeStars > 0,
-				PrepaidUpgrade:     prepaidUpgradeStars > 0,
 				PrepaidUpgradeHash: prepaidUpgradeHash,
 				UpgradePriceStars:  gift.UpgradeStars,
-				UpgradeStars:       prepaidUpgradeStars,
 			}, gift),
 		},
 	}
@@ -1634,7 +1644,12 @@ func tgMessageActionStarGiftForViewer(in *domain.MessageStarGiftAction, viewerUs
 		projected.PrepaidUpgradeHash = ""
 		projected.CanUpgrade = in.CanUpgrade
 	} else {
-		projected.CanUpgrade = false
+		// can_upgrade остаётся и на копии отправителя: официальные серверы
+		// отдают его обеим сторонам, и клиенты по нему выбирают подпись
+		// «{user} может превратить подарок в уникальный коллекционный».
+		// Владелец-действие (кнопка апгрейда) всё равно доступно только
+		// владельцу подарка, поэтому раскрытие флага безопасно.
+		projected.CanUpgrade = in.CanUpgrade
 		// A private gift service message is only readable by its two
 		// participants, so the non-owner viewer is the payer side of a
 		// separate upgrade prepayment and keeps the hash. (Legacy actions
@@ -1999,12 +2014,15 @@ func (r *Router) checkGiftWhitelist(ctx context.Context, userID, giftID int64) e
 		return nil
 	}
 
-	allowed, hidden, _, _ := r.getGiftWhitelistData(ctx, giftID, userID)
+	allowed, _, _, hasWhitelist := r.getGiftWhitelistData(ctx, giftID, userID)
 
-	// Ограничение покупки определяется исключительно парой (gift_hidden, allowed):
-	// скрытый подарок недоступен тем, кого нет в вайтлисте.
-	if hidden && !allowed {
-		return starGiftInvalidErr()
+	// Ограничение ОТПРАВКИ определяется записью в gift_whitelists: если запись для
+	// подарка существует и пользователь не входит в список allowed_buyers, отправка
+	// подарка и ставка в аукционе запрещены (STARGIFT_USAGE_LIMITED). Видимость при
+	// этом не меняется: окно отправки/список/аукцион остаются доступны всем, а
+	// скрытие не-вайтлист пользователей управляется отдельно флагом gift_hidden.
+	if hasWhitelist && !allowed {
+		return stargiftUsageLimitedErr()
 	}
 
 	return nil

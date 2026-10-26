@@ -157,12 +157,13 @@ func (r *Router) starGiftAuctionBidPaymentForm(ctx context.Context, userID int64
 		return nil, starGiftInvalidErr()
 	}
 
-	// Скрытие определяется только флагом gift_hidden: скрытый подарок
-	// недоступен ставкам не-вайтлист пользователей.
-	allowed, hidden, _, _ := r.getGiftWhitelistData(ctx, inv.GiftID, userID)
+	// Ставки ограничены записью в gift_whitelists: не-вайтлист пользователю
+	// ставку совершить нельзя (STARGIFT_USAGE_LIMITED), при этом сам аукцион
+	// и его статус остаются доступны для просмотра.
+	allowed, _, _, hasWhitelist := r.getGiftWhitelistData(ctx, inv.GiftID, userID)
 
-	if hidden && !allowed {
-		return nil, starGiftInvalidErr()
+	if hasWhitelist && !allowed {
+		return nil, stargiftUsageLimitedErr()
 	}
 
 	state, peer, delta, err := r.starGiftAuctionBidTarget(ctx, userID, inv)
@@ -184,12 +185,13 @@ func (r *Router) sendStarGiftAuctionBidForm(ctx context.Context, userID, formID 
 		return nil, starGiftInvalidErr()
 	}
 
-	// Скрытие определяется только флагом gift_hidden: скрытый подарок
-	// недоступен ставкам не-вайтлист пользователей.
-	allowed, hidden, _, _ := r.getGiftWhitelistData(ctx, inv.GiftID, userID)
+	// Ставки ограничены записью в gift_whitelists: не-вайтлист пользователю
+	// ставку совершить нельзя (STARGIFT_USAGE_LIMITED), при этом сам аукцион
+	// и его статус остаются доступны для просмотра.
+	allowed, _, _, hasWhitelist := r.getGiftWhitelistData(ctx, inv.GiftID, userID)
 
-	if hidden && !allowed {
-		return nil, starGiftInvalidErr()
+	if hasWhitelist && !allowed {
+		return nil, stargiftUsageLimitedErr()
 	}
 
 	state, peer, _, err := r.starGiftAuctionBidTarget(ctx, userID, inv)
@@ -834,12 +836,6 @@ func (r *Router) onPaymentsGetStarGiftAuctionState(ctx context.Context, req *tg.
 	}
 	var giftID int64
 	var slug string
-	if giftID > 0 {
-		allowed, hidden, _, _ := r.getGiftWhitelistData(ctx, giftID, userID)
-		if hidden && !allowed {
-			return nil, starGiftInvalidErr()
-		}
-	}
 	switch value := req.Auction.(type) {
 	case *tg.InputStarGiftAuction:
 		if value != nil {
@@ -855,6 +851,11 @@ func (r *Router) onPaymentsGetStarGiftAuctionState(ctx context.Context, req *tg.
 	state, err := r.deps.Gifts.AuctionState(ctx, userID, giftID, slug, int(r.clock.Now().Unix()))
 	if err != nil {
 		return nil, starGiftLifecycleErr(err)
+	}
+	// Скрытые (gift_hidden) аукционы не открываются ни по gift_id, ни по slug —
+	// проверка выполняется после резолва подарка, чтобы покрыть и slug-ссылки.
+	if allowed, hidden, _, _ := r.getGiftWhitelistData(ctx, state.Gift.ID, userID); hidden && !allowed {
+		return nil, starGiftInvalidErr()
 	}
 	stateClass := tgStarGiftAuctionState(state)
 	if !state.Finished && req.Version == state.Version {

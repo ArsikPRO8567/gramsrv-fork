@@ -921,8 +921,11 @@ func TestStarGiftPrepaidUpgradeProjectionIsViewerScoped(t *testing.T) {
 	senderMessage.Peer = domain.Peer{Type: domain.PeerTypeUser, ID: ownerID}
 	senderMessage.Out = true
 	senderAction := tgMessage(senderMessage).(*tg.MessageService).Action.(*tg.MessageActionStarGift)
-	if senderAction.CanUpgrade {
-		t.Fatal("sender message exposed receiver-only can_upgrade")
+	// Official servers keep can_upgrade on the sender copy so clients render
+	// the upgradable caption ("{user} can turn this gift into a unique
+	// collectible") on both sides; only the owner may act on it.
+	if !senderAction.CanUpgrade {
+		t.Fatal("sender message lost can_upgrade caption flag")
 	}
 	if hash, ok := senderAction.GetPrepaidUpgradeHash(); !ok || hash != action.PrepaidUpgradeHash {
 		t.Fatalf("sender message prepaid hash = %q set=%v", hash, ok)
