@@ -727,6 +727,9 @@ last_gift_num=$5,gifts_left=$6,version=version+1,updated_at=now() WHERE gift_id=
 updated_at=now() WHERE gift_id=$1`, giftID, giftsLeft); err != nil {
 				return err
 			}
+			if err := markCatalogSoldOutIfExhausted(ctx, tx, giftID); err != nil {
+				return err
+			}
 		}
 		return nil
 	})

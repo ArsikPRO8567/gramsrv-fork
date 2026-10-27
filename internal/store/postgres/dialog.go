@@ -79,6 +79,7 @@ func (s *DialogStore) ListByUser(ctx context.Context, userID int64, filter domai
 			UnreadReactions:       int(row.UnreadReactionsCount),
 			TTLPeriod:             int(row.TtlPeriod),
 			ThemeEmoticon:         row.ThemeEmoticon,
+			ThemeGiftSlug:         row.ThemeGiftSlug,
 			HasScheduled:          row.HasScheduled,
 			Pinned:                row.Pinned,
 			PinnedOrder:           int(row.PinnedOrder),
@@ -138,6 +139,7 @@ func (s *DialogStore) ListByUser(ctx context.Context, userID int64, filter domai
 			UnreadReactions:       int(row.UnreadReactionsCount),
 			TTLPeriod:             int(row.TtlPeriod),
 			ThemeEmoticon:         row.ThemeEmoticon,
+			ThemeGiftSlug:         row.ThemeGiftSlug,
 			HasScheduled:          row.HasScheduled,
 			Pinned:                row.Pinned,
 			PinnedOrder:           int(row.PinnedOrder),
@@ -291,6 +293,7 @@ func (s *DialogStore) ListByPeers(ctx context.Context, userID int64, peers []dom
 			UnreadReactions:       int(row.UnreadReactionsCount),
 			TTLPeriod:             int(row.TtlPeriod),
 			ThemeEmoticon:         row.ThemeEmoticon,
+			ThemeGiftSlug:         row.ThemeGiftSlug,
 			HasScheduled:          row.HasScheduled,
 			Pinned:                row.Pinned,
 			PinnedOrder:           int(row.PinnedOrder),
@@ -638,19 +641,20 @@ func (s *DialogStore) SetChatTheme(ctx context.Context, userID int64, peer domai
 	if userID == 0 || peer.Type == "" || peer.ID == 0 {
 		return false, nil
 	}
-	var current string
+	var currentEmoticon string
+	var currentGiftSlug string
 	err := s.db.QueryRow(ctx, `
-SELECT theme_emoticon
+SELECT theme_emoticon, theme_gift_slug
 FROM dialogs
 WHERE user_id = $1 AND peer_type = $2 AND peer_id = $3`,
-		userID, string(peer.Type), peer.ID).Scan(&current)
+		userID, string(peer.Type), peer.ID).Scan(&currentEmoticon, &currentGiftSlug)
 	if errors.Is(err, pgx.ErrNoRows) {
 		if emoticon == "" {
 			return false, nil
 		}
 		if _, err := s.db.Exec(ctx, `
-INSERT INTO dialogs (user_id, peer_type, peer_id, theme_emoticon)
-VALUES ($1, $2, $3, $4)`,
+INSERT INTO dialogs (user_id, peer_type, peer_id, theme_emoticon, theme_gift_slug)
+VALUES ($1, $2, $3, $4, '')`,
 			userID, string(peer.Type), peer.ID, emoticon); err != nil {
 			return false, fmt.Errorf("insert dialog chat theme: %w", err)
 		}
@@ -659,15 +663,57 @@ VALUES ($1, $2, $3, $4)`,
 	if err != nil {
 		return false, fmt.Errorf("get dialog chat theme: %w", err)
 	}
-	if current == emoticon {
+	if currentEmoticon == emoticon && currentGiftSlug == "" {
 		return false, nil
 	}
 	if _, err := s.db.Exec(ctx, `
 UPDATE dialogs
-SET theme_emoticon = $4, updated_at = now()
+SET theme_emoticon = $4, theme_gift_slug = '', updated_at = now()
 WHERE user_id = $1 AND peer_type = $2 AND peer_id = $3`,
 		userID, string(peer.Type), peer.ID, emoticon); err != nil {
 		return false, fmt.Errorf("update dialog chat theme: %w", err)
+	}
+	return true, nil
+}
+
+// SetChatThemeGift применяет тему оформления чата на базе коллекционного
+// подарка (dialogs.theme_gift_slug); пустой slug снимает подарочную тему.
+// Подарочная тема и emoji-тема взаимоисключающи.
+func (s *DialogStore) SetChatThemeGift(ctx context.Context, userID int64, peer domain.Peer, slug string) (bool, error) {
+	if userID == 0 || peer.Type == "" || peer.ID == 0 {
+		return false, nil
+	}
+	var currentEmoticon string
+	var currentGiftSlug string
+	err := s.db.QueryRow(ctx, `
+SELECT theme_emoticon, theme_gift_slug
+FROM dialogs
+WHERE user_id = $1 AND peer_type = $2 AND peer_id = $3`,
+		userID, string(peer.Type), peer.ID).Scan(&currentEmoticon, &currentGiftSlug)
+	if errors.Is(err, pgx.ErrNoRows) {
+		if slug == "" {
+			return false, nil
+		}
+		if _, err := s.db.Exec(ctx, `
+INSERT INTO dialogs (user_id, peer_type, peer_id, theme_emoticon, theme_gift_slug)
+VALUES ($1, $2, $3, '', $4)`,
+			userID, string(peer.Type), peer.ID, slug); err != nil {
+			return false, fmt.Errorf("insert dialog gift chat theme: %w", err)
+		}
+		return true, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("get dialog gift chat theme: %w", err)
+	}
+	if currentGiftSlug == slug && currentEmoticon == "" {
+		return false, nil
+	}
+	if _, err := s.db.Exec(ctx, `
+UPDATE dialogs
+SET theme_gift_slug = $4, theme_emoticon = '', updated_at = now()
+WHERE user_id = $1 AND peer_type = $2 AND peer_id = $3`,
+		userID, string(peer.Type), peer.ID, slug); err != nil {
+		return false, fmt.Errorf("update dialog gift chat theme: %w", err)
 	}
 	return true, nil
 }
@@ -1047,6 +1093,7 @@ func dialogListHash(dialogs []domain.Dialog) int64 {
 		}
 		_, _ = h.Write(buf[:])
 		_, _ = h.Write([]byte(d.ThemeEmoticon))
+		_, _ = h.Write([]byte(d.ThemeGiftSlug))
 	}
 	return int64(h.Sum64())
 }

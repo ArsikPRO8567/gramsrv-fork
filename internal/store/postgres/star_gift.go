@@ -530,6 +530,13 @@ LEFT JOIN star_gift_catalog_revisions ir ON ir.id = p.catalog_revision_id`
 	if filter.ExcludeUnupgradable {
 		conditions = append(conditions, "NOT ("+rare+" AND NOT "+upgradable+")")
 	}
+	if filter.PeerColorAvailable {
+		// peer_color_available отбирает только коллекции с theme_available —
+		// кандидатов в палитры сообщений (официальный флоу account.updateColor).
+		conditions = append(conditions, `EXISTS (
+SELECT 1 FROM unique_star_gifts ug
+WHERE ug.id = p.unique_gift_id AND ug.theme_available AND NOT ug.burned)`)
+	}
 	if filter.CollectionID > 0 {
 		args = append(args, filter.CollectionID)
 		conditions = append(conditions, fmt.Sprintf(`EXISTS (
@@ -987,6 +994,28 @@ func (s *StarGiftStore) GetWhitelistInfo(ctx context.Context, giftID, userID int
 	return allowed, hidden, numbered, hasWhitelist, nil
 }
 
+// markCatalogSoldOutIfExhausted ставит sold_out=true на активной ревизии
+// каталога, когда лимит редкого (limited) подарка исчерпан
+// (star_gift_catalog.availability_remains <= 0). Вызывается в тех же
+// транзакциях, которые уменьшают остаток: покупка, аукцион, крафт. Флаг
+// терминальный — повторная выдача остатка возможна только через
+// административную ревизию.
+func markCatalogSoldOutIfExhausted(ctx context.Context, tx pgx.Tx, giftID int64) error {
+	if _, err := tx.Exec(ctx, `
+UPDATE star_gift_catalog_revisions r
+SET sold_out = true
+FROM star_gift_catalog c
+WHERE c.active_revision_id = r.id
+  AND c.gift_id = r.gift_id
+  AND c.gift_id = $1
+  AND r.limited
+  AND c.availability_remains <= 0
+  AND NOT r.sold_out`, giftID); err != nil {
+		return fmt.Errorf("mark catalog revision sold out: %w", err)
+	}
+	return nil
+}
+
 func (s *StarGiftStore) BurnAuctionGifts(ctx context.Context, giftID int64, count int) error {
 	if count <= 0 {
 		return nil
@@ -998,6 +1027,9 @@ func (s *StarGiftStore) BurnAuctionGifts(ctx context.Context, giftID int64, coun
 			SET availability_remains = GREATEST(0, availability_remains - $2) 
 			WHERE gift_id = $1`, giftID, count)
 		if err != nil {
+			return err
+		}
+		if err := markCatalogSoldOutIfExhausted(ctx, tx, giftID); err != nil {
 			return err
 		}
 

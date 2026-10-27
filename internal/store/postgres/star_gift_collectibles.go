@@ -470,6 +470,69 @@ func (s *StarGiftStore) uniqueByPredicate(ctx context.Context, predicate string,
 	return unique, true, nil
 }
 
+// ListUniqueThemeAvailable возвращает активные коллекции пользователя
+// (владение или хостинг) с флагом theme_available: кандидаты в палитры
+// сообщений и темы оформления чатов.
+func (s *StarGiftStore) ListUniqueThemeAvailable(ctx context.Context, userID int64, limit int) ([]domain.UniqueStarGift, error) {
+	if userID <= 0 {
+		return []domain.UniqueStarGift{}, nil
+	}
+	if limit <= 0 || limit > domain.MaxSavedStarGiftsLimit {
+		limit = domain.MaxSavedStarGiftsLimit
+	}
+	rows, err := s.db.Query(ctx, uniqueStarGiftQuery(`
+((u.owner_peer_type='user' AND u.owner_peer_id=$1)
+	OR (u.host_peer_type='user' AND u.host_peer_id=$1))
+	AND u.theme_available AND NOT u.burned AND u.owner_address=''
+	AND sg.lifecycle_status='active'`)+`
+ORDER BY u.id DESC
+LIMIT $2`, userID, limit)
+	if err != nil {
+		return nil, fmt.Errorf("list unique star gifts theme available: %w", err)
+	}
+	defer rows.Close()
+	out := make([]domain.UniqueStarGift, 0, limit)
+	for rows.Next() {
+		gift, err := scanUniqueStarGift(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, gift)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate unique star gifts theme available: %w", err)
+	}
+	return out, nil
+}
+
+// SetUniqueGiftThemePeer фиксирует peer, для которого коллекция установлена
+// темой чата (starGiftUnique.theme_peer). uniqueGiftID<=0 снимает тему: все
+// коллекции, указывающие этим theme_peer на peer, очищаются.
+func (s *StarGiftStore) SetUniqueGiftThemePeer(ctx context.Context, uniqueGiftID int64, peer domain.Peer) error {
+	return withTx(ctx, s.db, "set unique gift theme peer", func(tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx, `
+UPDATE unique_star_gifts
+SET theme_peer_type = NULL, theme_peer_id = NULL, updated_at = now()
+WHERE theme_peer_type = $1 AND theme_peer_id = $2`, string(peer.Type), peer.ID); err != nil {
+			return fmt.Errorf("clear unique gift theme peer: %w", err)
+		}
+		if uniqueGiftID <= 0 {
+			return nil
+		}
+		tag, err := tx.Exec(ctx, `
+UPDATE unique_star_gifts
+SET theme_peer_type = $2, theme_peer_id = $3, updated_at = now()
+WHERE id = $1 AND NOT burned`, uniqueGiftID, string(peer.Type), peer.ID)
+		if err != nil {
+			return fmt.Errorf("set unique gift theme peer: %w", err)
+		}
+		if tag.RowsAffected() != 1 {
+			return domain.ErrStarGiftNotFound
+		}
+		return nil
+	})
+}
+
 func uniqueStarGiftQuery(predicate string) string {
 	return fmt.Sprintf(`
 SELECT u.id, u.gift_id, u.collectible_revision_id, u.source_saved_gift_id, u.title, u.slug, u.num,

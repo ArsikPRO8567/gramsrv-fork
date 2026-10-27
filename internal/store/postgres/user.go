@@ -170,7 +170,7 @@ func (s *UserStore) Search(ctx context.Context, currentUserID int64, query, phon
 			EmojiStatusDocumentID:  row.EmojiStatusDocumentID,
 			EmojiStatusUntil:       int(row.EmojiStatusUntil),
 			EmojiStatusCollectible: collectible,
-			Color:                  peerColorFromModel(row.ColorSet, row.Color, row.ColorBackgroundEmojiID),
+			Color:                  peerColorWithCollectible(peerColorFromModel(row.ColorSet, row.Color, row.ColorBackgroundEmojiID), row.ColorCollectible),
 			ProfileColor:           peerColorFromModel(row.ProfileColorSet, row.ProfileColor, row.ProfileColorBackgroundEmojiID),
 			LinkedCommunityID:      row.LinkedCommunityID,
 			LastSeenAt:             int(row.LastSeenAt),
@@ -647,6 +647,11 @@ func (s *UserStore) UpdatePersonalChannel(ctx context.Context, userID int64, cha
 
 func (s *UserStore) UpdateColor(ctx context.Context, userID int64, forProfile bool, color domain.PeerColor) (domain.User, error) {
 	if forProfile {
+		// Официальное правило: inputPeerColorCollectible задаёт только палитру
+		// сообщений; профильные палитры коллекциями не устанавливаются.
+		if !color.Collectible.Empty() {
+			return domain.User{}, domain.ErrStarGiftCollectibleInvalid
+		}
 		row, err := s.q.UpdateUserProfileColor(ctx, sqlcgen.UpdateUserProfileColorParams{
 			ID:                userID,
 			ColorSet:          color.HasColor,
@@ -661,11 +666,16 @@ func (s *UserStore) UpdateColor(ctx context.Context, userID int64, forProfile bo
 		}
 		return userFromModel(row), nil
 	}
+	collectibleJSON, err := encodePeerColorCollectible(color)
+	if err != nil {
+		return domain.User{}, err
+	}
 	row, err := s.q.UpdateUserColor(ctx, sqlcgen.UpdateUserColorParams{
 		ID:                userID,
 		ColorSet:          color.HasColor,
 		Color:             int32(color.Color),
 		BackgroundEmojiID: color.BackgroundEmojiID,
+		ColorCollectible:  collectibleJSON,
 	})
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -728,7 +738,7 @@ func userFromModel(r sqlcgen.User) domain.User {
 		Birthday:               domain.Birthday{Day: int(r.BirthdayDay), Month: int(r.BirthdayMonth), Year: int(r.BirthdayYear)},
 		PersonalChannelID:      r.PersonalChannelID,
 		LinkedCommunityID:      r.LinkedCommunityID,
-		Color:                  peerColorFromModel(r.ColorSet, r.Color, r.ColorBackgroundEmojiID),
+		Color:                  peerColorWithCollectible(peerColorFromModel(r.ColorSet, r.Color, r.ColorBackgroundEmojiID), r.ColorCollectible),
 		ProfileColor:           peerColorFromModel(r.ProfileColorSet, r.ProfileColor, r.ProfileColorBackgroundEmojiID),
 		LastSeenAt:             int(r.LastSeenAt),
 		Deleted:                r.DeletedAt.Valid,
@@ -782,4 +792,44 @@ func peerColorFromModel(hasColor bool, color int32, backgroundEmojiID int64) dom
 		Color:             int(color),
 		BackgroundEmojiID: backgroundEmojiID,
 	}
+}
+
+// peerColorWithCollectible attaches the persisted collectible message-palette
+// snapshot (users.color_collectible) to the plain color model. An empty or
+// malformed '{}' placeholder means no collectible palette.
+func peerColorWithCollectible(color domain.PeerColor, raw []byte) domain.PeerColor {
+	if len(raw) == 0 {
+		return color
+	}
+	var collectible domain.PeerColorCollectible
+	if err := json.Unmarshal(raw, &collectible); err != nil {
+		return color
+	}
+	if !collectible.Valid() {
+		return color
+	}
+	color.Collectible = collectible
+	return color
+}
+
+// encodePeerColorCollectible serializes the collectible message palette for
+// users.color_collectible. Officially collectible palettes only apply to the
+// message color (account.updateColor without for_profile): the plain color
+// fields must be unset whenever a collectible palette is stored, and vice
+// versa. The profile path is validated by the caller.
+func encodePeerColorCollectible(color domain.PeerColor) ([]byte, error) {
+	if color.Collectible.Empty() {
+		return []byte(`{}`), nil
+	}
+	if !color.Collectible.Valid() {
+		return nil, domain.ErrStarGiftCollectibleInvalid
+	}
+	if color.HasColor || color.Color != 0 || color.BackgroundEmojiID != 0 {
+		return nil, domain.ErrStarGiftCollectibleInvalid
+	}
+	raw, err := json.Marshal(color.Collectible)
+	if err != nil {
+		return nil, fmt.Errorf("encode collectible message palette: %w", err)
+	}
+	return raw, nil
 }

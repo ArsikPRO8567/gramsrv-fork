@@ -183,11 +183,12 @@ INSERT INTO unique_star_gifts
     (id, gift_id, collectible_revision_id, source_saved_gift_id, title, slug, num,
      owner_peer_type, owner_peer_id, model_attribute_id, pattern_attribute_id,
      backdrop_attribute_id, require_premium, keep_original_details, original_owner_peer_type, original_owner_peer_id,
-     craft_chance_permille, offer_min_stars)
-VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,true,$14,$15,$16,$17)`,
+     craft_chance_permille, offer_min_stars, theme_available)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,true,$14,$15,$16,$17,$18)`,
 				uniqueID, gift.ID, revision.ID, savedID, gift.Title, slug, num,
 				string(req.Recipient.Type), req.Recipient.ID, modelID, patternID, backdropID, gift.RequirePremium,
-				string(req.Recipient.Type), req.Recipient.ID, craftChancePermille, s.lifecycle.OfferMinStars); err != nil {
+				string(req.Recipient.Type), req.Recipient.ID, craftChancePermille, s.lifecycle.OfferMinStars,
+				gift.PeerColorAvailable); err != nil {
 				return fmt.Errorf("insert admin unique star gift: %w", err)
 			}
 			if _, err := tx.Exec(ctx, `UPDATE star_gift_collectible_revisions SET issued=issued+1 WHERE id=$1`, revision.ID); err != nil {
@@ -483,11 +484,15 @@ WHERE collectible_revision_id=$1 AND crafted
 			// состояние каталога (active_revision), а не ревизию покупки — флаг
 			// управляет и вторичной покупкой коллекции на маркете.
 			var requirePremium bool
+			var themeAvailable bool
 			if err := tx.QueryRow(ctx, `SELECT r.title, r.released_by_peer_type, r.released_by_peer_id,
 COALESCE((SELECT ar.require_premium FROM star_gift_catalog c
           JOIN star_gift_catalog_revisions ar ON ar.id = c.active_revision_id
-          WHERE c.gift_id = r.gift_id), r.require_premium)
-FROM star_gift_catalog_revisions r WHERE r.id=$1`, locked.RevisionID).Scan(&title, &relType, &relID, &requirePremium); err != nil {
+          WHERE c.gift_id = r.gift_id), r.require_premium),
+COALESCE((SELECT ar.peer_color_available FROM star_gift_catalog c
+          JOIN star_gift_catalog_revisions ar ON ar.id = c.active_revision_id
+          WHERE c.gift_id = r.gift_id), false)
+FROM star_gift_catalog_revisions r WHERE r.id=$1`, locked.RevisionID).Scan(&title, &relType, &relID, &requirePremium, &themeAvailable); err != nil {
 				return fmt.Errorf("load upgrade gift metadata: %w", err)
 			}
 			slug := fmt.Sprintf("%s-%d", revision.SlugPrefix, num)
@@ -496,12 +501,13 @@ INSERT INTO unique_star_gifts
     (id, gift_id, collectible_revision_id, source_saved_gift_id, title, slug, num,
      owner_peer_type, owner_peer_id, model_attribute_id, pattern_attribute_id,
      backdrop_attribute_id, require_premium, keep_original_details, original_owner_peer_type, original_owner_peer_id,
-     craft_chance_permille, offer_min_stars, released_by_peer_type, released_by_peer_id)
-VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)`,
+     craft_chance_permille, offer_min_stars, released_by_peer_type, released_by_peer_id,
+     theme_available)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)`,
 				uniqueID, locked.GiftID, revision.ID, locked.ID, title, slug, num,
 				string(locked.Owner.Type), locked.Owner.ID, modelID, patternID, backdropID, requirePremium, req.KeepOriginalDetails,
 				string(locked.Owner.Type), locked.Owner.ID, craftChancePermille, s.lifecycle.OfferMinStars,
-				relType, relID); err != nil {
+				relType, relID, themeAvailable); err != nil {
 				return fmt.Errorf("insert unique star gift: %w", err)
 			}
 			if _, err := tx.Exec(ctx, `UPDATE star_gift_collectible_revisions SET issued=issued+1 WHERE id=$1`, revision.ID); err != nil {

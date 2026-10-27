@@ -380,6 +380,11 @@ first_sale_date=CASE WHEN first_sale_date=0 THEN $2 ELSE first_sale_date END,las
 WHERE gift_id=$1 AND availability_remains>0`, gift.ID, req.Date); err != nil || tag.RowsAffected() != 1 {
 			return domain.StarGift{}, domain.SavedStarGift{}, domain.StarsBalance{}, domain.ErrStarGiftUnavailable
 		}
+		// Лимит редкого подарка исчерпан (или уже был исчерпан) — фиксируем
+		// sold_out=true на активной ревизии каталога в той же транзакции.
+		if err := markCatalogSoldOutIfExhausted(ctx, tx, gift.ID); err != nil {
+			return domain.StarGift{}, domain.SavedStarGift{}, domain.StarsBalance{}, err
+		}
 	} else if _, err := tx.Exec(ctx, `UPDATE star_gift_catalog SET first_sale_date=CASE WHEN first_sale_date=0 THEN $2 ELSE first_sale_date END,
 last_sale_date=$2,updated_at=now() WHERE gift_id=$1`, gift.ID, req.Date); err != nil {
 		return domain.StarGift{}, domain.SavedStarGift{}, domain.StarsBalance{}, err
