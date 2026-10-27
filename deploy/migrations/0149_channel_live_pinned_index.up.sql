@@ -1,3 +1,19 @@
-CREATE INDEX CONCURRENTLY IF NOT EXISTS channel_messages_live_pinned_idx
+-- Живой индекс закреплённых сообщений канала. Изначально миграция создавала
+-- индекс через CREATE INDEX CONCURRENTLY, но это ломает запуск в трёх случаях:
+--   1) CONCURRENTLY нельзя выполнять внутри транзакции, поэтому миграция
+--      становилась единственной не-атомарной в наборе: прерывание сервера
+--      (Ctrl+C, обрыв соединения) посреди её выполнения оставляло базу
+--      в состоянии dirty, а недостроенный INVALID индекс — в таблице;
+--      следующий запуск падал с "Dirty database version 149".
+--   2) INVALID индекс-остаток блокировал повторное создание: IF NOT EXISTS
+--      видел существующий (но невалидный) индекс и пропускал CREATE.
+--   3) Второй одновременно запущенный инстанс сервера получал неочевидные
+--      ошибки гонки, пока первый недостроил индекс.
+-- Набор миграций выполняется в одной транзакции на версию (pgx5-драйвер
+-- golang-migrate), поэтому атомарность восстановлена, а DROP IF EXISTS
+-- заранее убирает возможный INVALID-остаток от старых прерванных запусков.
+DROP INDEX IF EXISTS public.channel_messages_live_pinned_idx;
+
+CREATE INDEX IF NOT EXISTS channel_messages_live_pinned_idx
     ON public.channel_messages (channel_id, id DESC)
     WHERE pinned AND NOT deleted;
