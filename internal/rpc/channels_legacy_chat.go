@@ -3,6 +3,8 @@ package rpc
 import (
 	"context"
 	"errors"
+	"strings"
+
 	"github.com/iamxvbaba/td/tg"
 	"go.uber.org/zap"
 	"telesrv/internal/compat/tdesktop"
@@ -474,7 +476,7 @@ func (r *Router) onMessagesSetChatTheme(ctx context.Context, req *tg.MessagesSet
 	if !ok || peer.Type != domain.PeerTypeUser || peer.ID == 0 {
 		return nil, peerIDInvalidErr()
 	}
-	emoticon, err := chatThemeEmoticonFromInput(req.Theme)
+	emoticon, themeGift, err := r.chatThemeFromInput(ctx, userID, req.Theme)
 	if err != nil {
 		return nil, err
 	}
@@ -490,6 +492,7 @@ func (r *Router) onMessagesSetChatTheme(ctx context.Context, req *tg.MessagesSet
 		OwnerUserID:      userID,
 		Peer:             peer,
 		Emoticon:         emoticon,
+		ThemeGift:        themeGift,
 		Date:             int(r.clock.Now().Unix()),
 		OriginAuthKeyID:  rawAuthKeyIDForOrigin(ctx),
 		OriginSessionID:  sessionID,
@@ -504,6 +507,16 @@ func (r *Router) onMessagesSetChatTheme(ctx context.Context, req *tg.MessagesSet
 	if res.Changed {
 		r.invalidateRPCProjectionForPeer(userID, peer)
 		r.invalidateRPCProjectionForPeer(peer.ID, domain.Peer{Type: domain.PeerTypeUser, ID: userID})
+		// starGiftUnique.theme_peer: фиксируем подарок, установленный темой
+		// этого чата; emoji-тема (или сброс) снимает отметку. Метаданные
+		// проекции — сбой не влияет на применённую тему.
+		if r.deps.Gifts != nil {
+			themedID := int64(0)
+			if themeGift != nil {
+				themedID = themeGift.ID
+			}
+			_ = r.deps.Gifts.SetUniqueGiftThemePeer(ctx, themedID, peer)
+		}
 	}
 	if !res.Changed || res.Send.SenderMessage.ID == 0 {
 		return tgEmptyUpdates(int(r.clock.Now().Unix())), nil
@@ -518,22 +531,45 @@ func (r *Router) onMessagesSetChatTheme(ctx context.Context, req *tg.MessagesSet
 	), nil
 }
 
-func chatThemeEmoticonFromInput(theme tg.InputChatThemeClass) (string, error) {
+// chatThemeFromInput разбирает InputChatTheme: классическая emoji-тема
+// возвращается первым значением, тема на базе коллекционного подарка
+// (inputChatThemeUniqueGift) — снапшотом подарка во втором значении.
+func (r *Router) chatThemeFromInput(ctx context.Context, userID int64, theme tg.InputChatThemeClass) (string, *domain.UniqueStarGift, error) {
 	switch value := theme.(type) {
 	case *tg.InputChatThemeEmpty:
-		return "", nil
+		return "", nil, nil
 	case *tg.InputChatTheme:
 		if value.Emoticon == "" {
-			return "", nil
+			return "", nil, nil
 		}
 		if !tdesktop.IsChatThemeEmoticon(value.Emoticon) {
-			return "", themeInvalidErr()
+			return "", nil, themeInvalidErr()
 		}
-		return value.Emoticon, nil
+		return value.Emoticon, nil, nil
 	case *tg.InputChatThemeUniqueGift:
-		return "", themeInvalidErr()
+		slug := strings.ToLower(strings.TrimSpace(value.Slug))
+		if slug == "" {
+			return "", nil, themeInvalidErr()
+		}
+		if r.deps.Gifts == nil {
+			// Без каталога подарков подарочные темы недоступны — как и в
+			// прежнем поведении, это THEME_INVALID, а не серверная ошибка.
+			return "", nil, themeInvalidErr()
+		}
+		gift, found, err := r.deps.Gifts.UniqueBySlug(ctx, slug)
+		if err != nil {
+			return "", nil, internalErr()
+		}
+		// Официальные правила: темой чата может стать только активная
+		// коллекция владельца (или хостинга) с флагом theme_available.
+		if !found || gift.Burned || !gift.ThemeAvailable ||
+			!(gift.Owner.Type == domain.PeerTypeUser && gift.Owner.ID == userID) &&
+				!(gift.Host.Type == domain.PeerTypeUser && gift.Host.ID == userID) {
+			return "", nil, themeInvalidErr()
+		}
+		return "", &gift, nil
 	default:
-		return "", inputConstructorInvalidErr()
+		return "", nil, inputConstructorInvalidErr()
 	}
 }
 

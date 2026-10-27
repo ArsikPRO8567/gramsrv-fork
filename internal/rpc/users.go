@@ -305,6 +305,14 @@ func (r *Router) buildUserFullProjection(ctx context.Context, currentUserID int6
 			}
 			if dialog.ThemeEmoticon != "" {
 				full.SetTheme(&tg.ChatTheme{Emoticon: dialog.ThemeEmoticon})
+			} else if dialog.ThemeGiftSlug != "" && r.deps.Gifts != nil {
+				// Тема оформления чата на базе коллекционного подарка: активная
+				// тема отдаётся клиенту через userFull.theme (chatThemeUniqueGift)
+				// с фоном и узором подарка. Проекция метаданных — сбой резолва
+				// не влияет на применённую тему.
+				if gift, found, terr := r.deps.Gifts.UniqueBySlug(ctx, dialog.ThemeGiftSlug); terr == nil && found {
+					full.SetTheme(tgUniqueGiftChatThemeForViewer(gift, currentUserID))
+				}
 			}
 			break
 		}

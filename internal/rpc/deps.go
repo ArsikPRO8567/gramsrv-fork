@@ -1140,6 +1140,12 @@ type GiftsService interface {
 	UniqueByID(ctx context.Context, uniqueGiftID int64) (domain.UniqueStarGift, bool, error)
 	UniqueByIDs(ctx context.Context, uniqueGiftIDs []int64) (map[int64]domain.UniqueStarGift, error)
 	ListUniqueByOwner(ctx context.Context, owner domain.Peer, limit int) ([]domain.UniqueStarGift, error)
+	// ListUniqueThemeAvailable lists owned/hosted collectibles with
+	// theme_available set (message palettes and chat themes).
+	ListUniqueThemeAvailable(ctx context.Context, userID int64, limit int) ([]domain.UniqueStarGift, error)
+	// SetUniqueGiftThemePeer records/clears starGiftUnique.theme_peer for a
+	// collectible applied as a chat theme.
+	SetUniqueGiftThemePeer(ctx context.Context, uniqueGiftID int64, peer domain.Peer) error
 	Upgrade(ctx context.Context, req domain.StarGiftUpgradeRequest) (domain.StarGiftUpgradeResult, error)
 	UpgradeReceipt(ctx context.Context, userID int64, commandKey string) (domain.StarGiftUpgradeReceipt, bool, error)
 	RecordSavedGift(ctx context.Context, gift domain.SavedStarGift) (int64, error)

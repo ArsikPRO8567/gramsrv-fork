@@ -163,12 +163,28 @@ func tgUserPeerColor(color domain.PeerColor) tg.PeerColorClass {
 	if color.Empty() {
 		return nil
 	}
+	if !color.Collectible.Empty() {
+		return tgPeerColorCollectible(color.Collectible)
+	}
 	out := &tg.PeerColor{}
 	if color.HasColor {
 		out.SetColor(color.Color)
 	}
 	if color.BackgroundEmojiID != 0 {
 		out.SetBackgroundEmojiID(color.BackgroundEmojiID)
+	}
+	return out
+}
+
+// tgPeerColorCollectible проецирует снапшот палитры сообщений коллекционного
+// подарка в официальный peerColorCollectible.
+func tgPeerColorCollectible(c domain.PeerColorCollectible) *tg.PeerColorCollectible {
+	out := &tg.PeerColorCollectible{
+		CollectibleID:     c.CollectibleID,
+		GiftEmojiID:       c.GiftEmojiID,
+		BackgroundEmojiID: c.BackgroundEmojiID,
+		AccentColor:       c.AccentColor,
+		Colors:            append([]int(nil), c.Colors...),
 	}
 	return out
 }

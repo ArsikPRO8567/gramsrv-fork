@@ -322,3 +322,63 @@ func projectThemeForClient(ctx context.Context, theme *tg.Theme) *tg.Theme {
 	}
 	return &projected[0]
 }
+
+// onAccountGetUniqueGiftChatThemes возвращает темы чатов на базе
+// коллекционных подарков пользователя (владение или хостинг, флаг
+// theme_available): официальный источник inputChatThemeUniqueGift. Список
+// ограничен одной страницей (у пользователя считанные коллекции), hash
+// вычисляется по содержимому списка.
+func (r *Router) onAccountGetUniqueGiftChatThemes(ctx context.Context, req *tg.AccountGetUniqueGiftChatThemesRequest) (tg.AccountChatThemesClass, error) {
+	if req == nil {
+		req = &tg.AccountGetUniqueGiftChatThemesRequest{}
+	}
+	userID, _, err := r.currentUserID(ctx)
+	if err != nil {
+		return nil, internalErr()
+	}
+	if r.deps.Gifts == nil {
+		return tdesktop.UniqueGiftChatThemes(req.Hash), nil
+	}
+	gifts, err := r.deps.Gifts.ListUniqueThemeAvailable(ctx, userID, domain.MaxSavedStarGiftsLimit)
+	if err != nil {
+		return nil, internalErr()
+	}
+	hash := uniqueGiftChatThemesHash(gifts)
+	if req.Hash == hash {
+		return &tg.AccountChatThemesNotModified{}, nil
+	}
+	themes := make([]tg.ChatThemeClass, 0, len(gifts))
+	ownerIDs := make([]int64, 0, len(gifts))
+	seen := make(map[int64]struct{}, len(gifts))
+	for _, gift := range gifts {
+		themes = append(themes, tgUniqueGiftChatThemeForViewer(gift, userID))
+		if gift.Owner.Type == domain.PeerTypeUser && gift.Owner.ID != userID {
+			if _, ok := seen[gift.Owner.ID]; !ok {
+				seen[gift.Owner.ID] = struct{}{}
+				ownerIDs = append(ownerIDs, gift.Owner.ID)
+			}
+		}
+	}
+	out := &tg.AccountChatThemes{
+		Hash:   hash,
+		Themes: themes,
+		Chats:  []tg.ChatClass{},
+		Users:  []tg.UserClass{},
+	}
+	if len(ownerIDs) > 0 {
+		out.Users = tgUsersForViewer(userID, r.domainUsersForIDs(ctx, userID, ownerIDs))
+	}
+	return out, nil
+}
+
+// uniqueGiftChatThemesHash — стабильный hash списка подарочных тем (id+slug).
+func uniqueGiftChatThemesHash(gifts []domain.UniqueStarGift) int64 {
+	var h int64 = 0x63686766 // "chgf"
+	for _, gift := range gifts {
+		h = (h << 5) - h + gift.ID
+		for _, r := range gift.Slug {
+			h = (h << 5) - h + int64(r)
+		}
+	}
+	return h
+}

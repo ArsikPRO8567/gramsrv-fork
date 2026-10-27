@@ -1186,6 +1186,7 @@ func (r *Router) onPaymentsGetSavedStarGifts(ctx context.Context, req *tg.Paymen
 		ExcludeUnique:       req.ExcludeUnique,
 		ExcludeUpgradable:   req.ExcludeUpgradable,
 		ExcludeUnupgradable: req.ExcludeUnupgradable,
+		PeerColorAvailable:  req.PeerColorAvailable,
 		CollectionID:        collectionID,
 		Offset:              req.Offset,
 		Limit:               req.Limit,

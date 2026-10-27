@@ -147,6 +147,11 @@ func tgMessageServiceAction(msg domain.Message) tg.MessageActionClass {
 	case domain.MessageServiceActionPinMessage:
 		return &tg.MessageActionPinMessage{}
 	case domain.MessageServiceActionSetChatTheme:
+		if action := m.ServiceAction.ChatThemeUniqueGift; action != nil && action.Gift.ID != 0 {
+			return &tg.MessageActionSetChatTheme{
+				Theme: tgUniqueGiftChatTheme(action.Gift),
+			}
+		}
 		return &tg.MessageActionSetChatTheme{
 			Theme: &tg.ChatTheme{Emoticon: m.ServiceAction.ChatThemeEmoticon},
 		}

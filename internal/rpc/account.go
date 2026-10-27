@@ -314,13 +314,7 @@ func (r *Router) registerAccount(d *tlprofile.Dispatcher) {
 		return true, nil
 	})
 	registerRPC[*tg.AccountGetUniqueGiftChatThemesRequest](d, tlprofile.SemanticMethodAccountGetUniqueGiftChatThemes, func(ctx context.Context, req *tg.AccountGetUniqueGiftChatThemesRequest) (any, error) {
-		if _, _, err := r.currentUserID(ctx); err != nil {
-			return nil, internalErr()
-		}
-		if req == nil {
-			req = &tg.AccountGetUniqueGiftChatThemesRequest{}
-		}
-		return tdesktop.UniqueGiftChatThemes(req.Hash), nil
+		return r.onAccountGetUniqueGiftChatThemes(ctx, req)
 	})
 	registerRPC[*tg.AccountGetRecentEmojiStatusesRequest](d, tlprofile.SemanticMethodAccountGetRecentEmojiStatuses, func(ctx context.Context, layerRequest *tg.AccountGetRecentEmojiStatusesRequest) (any, error) {
 		hash := layerRequest.
@@ -1831,7 +1825,7 @@ func (r *Router) onAccountUpdateColor(ctx context.Context, req *tg.AccountUpdate
 	if err != nil {
 		return false, internalErr()
 	}
-	color, err := domainPeerColorFromAccountUpdate(req)
+	color, err := r.resolveAccountUpdateColor(ctx, userID, req)
 	if err != nil {
 		return false, err
 	}
@@ -1872,11 +1866,68 @@ func domainPeerColorFromAccountUpdate(req *tg.AccountUpdateColorRequest) (domain
 			Color:             value,
 			BackgroundEmojiID: backgroundEmojiID,
 		}, nil
-	case *tg.InputPeerColorCollectible, *tg.PeerColorCollectible:
+	case *tg.PeerColorCollectible:
+		// output constructor as input — invalid; inputPeerColorCollectible is
+		// resolved upstream in resolveAccountUpdateColor.
 		return domain.PeerColor{}, colorInvalidErr()
 	default:
 		return domain.PeerColor{}, inputConstructorInvalidErr()
 	}
+}
+
+// accountUpdateColorCollectibleID extracts the collectible gift reference from
+// account.updateColor input (inputPeerColorCollectible).
+func accountUpdateColorCollectibleID(req *tg.AccountUpdateColorRequest) (int64, bool) {
+	input, ok := req.GetColor()
+	if !ok {
+		return 0, false
+	}
+	switch color := input.(type) {
+	case *tg.InputPeerColorCollectible:
+		return color.CollectibleID, color.CollectibleID > 0
+	default:
+		return 0, false
+	}
+}
+
+// canUseGiftForPalette implements the official eligibility rules for
+// collectible message palettes: the gift must be an active collectible owned
+// (or hosted) by the user with the theme_available flag set.
+func (r *Router) canUseGiftForPalette(userID int64, gift domain.UniqueStarGift) bool {
+	if gift.ID == 0 || gift.Burned || !gift.ThemeAvailable {
+		return false
+	}
+	if gift.Owner.Type == domain.PeerTypeUser && gift.Owner.ID == userID {
+		return true
+	}
+	return gift.Host.Type == domain.PeerTypeUser && gift.Host.ID == userID
+}
+
+// resolveAccountUpdateColor maps account.updateColor input onto the domain
+// palette value. Plain peerColor behaves exactly as before; a collectible
+// input resolves the owned gift snapshot (officially message palettes only —
+// for_profile stays COLOR_INVALID).
+func (r *Router) resolveAccountUpdateColor(ctx context.Context, userID int64, req *tg.AccountUpdateColorRequest) (domain.PeerColor, error) {
+	collectibleID, hasCollectible := accountUpdateColorCollectibleID(req)
+	if !hasCollectible {
+		return domainPeerColorFromAccountUpdate(req)
+	}
+	if req.GetForProfile() {
+		// Официально inputPeerColorCollectible не задаёт профильную палитру:
+		// профильные фоны коллекциями идут через emoji status.
+		return domain.PeerColor{}, colorInvalidErr()
+	}
+	if r.deps.Gifts == nil {
+		return domain.PeerColor{}, colorInvalidErr()
+	}
+	gift, found, err := r.deps.Gifts.UniqueByID(ctx, collectibleID)
+	if err != nil {
+		return domain.PeerColor{}, internalErr()
+	}
+	if !found || !r.canUseGiftForPalette(userID, gift) {
+		return domain.PeerColor{}, colorInvalidErr()
+	}
+	return domain.PeerColor{Collectible: domain.PeerColorCollectibleFromGift(gift)}, nil
 }
 
 func accountUpdateColorIDAllowed(forProfile bool, colorID int) bool {

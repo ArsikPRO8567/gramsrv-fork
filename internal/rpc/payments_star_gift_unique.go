@@ -9,6 +9,8 @@ import (
 	"github.com/iamxvbaba/td/tg"
 
 	"telesrv/internal/domain"
+
+	"telesrv/internal/compat/tdesktop"
 )
 
 func (r *Router) starGiftUpgradePaymentForm(ctx context.Context, userID int64, inv *tg.InputInvoiceStarGiftUpgrade) (tg.PaymentsPaymentFormClass, error) {
@@ -431,6 +433,11 @@ func tgUniqueStarGift(unique domain.UniqueStarGift) *tg.StarGiftUnique {
 	if peer := tgPeer(unique.ThemePeer); peer != nil {
 		out.SetThemePeer(peer)
 	}
+	if unique.ThemeAvailable {
+		// Официальная схема: у theme_available коллекций доступна палитра
+		// сообщений (peerColorCollectible), выведенная из фона и узора.
+		out.SetPeerColor(tgPeerColorCollectible(domain.PeerColorCollectibleFromGift(unique)))
+	}
 	if peer := tgPeer(unique.Host); peer != nil {
 		out.SetHostID(peer)
 	}
@@ -447,6 +454,23 @@ func tgUniqueStarGift(unique domain.UniqueStarGift) *tg.StarGiftUnique {
 // offer_min_stars управляет кнопкой «Предложить сделку» в клиенте: владелец
 // не должен видеть этот флаг на собственном подарке (иначе клиент предлагает
 // ему сделку с самим собой), остальным зрителям он нужен для минимальной цены.
+// tgUniqueGiftChatTheme строит chatThemeUniqueGift: тема чата на базе
+// коллекционного подарка с настройками под каждый base theme (контракт
+// Android-клиента — минимум 4 набора настроек).
+func tgUniqueGiftChatTheme(gift domain.UniqueStarGift) *tg.ChatThemeUniqueGift {
+	return tgUniqueGiftChatThemeForViewer(gift, 0)
+}
+
+// tgUniqueGiftChatThemeForViewer — как tgUniqueGiftChatTheme, но с
+// владелец-зависимой проекцией подарка (flag 13 offer_min_stars скрыт от
+// владельца — тот же принцип, что и на страницах подарков).
+func tgUniqueGiftChatThemeForViewer(gift domain.UniqueStarGift, viewerUserID int64) *tg.ChatThemeUniqueGift {
+	return &tg.ChatThemeUniqueGift{
+		Gift:          tgUniqueStarGiftForViewer(gift, viewerUserID),
+		ThemeSettings: tdesktop.UniqueGiftThemeSettings(gift.Backdrop.CenterColor, gift.Backdrop.EdgeColor),
+	}
+}
+
 func tgUniqueStarGiftForViewer(unique domain.UniqueStarGift, viewerUserID int64) *tg.StarGiftUnique {
 	out := tgUniqueStarGift(unique)
 	if unique.Owner.Type == domain.PeerTypeUser && unique.Owner.ID == viewerUserID {
