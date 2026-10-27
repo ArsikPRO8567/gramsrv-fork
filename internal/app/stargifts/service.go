@@ -511,6 +511,25 @@ func (s *Service) ListUniqueByOwner(ctx context.Context, owner domain.Peer, limi
 	return s.store.ListUniqueByOwner(ctx, owner, min(limit, domain.MaxSavedStarGiftsLimit))
 }
 
+// ListUniqueThemeAvailable возвращает активные коллекции пользователя
+// (владение или хостинг) с флагом theme_available — кандидаты в палитры
+// сообщений и темы оформления чатов.
+func (s *Service) ListUniqueThemeAvailable(ctx context.Context, userID int64, limit int) ([]domain.UniqueStarGift, error) {
+	if s == nil || s.store == nil || userID <= 0 || limit <= 0 {
+		return []domain.UniqueStarGift{}, nil
+	}
+	return s.store.ListUniqueThemeAvailable(ctx, userID, min(limit, domain.MaxSavedStarGiftsLimit))
+}
+
+// SetUniqueGiftThemePeer фиксирует peer, для которого коллекция установлена
+// темой чата (starGiftUnique.theme_peer); uniqueGiftID<=0 снимает отметку.
+func (s *Service) SetUniqueGiftThemePeer(ctx context.Context, uniqueGiftID int64, peer domain.Peer) error {
+	if s == nil || s.store == nil {
+		return nil
+	}
+	return s.store.SetUniqueGiftThemePeer(ctx, uniqueGiftID, peer)
+}
+
 func (s *Service) Upgrade(ctx context.Context, req domain.StarGiftUpgradeRequest) (domain.StarGiftUpgradeResult, error) {
 	if s == nil || s.upgrades == nil {
 		return domain.StarGiftUpgradeResult{}, fmt.Errorf("star gift upgrade store is not configured")
