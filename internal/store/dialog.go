@@ -29,6 +29,9 @@ type DialogStore interface {
 	SetUnreadMark(ctx context.Context, userID int64, peer domain.Peer, unread bool) (bool, error)
 	ListUnreadMarked(ctx context.Context, userID int64) ([]domain.Peer, error)
 	SetChatTheme(ctx context.Context, userID int64, peer domain.Peer, emoticon string) (bool, error)
+	// SetChatThemeGift applies a collectible-gift chat theme (dialogs.theme_gift_slug);
+	// empty slug clears the gift theme.
+	SetChatThemeGift(ctx context.Context, userID int64, peer domain.Peer, slug string) (bool, error)
 	SetPeerSettingsBarHidden(ctx context.Context, userID int64, peer domain.Peer) (bool, error)
 	PeerSettingsBarHidden(ctx context.Context, userID int64, peer domain.Peer) (bool, error)
 	// SetTranslationDisabled persists the per-account peer preference used by

@@ -38,6 +38,14 @@ type StarGiftStore interface {
 	// ListUniqueByOwner returns active, locally owned collectibles in a bounded
 	// stable order. Exported/burned/transferred gifts are deliberately excluded.
 	ListUniqueByOwner(ctx context.Context, owner domain.Peer, limit int) ([]domain.UniqueStarGift, error)
+	// ListUniqueThemeAvailable returns active collectibles owned or hosted by
+	// the user with the theme_available flag set — candidates for message
+	// palettes and chat themes (account.getUniqueGiftChatThemes).
+	ListUniqueThemeAvailable(ctx context.Context, userID int64, limit int) ([]domain.UniqueStarGift, error)
+	// SetUniqueGiftThemePeer records the peer a collectible is applied to as a
+	// chat theme (starGiftUnique.theme_peer); uniqueGiftID<=0 clears any
+	// previously themed gift for that peer.
+	SetUniqueGiftThemePeer(ctx context.Context, uniqueGiftID int64, peer domain.Peer) error
 
 	// Create 写一条收到的礼物实例，返回行 id；频道礼物未显式给 saved_id 时以该行 id 作为 saved_id。
 	Create(ctx context.Context, gift domain.SavedStarGift) (int64, error)
@@ -68,7 +76,7 @@ type StarGiftStore interface {
 	ReorderCollections(ctx context.Context, owner domain.Peer, collectionIDs []int) error
 	SetPinned(ctx context.Context, owner domain.Peer, savedGiftIDs []int64) error
 	GetWhitelistInfo(ctx context.Context, giftID, userID int64) (allowed bool, hidden bool, numbered bool, hasWhitelist bool, err error)
-    BurnAuctionGifts(ctx context.Context, giftID int64, count int) error
+	BurnAuctionGifts(ctx context.Context, giftID int64, count int) error
 }
 
 // StarGiftUpgradeStore owns the aggregate transaction spanning Stars, the
