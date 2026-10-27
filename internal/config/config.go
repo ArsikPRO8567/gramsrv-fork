@@ -422,6 +422,8 @@ type Config struct {
 	StarGiftOfferMinStars            int
 	StarGiftStarsProceedsPermille    int
 	StarGiftTONProceedsPermille      int
+	StarGiftResellRateStars          int64
+	StarGiftResellRateNanoton        int64
 	StarGiftExportDelay              time.Duration
 	StarGiftTransferDelay            time.Duration
 	StarGiftResellDelay              time.Duration
@@ -902,11 +904,15 @@ func Load() (Config, error) {
 		StarGiftOfferMinStars:            envIntOr("TELESRV_STARGIFT_OFFER_MIN_STARS", 1),
 		StarGiftStarsProceedsPermille:    envIntOr("TELESRV_STARGIFT_STARS_PROCEEDS_PERMILLE", 1000),
 		StarGiftTONProceedsPermille:      envIntOr("TELESRV_STARGIFT_TON_PROCEEDS_PERMILLE", 1000),
-		StarGiftExportDelay:              envDurationOr("TELESRV_STARGIFT_EXPORT_DELAY", 0),
-		StarGiftTransferDelay:            envDurationOr("TELESRV_STARGIFT_TRANSFER_DELAY", 0),
-		StarGiftResellDelay:              envDurationOr("TELESRV_STARGIFT_RESELL_DELAY", 0),
-		StarGiftCraftDelay:               envDurationOr("TELESRV_STARGIFT_CRAFT_DELAY", 0),
-		StarGiftCraftChancePermille:      envIntOr("TELESRV_STARGIFT_CRAFT_CHANCE_PERMILLE", 250),
+		// Эквивалентные цены рынка: StarsUnits звёзд = NanotonUnits нанотон
+		// (по умолчанию официальный курс 1457 звёзд = 18 TON).
+		StarGiftResellRateStars:     envInt64Or("TELESRV_STARGIFT_RESELL_RATE_STARS", 1457),
+		StarGiftResellRateNanoton:   envInt64Or("TELESRV_STARGIFT_RESELL_RATE_NANOTON", 18_000_000_000),
+		StarGiftExportDelay:         envDurationOr("TELESRV_STARGIFT_EXPORT_DELAY", 0),
+		StarGiftTransferDelay:       envDurationOr("TELESRV_STARGIFT_TRANSFER_DELAY", 0),
+		StarGiftResellDelay:         envDurationOr("TELESRV_STARGIFT_RESELL_DELAY", 0),
+		StarGiftCraftDelay:          envDurationOr("TELESRV_STARGIFT_CRAFT_DELAY", 0),
+		StarGiftCraftChancePermille: envIntOr("TELESRV_STARGIFT_CRAFT_CHANCE_PERMILLE", 250),
 
 		RatingEnabled:           envBoolOr("TELESRV_RATING_ENABLED", true),
 		RatingPendingDelay:      envDurationOr("TELESRV_RATING_PENDING_DELAY", 24*time.Hour),
@@ -1170,6 +1176,9 @@ func validateStarGiftConfig(cfg Config) error {
 	if cfg.StarGiftStarsProceedsPermille < 0 || cfg.StarGiftStarsProceedsPermille > 1000 ||
 		cfg.StarGiftTONProceedsPermille < 0 || cfg.StarGiftTONProceedsPermille > 1000 {
 		return fmt.Errorf("TELESRV_STARGIFT_*_PROCEEDS_PERMILLE must be 0..1000")
+	}
+	if cfg.StarGiftResellRateStars <= 0 || cfg.StarGiftResellRateNanoton <= 0 {
+		return fmt.Errorf("TELESRV_STARGIFT_RESELL_RATE_STARS and TELESRV_STARGIFT_RESELL_RATE_NANOTON must be positive")
 	}
 	return nil
 }
