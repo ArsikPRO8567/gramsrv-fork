@@ -86,12 +86,16 @@ type Dialog struct {
 	UnreadReactions        int
 	TTLPeriod              int
 	ThemeEmoticon          string
-	HasScheduled           bool
-	Pinned                 bool
-	PinnedOrder            int
-	UnreadMark             bool
-	ViewForumAsMessages    bool
-	PeerSettingsBarHidden  bool
+	// ThemeGiftSlug — slug коллекционного подарка, установленного темой
+	// оформления этого диалога (официальная тема на базе starGiftUnique).
+	// Непустое значение взаимоисключающе с ThemeEmoticon.
+	ThemeGiftSlug         string
+	HasScheduled          bool
+	Pinned                bool
+	PinnedOrder           int
+	UnreadMark            bool
+	ViewForumAsMessages   bool
+	PeerSettingsBarHidden bool
 	// Pts 是 channel peer 当前 channel pts；客户端用 dialog.pts 初始化本地
 	// channel 序列并决定 getChannelDifference 起点，channel dialog 必填。
 	Pts   int

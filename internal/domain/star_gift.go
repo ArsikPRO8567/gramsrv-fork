@@ -248,6 +248,20 @@ type UniqueStarGift struct {
 	CreatedAt           time.Time
 }
 
+// PeerColorCollectibleFromGift выводит официальную палитру сообщений
+// (peerColorCollectible) из атрибутов коллекционного подарка: accent — цвет
+// центра фона, цвета ответной полосы — [центр, край] фона, gift_emoji_id —
+// emoji модели подарка, background_emoji_id — документ узора.
+func PeerColorCollectibleFromGift(g UniqueStarGift) PeerColorCollectible {
+	return PeerColorCollectible{
+		CollectibleID:     g.ID,
+		GiftEmojiID:       g.Model.Document.ID,
+		BackgroundEmojiID: g.Pattern.Document.ID,
+		AccentColor:       g.Backdrop.CenterColor,
+		Colors:            []int{g.Backdrop.CenterColor, g.Backdrop.EdgeColor},
+	}
+}
+
 // CollectibleEmojiStatus projects an immutable unique gift into the complete
 // status shape consumed by Telegram clients.  Ownership/lifecycle validation
 // is intentionally performed by the caller because it depends on the actor;
@@ -979,9 +993,13 @@ type SavedStarGiftFilter struct {
 	ExcludeUnique       bool
 	ExcludeUpgradable   bool
 	ExcludeUnupgradable bool
-	CollectionID        int
-	Offset              string
-	Limit               int
+	// PeerColorAvailable отбирает только уникальные подарки с флагом
+	// theme_available — их разрешено использовать как палитру сообщений
+	// (payments.getSavedStarGifts с флагом peer_color_available).
+	PeerColorAvailable bool
+	CollectionID       int
+	Offset             string
+	Limit              int
 }
 
 // Star gift 边界常量。

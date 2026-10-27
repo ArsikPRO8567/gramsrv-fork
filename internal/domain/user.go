@@ -14,6 +14,52 @@ type PeerColor struct {
 	HasColor          bool
 	Color             int
 	BackgroundEmojiID int64
+	// Collectible — палитра сообщений, выведенная из коллекционного подарка
+	// (официальный peerColorCollectible). Нулевое значение означает обычную
+	// числовую палитру. По официальным правилам палитра коллекцией задаётся
+	// только для цвета сообщений (account.updateColor без for_profile);
+	// профильные палитры коллекциями не задаются.
+	Collectible PeerColorCollectible
+}
+
+// PeerColorCollectible — неизменяемый снапшот палитры сообщений, выведенной из
+// коллекционного подарка: accent и цвета ответной полосы берутся из фона
+// подарка, gift_emoji_id — emoji подарка, background_emoji_id — узор.
+// Источник истины — UniqueStarGift; снапшот хранится у пользователя, чтобы
+// каждая проекция (списки пользователей, online-обновления, offline-разница)
+// видела одну и ту же форму без обращения к каталогу подарков.
+type PeerColorCollectible struct {
+	CollectibleID     int64 `json:"collectible_id"`
+	GiftEmojiID       int64 `json:"gift_emoji_id"`
+	BackgroundEmojiID int64 `json:"background_emoji_id"`
+	AccentColor       int   `json:"accent_color"`
+	Colors            []int `json:"colors"`
+}
+
+// Empty reports whether no collectible palette is present.
+func (c PeerColorCollectible) Empty() bool {
+	return c.CollectibleID <= 0
+}
+
+// Valid enforces the complete collectible palette shape. Partial snapshots are
+// forbidden because clients would render a gradient without its pattern emoji
+// or accent color.
+func (c PeerColorCollectible) Valid() bool {
+	if c.CollectibleID <= 0 || c.GiftEmojiID <= 0 || c.BackgroundEmojiID <= 0 {
+		return false
+	}
+	if c.AccentColor < 0 || c.AccentColor > 0xffffff {
+		return false
+	}
+	if len(c.Colors) == 0 || len(c.Colors) > 3 {
+		return false
+	}
+	for _, v := range c.Colors {
+		if v < 0 || v > 0xffffff {
+			return false
+		}
+	}
+	return true
 }
 
 // EmojiStatusCollectible is the immutable projection needed to render a

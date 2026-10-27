@@ -370,10 +370,14 @@ type SendPrivateTextResult struct {
 }
 
 // SetPrivateChatThemeRequest changes the shared theme token for a private dialog.
+// Emoticon задаёт классическую emoji-тему; ThemeGift — тему на базе
+// коллекционного подарка (theme_available). Ровно одно из двух значений
+// активно; пустой Emoticon без ThemeGift сбрасывает тему.
 type SetPrivateChatThemeRequest struct {
 	OwnerUserID      int64
 	Peer             Peer
 	Emoticon         string
+	ThemeGift        *UniqueStarGift
 	Date             int
 	OriginAuthKeyID  [8]byte
 	OriginSessionID  int64

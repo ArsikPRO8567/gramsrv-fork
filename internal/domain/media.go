@@ -671,14 +671,18 @@ type MessageNoForwardsAction struct {
 
 // MessageServiceAction 是私聊服务消息动作的协议中立表示。
 type MessageServiceAction struct {
-	Kind                  MessageServiceActionKind            `json:"kind"`
-	Photo                 *Photo                              `json:"photo,omitempty"`
-	Call                  *MessagePhoneCallAction             `json:"call,omitempty"`
-	ConferenceCall        *MessageConferenceCallAction        `json:"conference_call,omitempty"`
-	BotAllowed            *MessageBotAllowedAction            `json:"bot_allowed,omitempty"`
-	WebViewData           *MessageWebViewDataAction           `json:"web_view_data,omitempty"`
-	RequestedPeer         *MessageRequestedPeerAction         `json:"requested_peer,omitempty"`
-	ChatThemeEmoticon     string                              `json:"chat_theme_emoticon,omitempty"`
+	Kind              MessageServiceActionKind     `json:"kind"`
+	Photo             *Photo                       `json:"photo,omitempty"`
+	Call              *MessagePhoneCallAction      `json:"call,omitempty"`
+	ConferenceCall    *MessageConferenceCallAction `json:"conference_call,omitempty"`
+	BotAllowed        *MessageBotAllowedAction     `json:"bot_allowed,omitempty"`
+	WebViewData       *MessageWebViewDataAction    `json:"web_view_data,omitempty"`
+	RequestedPeer     *MessageRequestedPeerAction  `json:"requested_peer,omitempty"`
+	ChatThemeEmoticon string                       `json:"chat_theme_emoticon,omitempty"`
+	// ChatThemeUniqueGift — тема чата на базе коллекционного подарка
+	// (messageActionSetChatTheme с chatThemeUniqueGift); несёт неизменяемый
+	// снапшот подарка, чтобы проекция сообщения не зависела от каталога.
+	ChatThemeUniqueGift   *MessageChatThemeUniqueGiftAction   `json:"chat_theme_unique_gift,omitempty"`
 	NoForwards            *MessageNoForwardsAction            `json:"no_forwards,omitempty"`
 	StarGift              *MessageStarGiftAction              `json:"star_gift,omitempty"`
 	GiftStars             *MessageGiftStarsAction             `json:"gift_stars,omitempty"`
@@ -733,19 +737,19 @@ type MessageStarGiftAction struct {
 	// is the price of a normal paid upgrade. UpgradeStars below belongs to the
 	// outer messageActionStarGift and is only the amount already prepaid by the
 	// sender. TDesktop uses these two fields to choose the paid vs free flow.
-	UpgradePriceStars int64 `json:"upgrade_price_stars,omitempty"`
-	UpgradeStars      int64 `json:"upgrade_stars,omitempty"`
-	UpgradeMsgID      int   `json:"upgrade_msg_id,omitempty"`
-	GiftMsgID         int   `json:"gift_msg_id,omitempty"`
-	GiftNum           int   `json:"gift_num,omitempty"`
-	AuctionAcquired   bool  `json:"auction_acquired,omitempty"`
-	To                Peer  `json:"to,omitempty"`
-	ReleasedBy         *Peer     `json:"released_by,omitempty"`
-	AvailabilityTotal  int       `json:"availability_total,omitempty"`
-	AvailabilityRemains int      `json:"availability_remains,omitempty"`
-	UpgradeVariants    int       `json:"upgrade_variants,omitempty"`
-	ResellMinStars     int64     `json:"resell_min_stars,omitempty"`
-	LockedUntilDate    int       `json:"locked_until_date,omitempty"`
+	UpgradePriceStars   int64 `json:"upgrade_price_stars,omitempty"`
+	UpgradeStars        int64 `json:"upgrade_stars,omitempty"`
+	UpgradeMsgID        int   `json:"upgrade_msg_id,omitempty"`
+	GiftMsgID           int   `json:"gift_msg_id,omitempty"`
+	GiftNum             int   `json:"gift_num,omitempty"`
+	AuctionAcquired     bool  `json:"auction_acquired,omitempty"`
+	To                  Peer  `json:"to,omitempty"`
+	ReleasedBy          *Peer `json:"released_by,omitempty"`
+	AvailabilityTotal   int   `json:"availability_total,omitempty"`
+	AvailabilityRemains int   `json:"availability_remains,omitempty"`
+	UpgradeVariants     int   `json:"upgrade_variants,omitempty"`
+	ResellMinStars      int64 `json:"resell_min_stars,omitempty"`
+	LockedUntilDate     int   `json:"locked_until_date,omitempty"`
 }
 
 type MessageStarGiftUniqueAction struct {
@@ -782,6 +786,13 @@ type MessageStarGiftOfferDeclinedAction struct {
 	Gift    UniqueStarGift `json:"gift"`
 	Price   StarGiftAmount `json:"price"`
 	Expired bool           `json:"expired,omitempty"`
+}
+
+// MessageChatThemeUniqueGiftAction is projected as messageActionSetChatTheme
+// carrying chatThemeUniqueGift: a chat theme derived from an owned collectible
+// gift with the theme_available flag.
+type MessageChatThemeUniqueGiftAction struct {
+	Gift UniqueStarGift `json:"gift"`
 }
 
 // MessageMedia 是一条消息媒体载荷的业务表示（落库为消息行上的 JSONB 快照）。
