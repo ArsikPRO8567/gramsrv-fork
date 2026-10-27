@@ -408,6 +408,11 @@ func (s *UserStore) UpdateColor(_ context.Context, userID int64, forProfile bool
 		return domain.User{}, domain.ErrUserNotFound
 	}
 	if forProfile {
+		// Официальное правило: коллекционные палитры — только для цвета
+		// сообщений; профильные фоны идут через emoji status.
+		if !color.Collectible.Empty() {
+			return domain.User{}, domain.ErrStarGiftCollectibleInvalid
+		}
 		u.ProfileColor = color
 	} else {
 		u.Color = color

@@ -340,6 +340,54 @@ func (s *StarGiftStore) UniqueByIDs(_ context.Context, uniqueGiftIDs []int64) (m
         return out, nil
 }
 
+// ListUniqueThemeAvailable returns active collectibles owned or hosted by the
+// user with the theme_available flag set.
+func (s *StarGiftStore) ListUniqueThemeAvailable(_ context.Context, userID int64, limit int) ([]domain.UniqueStarGift, error) {
+        if userID <= 0 || limit <= 0 {
+                return []domain.UniqueStarGift{}, nil
+        }
+        s.mu.Lock()
+        defer s.mu.Unlock()
+        out := make([]domain.UniqueStarGift, 0, min(limit, len(s.uniqueByID)))
+        for _, gift := range s.uniqueByID {
+                if gift.Burned || !gift.ThemeAvailable {
+                        continue
+                }
+                if (gift.Owner.Type == domain.PeerTypeUser && gift.Owner.ID == userID) ||
+                        (gift.Host.Type == domain.PeerTypeUser && gift.Host.ID == userID) {
+                        out = append(out, gift)
+                }
+        }
+        sort.Slice(out, func(i, j int) bool { return out[i].ID > out[j].ID })
+        if len(out) > limit {
+                out = out[:limit]
+        }
+        return out, nil
+}
+
+// SetUniqueGiftThemePeer records the peer a collectible is applied to as a
+// chat theme (uniqueGiftID<=0 clears the marker for that peer).
+func (s *StarGiftStore) SetUniqueGiftThemePeer(_ context.Context, uniqueGiftID int64, peer domain.Peer) error {
+        s.mu.Lock()
+        defer s.mu.Unlock()
+        for id, gift := range s.uniqueByID {
+                if gift.ThemePeer == peer && gift.ID != uniqueGiftID {
+                        gift.ThemePeer = domain.Peer{}
+                        s.uniqueByID[id] = gift
+                }
+        }
+        if uniqueGiftID <= 0 {
+                return nil
+        }
+        gift, ok := s.uniqueByID[uniqueGiftID]
+        if !ok || gift.Burned {
+                return domain.ErrStarGiftNotFound
+        }
+        gift.ThemePeer = peer
+        s.uniqueByID[uniqueGiftID] = gift
+        return nil
+}
+
 func (s *StarGiftStore) ListUniqueByOwner(_ context.Context, owner domain.Peer, limit int) ([]domain.UniqueStarGift, error) {
         if owner.ID <= 0 || limit <= 0 {
                 return []domain.UniqueStarGift{}, nil
@@ -430,6 +478,13 @@ func (s *StarGiftStore) ListByOwnerFiltered(_ context.Context, filter domain.Sav
                 }
                 if filter.ExcludeUnupgradable && rare && !upgradable {
                         continue
+                }
+                if filter.PeerColorAvailable {
+                        // Only theme_available collectibles qualify as message
+                        // palettes (official peer_color_available filter).
+                        if g.Unique == nil || !g.Unique.ThemeAvailable || g.Unique.Burned {
+                                continue
+                        }
                 }
                 if filter.CollectionID > 0 && !containsInt(g.CollectionIDs, filter.CollectionID) {
                         continue

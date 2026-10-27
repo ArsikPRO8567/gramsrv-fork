@@ -394,10 +394,11 @@ func (s *DialogStore) SetChatTheme(_ context.Context, userID int64, peer domain.
 		if list.Dialogs[i].Peer != peer {
 			continue
 		}
-		if list.Dialogs[i].ThemeEmoticon == emoticon {
+		if list.Dialogs[i].ThemeEmoticon == emoticon && list.Dialogs[i].ThemeGiftSlug == "" {
 			return false, nil
 		}
 		list.Dialogs[i].ThemeEmoticon = emoticon
+		list.Dialogs[i].ThemeGiftSlug = ""
 		s.m[userID] = list
 		return true, nil
 	}
@@ -405,6 +406,35 @@ func (s *DialogStore) SetChatTheme(_ context.Context, userID int64, peer domain.
 		return false, nil
 	}
 	list.Dialogs = append(list.Dialogs, domain.Dialog{Peer: peer, ThemeEmoticon: emoticon})
+	s.m[userID] = list
+	return true, nil
+}
+
+// SetChatThemeGift применяет тему оформления чата на базе коллекционного
+// подарка; пустой slug снимает подарочную тему.
+func (s *DialogStore) SetChatThemeGift(_ context.Context, userID int64, peer domain.Peer, slug string) (bool, error) {
+	if userID == 0 || peer.Type == "" || peer.ID == 0 {
+		return false, nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	list := s.m[userID]
+	for i := range list.Dialogs {
+		if list.Dialogs[i].Peer != peer {
+			continue
+		}
+		if list.Dialogs[i].ThemeGiftSlug == slug && list.Dialogs[i].ThemeEmoticon == "" {
+			return false, nil
+		}
+		list.Dialogs[i].ThemeGiftSlug = slug
+		list.Dialogs[i].ThemeEmoticon = ""
+		s.m[userID] = list
+		return true, nil
+	}
+	if slug == "" {
+		return false, nil
+	}
+	list.Dialogs = append(list.Dialogs, domain.Dialog{Peer: peer, ThemeGiftSlug: slug})
 	s.m[userID] = list
 	return true, nil
 }
