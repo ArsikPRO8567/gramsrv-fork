@@ -526,6 +526,12 @@ func run(logger *zap.Logger) error {
 	if !domain.ConfigurePremiumBotUsername(cfg.PremiumBotUsername) {
 		return fmt.Errorf("configure Premium bot username %q", cfg.PremiumBotUsername)
 	}
+	// Эквивалентные цены рынка коллекций: StarsUnits звёзд = NanotonUnits нанотон
+	// (TELESRV_STARGIFT_RESELL_RATE_STARS / TELESRV_STARGIFT_RESELL_RATE_NANOTON).
+	domain.SetStarGiftExchangeRate(domain.StarGiftExchangeRate{
+		StarsUnits:   cfg.StarGiftResellRateStars,
+		NanotonUnits: cfg.StarGiftResellRateNanoton,
+	})
 	buildMeta := currentBuildMetadata()
 
 	rsaKey, err := mtprotoedge.LoadOrGenerateRSAKey(cfg.RSAKeyPath)
