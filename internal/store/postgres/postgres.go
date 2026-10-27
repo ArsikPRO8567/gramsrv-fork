@@ -5,15 +5,18 @@ package postgres
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/golang-migrate/migrate/v4"
 	_ "github.com/golang-migrate/migrate/v4/database/pgx/v5" // 注册 pgx5:// migrate driver
 	"github.com/golang-migrate/migrate/v4/source/iofs"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	_ "github.com/jackc/pgx/v5/stdlib" // sql.Open("pgx", ...) для снятия dirty-флага
 
 	"telesrv/deploy"
 	"telesrv/internal/store/postgres/sqlcgen"
@@ -26,7 +29,18 @@ type MigrationStatus struct {
 	Version uint
 	Dirty   bool
 	Empty   bool
+	// RecoveredDirty: при старте схема была помечена dirty (последствия
+	// прерванной миграции), runner сам снял флаг и повторил миграцию.
+	// Информационное поле для лога запуска.
+	RecoveredDirty bool
 }
+
+// schemaMigrationLockTimeout ограничивает ожидание блокировки миграции, когда
+// параллельно запущен другой инстанс telesrv. Драйвер golang-migrate ждёт лишь
+// 15 секунд (DefaultLockTimeout) и затем роняет запуск с неочевидной ошибкой
+// "timeout: can't acquire database lock" — первая установка схемы на свежей
+// базе легко превышает этот бюджет на медленном железе.
+const schemaMigrationLockTimeout = 5 * time.Minute
 
 // PoolOption 调整 pgxpool 连接池配置。
 type PoolOption func(*pgxpool.Config)
@@ -141,6 +155,15 @@ func Migrate(dsn string) error {
 }
 
 // MigrateAndStatus 用嵌入迁移脚本迁移数据库，并返回迁移后的 schema 版本。
+//
+// Устойчивость запуска:
+//   - ожидание advisory-lock драйвера продлено до schemaMigrationLockTimeout,
+//     чтобы второй параллельный инстанс дождался своей очереди вместо падения;
+//   - dirty-флаг самовосстанавливается: pgx5-драйвер выполняет каждую миграцию
+//     в одной неявной транзакции, неудачная миграция полностью откатывается,
+//     поэтому флаг можно снять и повторить попытку; повторная ошибка вернёт
+//     реальную причину вместо вечной блокировки запуска ("Dirty database
+//     version N. Fix and force version.").
 func MigrateAndStatus(dsn string) (MigrationStatus, error) {
 	src, err := iofs.New(deploy.Migrations, "migrations")
 	if err != nil {
@@ -150,10 +173,30 @@ func MigrateAndStatus(dsn string) (MigrationStatus, error) {
 	if err != nil {
 		return MigrationStatus{}, fmt.Errorf("migrate new: %w", err)
 	}
+	m.LockTimeout = schemaMigrationLockTimeout
 	defer m.Close()
-	if err := m.Up(); err != nil && !errors.Is(err, migrate.ErrNoChange) {
-		return MigrationStatus{}, fmt.Errorf("migrate up: %w", err)
+
+	recovered := false
+	const dirtyRetries = 2
+	for attempt := 0; ; attempt++ {
+		err = m.Up()
+		if err == nil || errors.Is(err, migrate.ErrNoChange) {
+			break
+		}
+		var dirtyErr migrate.ErrDirty
+		if !errors.As(err, &dirtyErr) || attempt >= dirtyRetries {
+			return MigrationStatus{}, fmt.Errorf("migrate up: %w", err)
+		}
+		// Прерванная миграция полностью откатилась (одна миграция = одна
+		// неявная транзакция): снимаем dirty и откатываем счётчик на
+		// предыдущую версию, чтобы прерванная миграция выполнилась
+		// заново, а не была навсегда пропущена как «применённая».
+		if uerr := clearDirtyFlag(dsn); uerr != nil {
+			return MigrationStatus{}, fmt.Errorf("clear dirty flag: %w", uerr)
+		}
+		recovered = true
 	}
+
 	version, dirty, err := m.Version()
 	if errors.Is(err, migrate.ErrNilVersion) {
 		return MigrationStatus{Empty: true}, nil
@@ -161,7 +204,27 @@ func MigrateAndStatus(dsn string) (MigrationStatus, error) {
 	if err != nil {
 		return MigrationStatus{}, fmt.Errorf("migrate version: %w", err)
 	}
-	return MigrationStatus{Version: version, Dirty: dirty}, nil
+	return MigrationStatus{Version: version, Dirty: dirty, RecoveredDirty: recovered}, nil
+}
+
+// clearDirtyFlag восстанавливает схему после прерванной миграции: снимает
+// dirty-маркер и откатывает счётчик версий на предыдущую версию, чтобы
+// прерванная миграция выполнилась заново при следующем Up. Безопасно: каждая
+// миграция pgx5-драйвера выполняется в одной неявной транзакции, неудачная
+// версия полностью откатывается. Вызывается только после ErrDirty, когда
+// schema_migrations заведомо существует.
+func clearDirtyFlag(dsn string) error {
+	db, err := sql.Open("pgx", dsn)
+	if err != nil {
+		return fmt.Errorf("open pgx: %w", err)
+	}
+	defer db.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if _, err := db.ExecContext(ctx, `UPDATE schema_migrations SET version = version - 1, dirty = false WHERE dirty AND version > 0`); err != nil {
+		return fmt.Errorf("update schema_migrations: %w", err)
+	}
+	return nil
 }
 
 // toPgx5DSN 把 pgxpool 用的 postgres:// DSN 转成 golang-migrate pgx5 driver 所需的 pgx5:// scheme。

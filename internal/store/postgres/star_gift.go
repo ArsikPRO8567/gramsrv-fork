@@ -1033,10 +1033,14 @@ func (s *StarGiftStore) BurnAuctionGifts(ctx context.Context, giftID int64, coun
 			return err
 		}
 
+		// Upsert: на исторических базах строка уже существует и поведение прежнее (инкремент), на свежих базах
+		// строка создаётся первой же раздачей аукционных подарков — прежний UPDATE без совпадений молча терял счётчик номеров.
 		_, err = tx.Exec(ctx, `
-			UPDATE star_gift_auction_state 
-			SET last_gift_num = last_gift_num + $2 
-			WHERE gift_id = $1`, giftID, count)
+			INSERT INTO star_gift_auction_state (gift_id, last_gift_num)
+			VALUES ($1, $2::bigint)
+			ON CONFLICT (gift_id)
+			DO UPDATE SET last_gift_num = star_gift_auction_state.last_gift_num + $2::bigint`,
+			giftID, count)
 		return err
 	})
 }
