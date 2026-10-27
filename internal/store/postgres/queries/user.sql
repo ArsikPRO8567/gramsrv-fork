@@ -53,6 +53,7 @@ matched AS (
     u.color_set,
     u.color,
     u.color_background_emoji_id,
+    u.color_collectible,
     u.profile_color_set,
     u.profile_color,
     u.profile_color_background_emoji_id,
@@ -107,6 +108,7 @@ SELECT
   color_set,
   color,
   color_background_emoji_id,
+  color_collectible,
   profile_color_set,
   profile_color,
   profile_color_background_emoji_id,
@@ -226,6 +228,7 @@ UPDATE users
 SET color_set = sqlc.arg(color_set)::boolean,
     color = sqlc.arg(color)::int,
     color_background_emoji_id = sqlc.arg(background_emoji_id)::bigint,
+    color_collectible = sqlc.arg(color_collectible)::jsonb,
     updated_at = now()
 WHERE id = sqlc.arg(id)::bigint AND deleted_at IS NULL
 RETURNING *;
