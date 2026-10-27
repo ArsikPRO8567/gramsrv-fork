@@ -194,14 +194,28 @@ func (s *Service) SetChatTheme(ctx context.Context, userID int64, req domain.Set
 	if req.OwnerUserID != userID || req.Peer.Type != domain.PeerTypeUser || req.Peer.ID == 0 {
 		return out, domain.ErrMessageIDInvalid
 	}
-	changedSelf, err := s.dialogs.SetChatTheme(ctx, userID, req.Peer, req.Emoticon)
+	// Тема на базе коллекционного подарка (theme_available) и классическая
+	// emoji-тема взаимоисключающи: подарок хранится отдельным токеном
+	// (dialogs.theme_gift_slug), emoji-тема очищает его и наоборот.
+	themeGift := req.ThemeGift != nil && req.ThemeGift.ID != 0
+	changedSelf := false
+	changedPeer := false
+	var err error
+	if themeGift {
+		changedSelf, err = s.dialogs.SetChatThemeGift(ctx, userID, req.Peer, req.ThemeGift.Slug)
+	} else {
+		changedSelf, err = s.dialogs.SetChatTheme(ctx, userID, req.Peer, req.Emoticon)
+	}
 	if err != nil {
 		return out, err
 	}
 	otherPeer := domain.Peer{Type: domain.PeerTypeUser, ID: userID}
-	changedPeer := false
 	if req.Peer.ID != userID && !req.RecipientBlocked {
-		changedPeer, err = s.dialogs.SetChatTheme(ctx, req.Peer.ID, otherPeer, req.Emoticon)
+		if themeGift {
+			changedPeer, err = s.dialogs.SetChatThemeGift(ctx, req.Peer.ID, otherPeer, req.ThemeGift.Slug)
+		} else {
+			changedPeer, err = s.dialogs.SetChatTheme(ctx, req.Peer.ID, otherPeer, req.Emoticon)
+		}
 		if err != nil {
 			return out, err
 		}
@@ -210,11 +224,17 @@ func (s *Service) SetChatTheme(ctx context.Context, userID int64, req domain.Set
 	if !out.Changed {
 		return out, nil
 	}
+	themeToken := req.Emoticon
+	media := chatThemeServiceMedia(req.Emoticon)
+	if themeGift {
+		themeToken = req.ThemeGift.Slug
+		media = chatThemeServiceGiftMedia(*req.ThemeGift)
+	}
 	send, err := s.SendPrivateText(ctx, userID, domain.SendPrivateTextRequest{
 		SenderUserID:     userID,
 		RecipientUserID:  req.Peer.ID,
-		RandomID:         chatThemeServiceMessageRandomID(userID, req.Peer.ID, req.Emoticon, req.Date),
-		Media:            chatThemeServiceMedia(req.Emoticon),
+		RandomID:         chatThemeServiceMessageRandomID(userID, req.Peer.ID, themeToken, req.Date),
+		Media:            media,
 		Silent:           true,
 		Date:             req.Date,
 		OriginAuthKeyID:  req.OriginAuthKeyID,
@@ -270,6 +290,20 @@ func chatThemeServiceMedia(emoticon string) *domain.MessageMedia {
 		ServiceAction: &domain.MessageServiceAction{
 			Kind:              domain.MessageServiceActionSetChatTheme,
 			ChatThemeEmoticon: emoticon,
+		},
+	}
+}
+
+// chatThemeServiceGiftMedia строит service media для темы чата на базе
+// коллекционного подарка: messageActionSetChatTheme с chatThemeUniqueGift.
+func chatThemeServiceGiftMedia(gift domain.UniqueStarGift) *domain.MessageMedia {
+	return &domain.MessageMedia{
+		Kind: domain.MessageMediaKindService,
+		ServiceAction: &domain.MessageServiceAction{
+			Kind: domain.MessageServiceActionSetChatTheme,
+			ChatThemeUniqueGift: &domain.MessageChatThemeUniqueGiftAction{
+				Gift: gift,
+			},
 		},
 	}
 }
