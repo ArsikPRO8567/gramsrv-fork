@@ -152,6 +152,23 @@ func (s *StarGiftLifecycleStore) ConvertStarGift(ctx context.Context, req domain
 	return result, nil
 }
 
+// resalePaymentMatchesListing проверяет оплату покупателя против листинга:
+// точное совпадение валюты и суммы, либо TON-оплата серверного эквивалента
+// листинга в звёздах (листинг в звёздах принимает обе валюты; листинг в
+// TON — resale_ton_only — оплачивается только нанотонами).
+func resalePaymentMatchesListing(listingCurrency string, listingAmount int64, payment domain.StarGiftAmount) bool {
+	if listingAmount <= 0 || !payment.Valid() {
+		return false
+	}
+	if listingCurrency == string(payment.Currency) {
+		return listingAmount == payment.Amount
+	}
+	if listingCurrency == string(domain.StarGiftCurrencyStars) && payment.Currency == domain.StarGiftCurrencyTON {
+		return payment.Amount == domain.CurrentStarGiftExchangeRate().TonForStars(listingAmount)
+	}
+	return false
+}
+
 func (s *StarGiftLifecycleStore) ListResaleStarGifts(ctx context.Context, filter domain.StarGiftResaleFilter) (domain.StarGiftResalePage, error) {
 	if s == nil || s.db == nil || filter.GiftID <= 0 || filter.Limit <= 0 || filter.Limit > domain.MaxSavedStarGiftsLimit ||
 		filter.SortByPrice && filter.SortByNum || len(filter.Offset) > domain.MaxStarGiftsOffsetBytes {
@@ -180,9 +197,15 @@ WHERE model.collectible_revision_id=u.collectible_revision_id AND model.crafted)
 	if len(filter.BackdropIDs) > 0 {
 		conditions = append(conditions, "u.backdrop_attribute_id IN (SELECT id FROM star_gift_collectible_backdrops WHERE backdrop_id::bigint=ANY("+nextArg(filter.BackdropIDs)+"::bigint[]))")
 	}
+	// Рынок смешивает листинги в звёздах и в TON: единая сортировка по цене
+	// использует звёздный эквивалент (ceil(amount*stars_units/nanoton_units)),
+	// тот же курс, что и при оплате (domain.StarGiftExchangeRate).
+	rate := domain.CurrentStarGiftExchangeRate()
+	starsPrice := fmt.Sprintf("CASE WHEN l.currency='TON' THEN ceil(l.amount*%d::numeric/%d) ELSE l.amount END",
+		rate.StarsUnits, rate.NanotonUnits)
 	order := "l.updated_at DESC, u.id DESC"
 	if filter.SortByPrice {
-		order = "l.amount, u.id"
+		order = starsPrice + ", u.id"
 	} else if filter.SortByNum {
 		order = "u.num, u.id"
 	}
@@ -199,7 +222,7 @@ WHERE model.collectible_revision_id=u.collectible_revision_id AND model.crafted)
 		switch {
 		case filter.SortByPrice && parts[0] == "p":
 			p1, p2 := nextArg(value), nextArg(id)
-			conditions = append(conditions, "(l.amount,u.id)>("+p1+","+p2+")")
+			conditions = append(conditions, "("+starsPrice+",u.id)>("+p1+","+p2+")")
 		case filter.SortByNum && parts[0] == "n":
 			p1, p2 := nextArg(value), nextArg(id)
 			conditions = append(conditions, "(u.num,u.id)>("+p1+","+p2+")")
@@ -216,7 +239,7 @@ WHERE model.collectible_revision_id=u.collectible_revision_id AND model.crafted)
 		return domain.StarGiftResalePage{}, fmt.Errorf("count resale star gifts: %w", err)
 	}
 	limitArg := nextArg(filter.Limit + 1)
-	rows, err := s.db.Query(ctx, `SELECT u.id,l.amount,l.updated_at,u.num
+	rows, err := s.db.Query(ctx, `SELECT u.id,l.amount,l.updated_at,u.num,`+starsPrice+`
 FROM star_gift_listings l JOIN unique_star_gifts u ON u.id=l.unique_gift_id
 WHERE `+where+` ORDER BY `+order+` LIMIT `+limitArg, args...)
 	if err != nil {
@@ -226,12 +249,13 @@ WHERE `+where+` ORDER BY `+order+` LIMIT `+limitArg, args...)
 	type listedID struct {
 		id, amount   int64
 		updated, num int
+		price        int64
 	}
 	listed := make([]listedID, 0, filter.Limit+1)
 	ids := make([]int64, 0, filter.Limit+1)
 	for rows.Next() {
 		var item listedID
-		if err := rows.Scan(&item.id, &item.amount, &item.updated, &item.num); err != nil {
+		if err := rows.Scan(&item.id, &item.amount, &item.updated, &item.num, &item.price); err != nil {
 			return domain.StarGiftResalePage{}, err
 		}
 		listed = append(listed, item)
@@ -260,7 +284,7 @@ WHERE `+where+` ORDER BY `+order+` LIMIT `+limitArg, args...)
 		last := listed[len(listed)-1]
 		switch {
 		case filter.SortByPrice:
-			page.NextOffset = fmt.Sprintf("p:%d:%d", last.amount, last.id)
+			page.NextOffset = fmt.Sprintf("p:%d:%d", last.price, last.id)
 		case filter.SortByNum:
 			page.NextOffset = fmt.Sprintf("n:%d:%d", last.num, last.id)
 		default:
@@ -337,9 +361,6 @@ func (s *StarGiftLifecycleStore) SetStarGiftListing(ctx context.Context, req dom
 				return err
 			}
 		} else {
-			if unique.ResaleTonOnly && req.Amount.Currency != domain.StarGiftCurrencyTON {
-				return domain.ErrStarGiftResaleUnavailable
-			}
 			var minimum int64
 			if req.Amount.Currency == domain.StarGiftCurrencyStars {
 				if err := tx.QueryRow(ctx, `SELECT resell_min_stars FROM star_gift_catalog WHERE gift_id=$1`, unique.GiftID).Scan(&minimum); err != nil {
@@ -349,11 +370,18 @@ func (s *StarGiftLifecycleStore) SetStarGiftListing(ctx context.Context, req dom
 					return domain.ErrStarGiftResaleUnavailable
 				}
 			}
+			// Листинг в TON — «только TON» (resale_ton_only): покупатель платит
+			// нанотонами, сервер показывает эквивалент в звёздах. Листинг в
+			// звёздах принимает обе валюты: TON-цена считается сервером от курса.
 			_, err = tx.Exec(ctx, `INSERT INTO star_gift_listings(unique_gift_id,seller_peer_type,seller_peer_id,currency,amount,listed_at,updated_at)
 VALUES($1,$2,$3,$4,$5,$6,$6)
 ON CONFLICT(unique_gift_id) DO UPDATE SET currency=EXCLUDED.currency,amount=EXCLUDED.amount,updated_at=EXCLUDED.updated_at,version=star_gift_listings.version+1`,
 				unique.ID, string(saved.Owner.Type), saved.Owner.ID, string(req.Amount.Currency), req.Amount.Amount, req.Date)
 			if err != nil {
+				return err
+			}
+			if _, err := tx.Exec(ctx, `UPDATE unique_star_gifts SET resale_ton_only=$2,updated_at=now() WHERE id=$1`,
+				unique.ID, req.Amount.Currency == domain.StarGiftCurrencyTON); err != nil {
 				return err
 			}
 		}
@@ -528,7 +556,7 @@ func (s *StarGiftLifecycleStore) PurchaseResaleStarGift(ctx context.Context, req
 				return err
 			}
 			if sellerType != string(seller.Type) || sellerID != seller.ID ||
-				listingCurrency != string(req.Amount.Currency) || listingAmount != req.Amount.Amount {
+				!resalePaymentMatchesListing(listingCurrency, listingAmount, req.Amount) {
 				return domain.ErrStarGiftResaleUnavailable
 			}
 			saved, found, err := lockSavedStarGiftByUniqueID(ctx, tx, uniqueID)
@@ -539,17 +567,19 @@ func (s *StarGiftLifecycleStore) PurchaseResaleStarGift(ctx context.Context, req
 			if err != nil || !found || gift.Burned || gift.Owner != saved.Owner {
 				return domain.ErrStarGiftResaleUnavailable
 			}
-			// require_premium наследуется от исходного подарка: покупать коллекцию
-			// с маркета может только владелец Premium-подписки.
-			if gift.RequirePremium && !req.BuyerPremium {
-				return domain.ErrPremiumRequired
-			}
+			// require_premium на коллекционных подарках — только маркетинговый
+			// признак (наследуется от исходного для отображения на рынке),
+			// покупка разрешена независимо от наличия подписки.
 			balance, err := s.debitLifecycleAmount(ctx, tx, req.BuyerUserID, req.Amount, domain.StarsReasonGiftResale,
 				saved.Owner, req.Date, "Collectible gift purchase")
 			if err != nil {
 				return err
 			}
-			if _, commission, err := s.creditPeerLifecycleAmount(ctx, tx, seller, req.BuyerUserID, req.Amount,
+			// Продавец получает цену листинга в валюте листинга (как на
+			// официальном сервере): оплату покупателя в TON по звёздному
+			// листингу конвертирует сервер по своему курсу.
+			proceeds := domain.StarGiftAmount{Currency: domain.StarGiftCurrency(listingCurrency), Amount: listingAmount}
+			if _, commission, err := s.creditPeerLifecycleAmount(ctx, tx, seller, req.BuyerUserID, proceeds,
 				domain.StarsReasonGiftResale, domain.Peer{Type: domain.PeerTypeUser, ID: req.BuyerUserID},
 				gift.ID, req.Date, "Collectible gift sale"); err != nil {
 				return err
@@ -722,10 +752,6 @@ func (s *StarGiftLifecycleStore) SendStarGiftOffer(ctx context.Context, req doma
 	if err != nil || !found || unique.Owner != req.Owner || unique.Burned || unique.OwnerAddress != "" || unique.OfferMinStars <= 0 {
 		return domain.StarGiftOfferResult{}, domain.ErrStarGiftOfferInvalid
 	}
-	// Оффер — предоплата будущей покупки: require_premium действует и здесь.
-	if unique.RequirePremium && !req.BuyerPremium {
-		return domain.StarGiftOfferResult{}, domain.ErrPremiumRequired
-	}
 	messageReq := domain.SendPrivateTextRequest{
 		SenderUserID: req.BuyerUserID, RecipientUserID: req.Owner.ID, RandomID: req.RandomID, Date: req.Date,
 		OriginAuthKeyID: req.OriginAuthKeyID, OriginSessionID: req.OriginSessionID, OriginUserID: req.BuyerUserID,
@@ -746,9 +772,6 @@ func (s *StarGiftLifecycleStore) SendStarGiftOffer(ctx context.Context, req doma
 			gift, found, err := NewStarGiftStore(tx).UniqueByID(ctx, unique.ID)
 			if err != nil || !found || gift.Owner != req.Owner || gift.Burned || gift.OwnerAddress != "" || gift.OfferMinStars <= 0 {
 				return domain.ErrStarGiftOfferInvalid
-			}
-			if gift.RequirePremium && !req.BuyerPremium {
-				return domain.ErrPremiumRequired
 			}
 			if req.Price.Currency == domain.StarGiftCurrencyStars && gift.OfferMinStars > 0 && req.Price.Amount < int64(gift.OfferMinStars) {
 				return domain.ErrStarGiftOfferInvalid

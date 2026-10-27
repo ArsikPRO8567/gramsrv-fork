@@ -9,8 +9,10 @@ import (
 	"telesrv/internal/domain"
 )
 
-// require_premium каталога должен наследоваться выпущенной коллекцией, а покупка
-// такой коллекции (маркет и офферы) доступна только Premium-аккаунтам.
+// require_premium каталога должен наследоваться выпущенной коллекцией. Флаг —
+// маркетинговый признак для отображения: покупка коллекции с маркета и офферы
+// разрешены независимо от подписки (гейт остаётся только на обычной покупке
+// подарка из каталога).
 func TestStarGiftRequirePremiumCollectiblePostgres(t *testing.T) {
 	pool := testPool(t)
 	ctx := context.Background()
@@ -112,19 +114,25 @@ func TestStarGiftRequirePremiumCollectiblePostgres(t *testing.T) {
 	first := upgradeUnique(0, now+10)
 	second := upgradeUnique(1, now+20)
 
-	// Оффер на коллекцию с require_premium без Premium запрещён.
-	_, err = lifecycle.SendStarGiftOffer(ctx, domain.StarGiftOfferRequest{
+	// Оффер на коллекцию с require_premium разрешён и без подписки (флаг —
+	// только признак отображения на рынке); владелец отклоняет его.
+	plainOffer, err := lifecycle.SendStarGiftOffer(ctx, domain.StarGiftOfferRequest{
 		BuyerUserID: plainBuyer.ID, Owner: ownerPeer, Slug: first.Unique.Slug,
 		Price:    domain.StarGiftAmount{Currency: domain.StarGiftCurrencyStars, Amount: 300},
 		Duration: 120, RandomID: 93150, Date: now + 30,
 	})
-	if !errors.Is(err, domain.ErrPremiumRequired) {
-		t.Fatalf("non-premium offer err = %v, want ErrPremiumRequired", err)
+	if err != nil || plainOffer.Offer.Status != "pending" {
+		t.Fatalf("non-premium offer = %+v err %v, want pending", plainOffer, err)
+	}
+	if declined, err := lifecycle.ResolveStarGiftOffer(ctx, domain.StarGiftResolveOfferRequest{
+		OwnerUserID: owner.ID, OfferMsgID: plainOffer.Offer.OfferMsgID, Decline: true, Date: now + 30,
+	}); err != nil || declined.Offer.Status != "declined" {
+		t.Fatalf("decline non-premium offer = %+v err %v", declined, err)
 	}
 
 	// Premium-покупатель может отправить оффер, владелец принимает.
 	acceptedOffer, err := lifecycle.SendStarGiftOffer(ctx, domain.StarGiftOfferRequest{
-		BuyerUserID: premiumBuyer.ID, BuyerPremium: true, Owner: ownerPeer, Slug: first.Unique.Slug,
+		BuyerUserID: premiumBuyer.ID, Owner: ownerPeer, Slug: first.Unique.Slug,
 		Price:    domain.StarGiftAmount{Currency: domain.StarGiftCurrencyStars, Amount: 300},
 		Duration: 120, RandomID: 93151, Date: now + 31,
 	})
@@ -138,7 +146,7 @@ func TestStarGiftRequirePremiumCollectiblePostgres(t *testing.T) {
 		t.Fatalf("accept premium offer = %+v err %v", accepted, err)
 	}
 
-	// Маркет: без Premium покупка коллекции запрещена, с Premium — разрешена.
+	// Маркет: покупка коллекции с require_premium разрешена и без подписки.
 	listed, err := lifecycle.SetStarGiftListing(ctx, domain.StarGiftListingRequest{
 		ActorUserID: owner.ID, Ref: domain.SavedStarGiftRef{Owner: ownerPeer, MsgID: second.Saved.MsgID},
 		Amount: &domain.StarGiftAmount{Currency: domain.StarGiftCurrencyStars, Amount: 500}, Date: now + 40,
@@ -146,20 +154,13 @@ func TestStarGiftRequirePremiumCollectiblePostgres(t *testing.T) {
 	if err != nil || listed.ResellAmount == nil {
 		t.Fatalf("listing = %+v err %v", listed, err)
 	}
-	if _, err := lifecycle.PurchaseResaleStarGift(ctx, domain.StarGiftResalePurchaseRequest{
+	resold, err := lifecycle.PurchaseResaleStarGift(ctx, domain.StarGiftResalePurchaseRequest{
 		BuyerUserID: plainBuyer.ID, Slug: listed.Slug, To: plainBuyerPeer,
 		Amount: domain.StarGiftAmount{Currency: domain.StarGiftCurrencyStars, Amount: 500}, FormID: 93160,
-		CommandKey: "premium-resale-plain-" + suffix, Date: now + 41,
-	}); !errors.Is(err, domain.ErrPremiumRequired) {
-		t.Fatalf("non-premium resale err = %v, want ErrPremiumRequired", err)
-	}
-	resold, err := lifecycle.PurchaseResaleStarGift(ctx, domain.StarGiftResalePurchaseRequest{
-		BuyerUserID: premiumBuyer.ID, BuyerPremium: true, Slug: listed.Slug, To: domain.Peer{Type: domain.PeerTypeUser, ID: premiumBuyer.ID},
-		Amount: domain.StarGiftAmount{Currency: domain.StarGiftCurrencyStars, Amount: 500}, FormID: 93161,
-		CommandKey: "premium-resale-ok-" + suffix, Date: now + 42,
+		CommandKey: "plain-resale-ok-" + suffix, Date: now + 41,
 	})
-	if err != nil || resold.Unique.Owner.ID != premiumBuyer.ID {
-		t.Fatalf("premium resale = %+v err %v", resold, err)
+	if err != nil || resold.Unique.Owner.ID != plainBuyer.ID {
+		t.Fatalf("non-premium resale = %+v err %v", resold, err)
 	}
 	if !resold.Unique.RequirePremium {
 		t.Fatalf("resold unique lost require_premium: %+v", resold.Unique)

@@ -545,6 +545,8 @@ func scanUniqueStarGift(row rowScanner) (domain.UniqueStarGift, error) {
 	unique.Host.Type = domain.PeerType(hostPeerType)
 	if listingCurrency != "" && listingAmount > 0 {
 		unique.ResellAmount = &domain.StarGiftAmount{Currency: domain.StarGiftCurrency(listingCurrency), Amount: listingAmount}
+		// Эквивалентные цены рынка (звёзды/нанотон) считаются от валюты листинга.
+		unique.ResellStars, unique.ResellTon = domain.StarGiftResalePrices(*unique.ResellAmount)
 	}
 	if lastSaleCurrency != "" && unique.LastSaleDate > 0 {
 		unique.LastSaleAmount = &domain.StarGiftAmount{Currency: domain.StarGiftCurrency(lastSaleCurrency), Amount: lastSaleAmount}
