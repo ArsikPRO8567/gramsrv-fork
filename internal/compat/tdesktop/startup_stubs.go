@@ -208,6 +208,26 @@ func LookupDefaultTheme(input tg.InputThemeClass) (tg.Theme, bool) {
 	return tg.Theme{}, false
 }
 
+// UniqueGiftThemeSettings строит themeSettings для темы чата на базе
+// коллекционного подарка: один набор на каждый base theme из
+// chatThemeBaseThemes (контракт Android: селектор отбрасывает темы, у которых
+// меньше 4 наборов). accent/day — центр фона подарка, тёмные base — край;
+// заливка исходящих и входящих — градиент [центр, край].
+func UniqueGiftThemeSettings(centerColor, edgeColor int) []tg.ThemeSettings {
+	settings := make([]tg.ThemeSettings, 0, len(chatThemeBaseThemes))
+	for _, b := range chatThemeBaseThemes {
+		accent := centerColor
+		if b.dark {
+			accent = edgeColor
+		}
+		ts := tg.ThemeSettings{BaseTheme: b.make(), AccentColor: accent}
+		ts.SetOutboxAccentColor(edgeColor)
+		ts.SetMessageColors([]int{centerColor, edgeColor})
+		settings = append(settings, ts)
+	}
+	return settings
+}
+
 func UniqueGiftChatThemes(hash int64) tg.AccountChatThemesClass {
 	if hash == uniqueGiftChatThemesHash {
 		return &tg.AccountChatThemesNotModified{}
