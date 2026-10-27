@@ -86,11 +86,6 @@ func (r *Router) starGiftResalePaymentForm(ctx context.Context, userID int64, in
 	if err != nil {
 		return nil, err
 	}
-	// require_premium наследуется от исходного подарка: форма покупки коллекции
-	// недоступна без Premium (тот же гейт, что у обычной покупки подарка).
-	if gift.RequirePremium && !r.viewerPremium(ctx, userID) {
-		return nil, tgerr400("PREMIUM_ACCOUNT_REQUIRED")
-	}
 	currency := string(amount.Currency)
 	return &tg.PaymentsPaymentFormStarGift{FormID: starGiftLifecycleFormID("resale", userID,
 		gift.ID, gift.Owner.Type, gift.Owner.ID, to.Type, to.ID, amount.Currency, amount.Amount, gift.ResellVersion),
@@ -101,10 +96,6 @@ func (r *Router) sendStarGiftResaleForm(ctx context.Context, userID, formID int6
 	gift, to, amount, err := r.starGiftResaleTarget(ctx, userID, inv)
 	if err != nil {
 		return nil, err
-	}
-	buyerPremium := r.viewerPremium(ctx, userID)
-	if gift.RequirePremium && !buyerPremium {
-		return nil, tgerr400("PREMIUM_ACCOUNT_REQUIRED")
 	}
 	wantFormID := starGiftLifecycleFormID("resale", userID,
 		gift.ID, gift.Owner.Type, gift.Owner.ID, to.Type, to.ID, amount.Currency, amount.Amount, gift.ResellVersion)
@@ -125,7 +116,7 @@ func (r *Router) sendStarGiftResaleForm(ctx context.Context, userID, formID int6
 		return nil, err
 	}
 	result, err := r.deps.Gifts.PurchaseResale(ctx, domain.StarGiftResalePurchaseRequest{BuyerUserID: userID,
-		BuyerPremium: buyerPremium, Slug: gift.Slug, To: to, Amount: amount, FormID: formID,
+		Slug: gift.Slug, To: to, Amount: amount, FormID: formID,
 		CommandKey: fmt.Sprintf("resale:%d:%d", gift.ID, formID),
 		Date:       int(r.clock.Now().Unix()), RecipientUnsaved: recipientUnsaved,
 		OriginAuthKeyID: rawAuthKeyIDForOrigin(ctx), OriginSessionID: sessionIDOrZero(ctx)})
@@ -152,14 +143,20 @@ func (r *Router) starGiftResaleTarget(ctx context.Context, userID int64, inv *tg
 	if err != nil {
 		return domain.UniqueStarGift{}, domain.Peer{}, domain.StarGiftAmount{}, err
 	}
-	wantCurrency := domain.StarGiftCurrencyStars
+	// Эквивалентные цены рынка: листинг в звёздах оплачивается звёздами или
+	// TON (серверный эквивалент от курса), листинг в TON (resale_ton_only) —
+	// только нанотонами; звёздный эквивалент при этом показывается клиенту.
+	pay := domain.StarGiftAmount{Currency: domain.StarGiftCurrencyStars, Amount: gift.ResellStars}
 	if inv.Ton {
-		wantCurrency = domain.StarGiftCurrencyTON
-	}
-	if gift.ResellAmount.Currency != wantCurrency || gift.Owner == to {
+		pay = domain.StarGiftAmount{Currency: domain.StarGiftCurrencyTON, Amount: gift.ResellTon}
+	} else if gift.ResellAmount.Currency != domain.StarGiftCurrencyStars {
+		// Листинг «только TON» нельзя оплатить звёздами.
 		return domain.UniqueStarGift{}, domain.Peer{}, domain.StarGiftAmount{}, starGiftInvalidErr()
 	}
-	return gift, to, *gift.ResellAmount, nil
+	if pay.Amount <= 0 || gift.Owner == to {
+		return domain.UniqueStarGift{}, domain.Peer{}, domain.StarGiftAmount{}, starGiftInvalidErr()
+	}
+	return gift, to, pay, nil
 }
 
 func (r *Router) starGiftAuctionBidPaymentForm(ctx context.Context, userID int64, inv *tg.InputInvoiceStarGiftAuctionBid) (tg.PaymentsPaymentFormClass, error) {
@@ -713,7 +710,7 @@ func (r *Router) onPaymentsSendStarGiftOffer(ctx context.Context, req *tg.Paymen
 		return nil, starGiftInvalidErr()
 	}
 	now := int(r.clock.Now().Unix())
-	result, err := r.deps.Gifts.SendOffer(ctx, domain.StarGiftOfferRequest{BuyerUserID: userID, BuyerPremium: r.viewerPremium(ctx, userID),
+	result, err := r.deps.Gifts.SendOffer(ctx, domain.StarGiftOfferRequest{BuyerUserID: userID,
 		Owner: owner, Slug: req.Slug, Price: price, Duration: req.Duration, RandomID: req.RandomID, Date: now,
 		OriginAuthKeyID: rawAuthKeyIDForOrigin(ctx), OriginSessionID: sessionIDOrZero(ctx)})
 	if err != nil {

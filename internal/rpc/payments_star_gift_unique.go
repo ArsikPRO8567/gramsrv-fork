@@ -401,7 +401,20 @@ func tgUniqueStarGift(unique domain.UniqueStarGift) *tg.StarGiftUnique {
 		out.SetGiftAddress(unique.GiftAddress)
 	}
 	if unique.ResellAmount != nil {
-		out.SetResellAmount([]tg.StarsAmountClass{tgStarGiftAmount(*unique.ResellAmount)})
+		// Официальная схема: resell_amount — вектор из двух цен (звёзды и
+		// нанотон); клиент выбирает валюту по типу элемента, а при resale_ton_only
+		// оплатить можно только TON (звёздная цена — эквивалент для отображения).
+		amounts := make([]tg.StarsAmountClass, 0, 2)
+		if unique.ResellStars > 0 {
+			amounts = append(amounts, &tg.StarsAmount{Amount: unique.ResellStars})
+		}
+		if unique.ResellTon > 0 {
+			amounts = append(amounts, &tg.StarsTonAmount{Amount: unique.ResellTon})
+		}
+		if len(amounts) == 0 {
+			amounts = append(amounts, tgStarGiftAmount(*unique.ResellAmount))
+		}
+		out.SetResellAmount(amounts)
 	}
 	if peer := tgPeer(unique.ReleasedBy); peer != nil {
 		out.SetReleasedBy(peer)
