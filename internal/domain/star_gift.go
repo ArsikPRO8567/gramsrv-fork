@@ -4,6 +4,8 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"math"
+	"math/big"
 	"regexp"
 	"strconv"
 	"strings"
@@ -215,29 +217,35 @@ type UniqueStarGift struct {
 	OwnerAddress          string
 	GiftAddress           string
 	ResellAmount          *StarGiftAmount
-	ResellVersion         int64
-	ReleasedBy            Peer
-	ValueAmount           int64
-	ValueCurrency         string
-	ValueUSD              int64
-	ThemePeer             Peer
-	Host                  Peer
-	OfferMinStars         int
-	CraftChancePermille   int
-	LastSaleDate          int
-	LastSaleAmount        *StarGiftAmount
-	Model                 StarGiftCollectibleAttribute
-	Pattern               StarGiftCollectibleAttribute
-	Backdrop              StarGiftCollectibleAttribute
-	AvailabilityIssued    int
-	AvailabilityTotal     int
-	KeepOriginalDetails   bool
-	OriginalFromUserID    int64
-	OriginalOwner         Peer
-	OriginalDate          int
-	OriginalMessage       string
-	OriginalNameHidden    bool
-	CreatedAt             time.Time
+	// ResellStars/ResellTon — эквивалентные цены активного листинга (звёзды
+	// и нанотон; заполняются при загрузке из star_gift_listings). Листинг в
+	// звёздах делает обе цены доступными к оплате, листинг в TON (тогда
+	// ResaleTonOnly=true) разрешает оплату только нанотонами.
+	ResellStars         int64
+	ResellTon           int64
+	ResellVersion       int64
+	ReleasedBy          Peer
+	ValueAmount         int64
+	ValueCurrency       string
+	ValueUSD            int64
+	ThemePeer           Peer
+	Host                Peer
+	OfferMinStars       int
+	CraftChancePermille int
+	LastSaleDate        int
+	LastSaleAmount      *StarGiftAmount
+	Model               StarGiftCollectibleAttribute
+	Pattern             StarGiftCollectibleAttribute
+	Backdrop            StarGiftCollectibleAttribute
+	AvailabilityIssued  int
+	AvailabilityTotal   int
+	KeepOriginalDetails bool
+	OriginalFromUserID  int64
+	OriginalOwner       Peer
+	OriginalDate        int
+	OriginalMessage     string
+	OriginalNameHidden  bool
+	CreatedAt           time.Time
 }
 
 // CollectibleEmojiStatus projects an immutable unique gift into the complete
@@ -288,6 +296,81 @@ func (a StarGiftAmount) Valid() bool {
 	default:
 		return false
 	}
+}
+
+// StarGiftExchangeRate задаёт курс рынка коллекций между звёздами и TON:
+// StarsUnits звёзд по стоимости эквивалентны NanotonUnits нанотон. На
+// официальном сервере 1457 звёзд = 18 TON = 18000000000 нанотон, поэтому
+// числовое значение цены в звёздах обычно больше, чем в TON.
+type StarGiftExchangeRate struct {
+	StarsUnits   int64
+	NanotonUnits int64
+}
+
+// starGiftExchangeRate — курс по умолчанию (официальный); переопределяется
+// из .env при старте сервера через SetStarGiftExchangeRate.
+var starGiftExchangeRate = StarGiftExchangeRate{StarsUnits: 1457, NanotonUnits: 18_000_000_000}
+
+// SetStarGiftExchangeRate устанавливает курс эквивалентных цен рынка
+// (TELESRV_STARGIFT_RESELL_RATE_STARS / TELESRV_STARGIFT_RESELL_RATE_NANOTON).
+// Невалидный курс игнорируется — действует предыдущий.
+func SetStarGiftExchangeRate(rate StarGiftExchangeRate) {
+	if rate.Valid() {
+		starGiftExchangeRate = rate
+	}
+}
+
+// CurrentStarGiftExchangeRate возвращает активный курс (используется stores
+// для SQL-сортировки рынка и валидации оплаты).
+func CurrentStarGiftExchangeRate() StarGiftExchangeRate { return starGiftExchangeRate }
+
+func (r StarGiftExchangeRate) Valid() bool {
+	return r.StarsUnits > 0 && r.NanotonUnits > 0
+}
+
+// TonForStars — эквивалент цены в звёздах, выраженный в нанотонах
+// (округление вверх: покупатель в TON платит не меньше заявленной стоимости).
+func (r StarGiftExchangeRate) TonForStars(stars int64) int64 {
+	if !r.Valid() || stars <= 0 {
+		return 0
+	}
+	return divMulCeil(stars, r.NanotonUnits, r.StarsUnits)
+}
+
+// StarsForTon — эквивалент цены в нанотонах, выраженный в звёздах
+// (округление вверх; для листингов «только TON» это отображаемая цена).
+func (r StarGiftExchangeRate) StarsForTon(nanoton int64) int64 {
+	if !r.Valid() || nanoton <= 0 {
+		return 0
+	}
+	return divMulCeil(nanoton, r.StarsUnits, r.NanotonUnits)
+}
+
+// divMulCeil считает a*b/c с округлением вверх; big.Int защищает от
+// переполнения int64 при больших ценах и курсах (результат ограничивается
+// максимумом int64 вместо арифметического переполнения).
+func divMulCeil(a, b, c int64) int64 {
+	numerator := new(big.Int).Mul(big.NewInt(a), big.NewInt(b))
+	quotient, remainder := new(big.Int).QuoRem(numerator, big.NewInt(c), new(big.Int))
+	if remainder.Sign() > 0 {
+		quotient.Add(quotient, big.NewInt(1))
+	}
+	if !quotient.IsInt64() {
+		return math.MaxInt64
+	}
+	return quotient.Int64()
+}
+
+// StarGiftResalePrices возвращает пару цен активного листинга рынка:
+// (звёзды, нанотон). Листинг в звёздах получает серверный TON-эквивалент
+// (покупатель может платить любой валютой), листинг в TON — звёздный
+// эквивалент только для отображения (оплата исключительно в TON).
+func StarGiftResalePrices(listing StarGiftAmount) (stars, ton int64) {
+	rate := starGiftExchangeRate
+	if listing.Currency == StarGiftCurrencyTON {
+		return rate.StarsForTon(listing.Amount), listing.Amount
+	}
+	return listing.Amount, rate.TonForStars(listing.Amount)
 }
 
 // StarGiftUpgradePreview 是客户端升级弹窗所需的当前价格和属性样例。
@@ -586,7 +669,6 @@ type StarGiftListingRequest struct {
 
 type StarGiftResalePurchaseRequest struct {
 	BuyerUserID      int64
-	BuyerPremium     bool // require_premium у коллекционного подарка наследуется от исходного; покупка с маркета только для Premium
 	Slug             string
 	To               Peer
 	Amount           StarGiftAmount
@@ -600,7 +682,6 @@ type StarGiftResalePurchaseRequest struct {
 
 type StarGiftOfferRequest struct {
 	BuyerUserID     int64
-	BuyerPremium    bool // оффер — предоплата будущей покупки; require_premium действует и здесь
 	Owner           Peer
 	Slug            string
 	Price           StarGiftAmount
