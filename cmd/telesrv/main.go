@@ -586,6 +586,7 @@ func run(logger *zap.Logger) error {
 		zap.Uint("schema_version", migrationStatus.Version),
 		zap.Bool("schema_dirty", migrationStatus.Dirty),
 		zap.Bool("schema_empty", migrationStatus.Empty),
+		zap.Bool("schema_recovered_dirty", migrationStatus.RecoveredDirty),
 	)
 	blobRuntimeLock, err := postgres.AcquireBlobRuntimeLock(ctx, cfg.PostgresDSN)
 	if err != nil {
