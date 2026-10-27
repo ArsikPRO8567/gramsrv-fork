@@ -1,14 +1,16 @@
--- theme_available у уникальных подарков выводится из активного флага
--- peer_color_available ревизии каталога исходного подарка (официальная модель:
--- коллекционный подарок, чья ревизия допускает peer color, разрешено
--- использовать как палитру сообщений и тему оформления чата). Апгрейд 0175+
--- проставляет флаг при выпуске новых коллекций; здесь дозаполняем все уже
--- выпущенные уникальные подарки.
-UPDATE unique_star_gifts u
-SET theme_available = true,
-    updated_at = now()
-FROM star_gift_catalog c
-JOIN star_gift_catalog_revisions ar ON ar.id = c.active_revision_id
-WHERE c.gift_id = u.gift_id
-  AND u.theme_available = false
-  AND ar.peer_color_available = true;
+-- Пустая миграция (was: backfill theme_available).
+-- Первоначальная версия 0176 выполняла UPDATE unique_star_gifts напрямую, и на
+-- базах, где есть рассинхронизированные агрегаты peer_star_gifts (подарок
+-- экспортирован, owner_address <> '', а lifecycle_status агрегата остался
+-- 'active'), отложенный constraint-триггер unique_star_gift_owner_guard
+-- (0095/0128) прерывал миграцию ошибкой
+-- "exported unique star gift has non-exported saved aggregate (SQLSTATE P0001)"
+-- и оставлял схему в состоянии dirty.
+--
+-- Backfill перенесён в 0179 и выполняется ПОСЛЕ ремонта агрегатов:
+-- 0179 приводит peer_star_gifts в соответствие с фактическим состоянием
+-- unique_star_gifts (те же инварианты, что пишут живые потоки апгрейда,
+-- экспорта и burn), а затем дозаполняет theme_available. Содержимое 0176
+-- считается применённым на всех базах, где версия 0176 уже отмечена чистой;
+-- идемпотентный backfill из 0179 в любом случае накрывает её эффект.
+SELECT 1;
