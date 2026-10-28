@@ -68,8 +68,8 @@ func (s *StarGiftUpgradeStore) GrantUniqueStarGift(ctx context.Context, req doma
 	placeholder := &domain.MessageMedia{Kind: domain.MessageMediaKindService, ServiceAction: &domain.MessageServiceAction{
 		Kind: domain.MessageServiceActionStarGiftUnique,
 		StarGiftUnique: &domain.MessageStarGiftUniqueAction{
-			Assigned: true,
-			Saved:    true,
+			Transferred: true,
+			Saved:       true,
 		},
 	}}
 	messageReq := domain.SendPrivateTextRequest{
@@ -261,10 +261,15 @@ func adminStarGiftUniqueMedia(saved domain.SavedStarGift, unique domain.UniqueSt
 	if saved.NameHidden {
 		fromUserID = 0
 	}
+	// Официальная семантика флагов messageActionStarGiftUnique: assigned=True
+	// рендерится клиентами как «Вы добавили {подарок} в свой профиль», а
+	// transferred+from_id — как «{отправитель} передал(а) Вам подарок!».
+	// Выдача из админ-панели — это передача от сервисного аккаунта
+	// (777000), поэтому действие несёт transferred, а не assigned.
 	return &domain.MessageMedia{Kind: domain.MessageMediaKindService, ServiceAction: &domain.MessageServiceAction{
 		Kind: domain.MessageServiceActionStarGiftUnique,
 		StarGiftUnique: &domain.MessageStarGiftUniqueAction{
-			Gift: unique, FromUserID: fromUserID, Assigned: true, Saved: true,
+			Gift: unique, FromUserID: fromUserID, Transferred: true, Saved: true,
 			CanExportAt: saved.CanExportAt, TransferStars: saved.TransferStars,
 			CanTransferAt: saved.CanTransferAt, CanResellAt: saved.CanResellAt,
 			DropOriginalDetailsStars: saved.DropOriginalDetailsStars, CanCraftAt: saved.CanCraftAt,
@@ -939,8 +944,8 @@ func lockSavedStarGiftWhere(ctx context.Context, tx pgx.Tx, where string, args .
 	row := tx.QueryRow(ctx, `
 SELECT p.id, p.owner_peer_type, p.owner_peer_id, p.from_user_id, p.gift_id, p.catalog_revision_id,
        p.msg_id, p.saved_id, p.gift_date, p.name_hidden, p.unsaved, p.converted, p.convert_stars, p.prepaid_upgrade_stars, p.prepaid_upgrade_hash, p.gift_num,
-	   p.lifecycle_status, p.transfer_stars, p.can_export_at, p.can_transfer_at, p.can_resell_at,
-	   p.drop_original_details_stars, p.can_craft_at,
+           p.lifecycle_status, p.transfer_stars, p.can_export_at, p.can_transfer_at, p.can_resell_at,
+           p.drop_original_details_stars, p.can_craft_at,
        p.message, COALESCE(p.unique_gift_id, 0), p.upgrade_msg_id, p.pinned_order,
        COALESCE((SELECT array_agg(i.collection_id ORDER BY c.sort_order, i.collection_id)
                  FROM star_gift_collection_items i

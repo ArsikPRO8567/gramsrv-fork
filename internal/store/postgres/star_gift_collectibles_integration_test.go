@@ -704,9 +704,13 @@ func TestAdminUniqueStarGiftGrantIsAtomicAndReplayable(t *testing.T) {
 		t.Fatalf("grant admin unique gift: %v", err)
 	}
 	action := granted.Send.RecipientMessage.Media.ServiceAction.StarGiftUnique
+	// Раунд 10: выдача из админ-панели — передача от сервисного аккаунта.
+	// Клиенты рендерят transferred+from_id как «{сервисный аккаунт} передал(а)
+	// Вам подарок!», а assigned — как «Вы добавили подарок в свой профиль».
 	if granted.Duplicate || granted.Saved.MsgID <= 0 || granted.Saved.MsgID != granted.Saved.UpgradeMsgID ||
 		granted.Saved.UniqueGiftID != granted.Unique.ID || granted.Unique.Num != 1 ||
-		action == nil || !action.Assigned || !action.Saved || action.Gift.ID != granted.Unique.ID {
+		action == nil || !action.Transferred || action.Assigned || !action.Saved ||
+		action.FromUserID != domain.OfficialSystemUserID || action.Gift.ID != granted.Unique.ID {
 		t.Fatalf("admin grant result=%+v action=%+v", granted, action)
 	}
 	events, err := NewUpdateEventStore(pool).ListAfter(ctx, recipient.ID, granted.Send.RecipientMessage.Pts-1, 1)
