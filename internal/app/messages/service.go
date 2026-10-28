@@ -284,6 +284,21 @@ func (s *Service) TogglePrivateNoForwards(ctx context.Context, userID int64, req
 	return backend.TogglePrivateNoForwards(ctx, req)
 }
 
+// ClearChatThemeSilently снимает ранее установленную тему оформления с обоих
+// сторон одного приватного диалога без сервисного сообщения. Официальные
+// серверы убирают тему на базе коллекционного подарка из прежнего чата
+// автоматически, когда тот же подарок становится темой нового чата
+// (core.telegram.org/api/themes#chat-themes).
+func (s *Service) ClearChatThemeSilently(ctx context.Context, ownerUserID, peerUserID int64) {
+	if s == nil || s.dialogs == nil || ownerUserID <= 0 || peerUserID <= 0 {
+		return
+	}
+	_, _ = s.dialogs.SetChatTheme(ctx, ownerUserID, domain.Peer{Type: domain.PeerTypeUser, ID: peerUserID}, "")
+	if ownerUserID != peerUserID {
+		_, _ = s.dialogs.SetChatTheme(ctx, peerUserID, domain.Peer{Type: domain.PeerTypeUser, ID: ownerUserID}, "")
+	}
+}
+
 func chatThemeServiceMedia(emoticon string) *domain.MessageMedia {
 	return &domain.MessageMedia{
 		Kind: domain.MessageMediaKindService,
