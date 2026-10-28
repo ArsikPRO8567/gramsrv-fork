@@ -253,6 +253,12 @@ type UniqueStarGift struct {
 // центра фона, цвета ответной полосы — [центр, край] фона, gift_emoji_id —
 // emoji модели подарка, background_emoji_id — документ узора.
 func PeerColorCollectibleFromGift(g UniqueStarGift) PeerColorCollectible {
+	// Коллекция без опубликованных фактов (модель/узор/фон — например,
+	// legacy-строки до первой публикации) палитры не имеет: пустой конструктор
+	// отсекается Valid() и не попадает в starGiftUnique.peer_color.
+	if g.Model.Document == nil || g.Pattern.Document == nil {
+		return PeerColorCollectible{}
+	}
 	return PeerColorCollectible{
 		CollectibleID:     g.ID,
 		GiftEmojiID:       g.Model.Document.ID,
@@ -266,10 +272,14 @@ func PeerColorCollectibleFromGift(g UniqueStarGift) PeerColorCollectible {
 // status shape consumed by Telegram clients.  Ownership/lifecycle validation
 // is intentionally performed by the caller because it depends on the actor;
 // this helper validates only the immutable renderable facts.
+//
+// The TL title carries the client-visible status caption: officially it reads
+// "{gift title}-{unique number}" (e.g. "Star-22") so clients render the
+// collectible number above the status instead of the bare gift name.
 func CollectibleEmojiStatus(g UniqueStarGift) (EmojiStatusCollectible, bool) {
 	status := EmojiStatusCollectible{
 		CollectibleID: g.ID,
-		Title:         g.Title,
+		Title:         collectibleStatusTitle(g.Title, g.Num),
 		Slug:          g.Slug,
 		CenterColor:   g.Backdrop.CenterColor,
 		EdgeColor:     g.Backdrop.EdgeColor,
@@ -283,6 +293,16 @@ func CollectibleEmojiStatus(g UniqueStarGift) (EmojiStatusCollectible, bool) {
 		status.PatternDocumentID = g.Pattern.Document.ID
 	}
 	return status, status.Valid()
+}
+
+// collectibleStatusTitle formats the client-visible collectible caption:
+// "{gift title}-{unique number}". Legacy rows without a number keep the bare
+// gift title so old snapshots stay renderable.
+func collectibleStatusTitle(title string, num int) string {
+	if num <= 0 {
+		return title
+	}
+	return title + "-" + strconv.Itoa(num)
 }
 
 type StarGiftCurrency string
