@@ -1766,6 +1766,15 @@ func tgMessageActionStarGift(in *domain.MessageStarGiftAction) tg.MessageActionC
 	if in.Message != "" {
 		action.SetMessage(tg.TextWithEntities{Text: in.Message})
 	}
+	// Официальное поле messageActionStarGift.convert_stars (flag 4) — звёздная
+	// стоимость обмена подарка. Клиенты по нему и по can_upgrade выбирают
+	// подписи блока и «Подробнее»: без внешнего convert_stars ветки
+	// canConvert()/canSomeoneConvert() ложны, и получатель видит подпись
+	// «Вы можете добавить этот подарок в профиль» вместо подсказки про
+	// уникальный коллекционный, а у деталей пропадает кнопка продажи.
+	if in.ConvertStars > 0 {
+		action.SetConvertStars(in.ConvertStars)
+	}
 
 	// from_id is the gift sender. hide_name only hides the sender on the
 	// receiver's profile (original details); the chat service message still

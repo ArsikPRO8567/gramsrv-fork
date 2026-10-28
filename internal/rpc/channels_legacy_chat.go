@@ -510,6 +510,18 @@ func (r *Router) onMessagesSetChatTheme(ctx context.Context, req *tg.MessagesSet
 		// starGiftUnique.theme_peer: фиксируем подарок, установленный темой
 		// этого чата; emoji-тема (или сброс) снимает отметку. Метаданные
 		// проекции — сбой не влияет на применённую тему.
+		if themeGift != nil {
+			// Официальное правило «один чат на подарок-тему»: перенос темы в
+			// новый чат автоматически снимает её из прежнего (без сервисного
+			// сообщения — официальные серверы удаляют её молча).
+			if old := themeGift.ThemePeer; old.Type == domain.PeerTypeUser && old.ID > 0 &&
+				!(old.ID == peer.ID) {
+				if cleaner, ok := r.deps.Messages.(chatThemeSilentCleaner); ok {
+					cleaner.ClearChatThemeSilently(ctx, userID, old.ID)
+				}
+				r.invalidateRPCProjectionForPeer(old.ID, domain.Peer{Type: domain.PeerTypeUser, ID: userID})
+			}
+		}
 		if r.deps.Gifts != nil {
 			themedID := int64(0)
 			if themeGift != nil {
@@ -529,6 +541,12 @@ func (r *Router) onMessagesSetChatTheme(ctx context.Context, req *tg.MessagesSet
 		r.usersForMessageUpdate(ctx, userID, res.Send.SenderMessage),
 		[]tg.ChatClass{},
 	), nil
+}
+
+// chatThemeSilentCleaner — узкий интерфейс тихой очистки темы оформления
+// (реализуется app-сервисом сообщений).
+type chatThemeSilentCleaner interface {
+	ClearChatThemeSilently(ctx context.Context, ownerUserID, peerUserID int64)
 }
 
 // chatThemeFromInput разбирает InputChatTheme: классическая emoji-тема
