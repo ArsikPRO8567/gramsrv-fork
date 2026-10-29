@@ -433,13 +433,10 @@ func tgUniqueStarGift(unique domain.UniqueStarGift) *tg.StarGiftUnique {
 	if peer := tgPeer(unique.ThemePeer); peer != nil {
 		out.SetThemePeer(peer)
 	}
-	if palette := domain.PeerColorCollectibleFromGift(unique); palette.Valid() {
-		// Официальная схема: palitra сообщений (peerColorCollectible) выводится
-		// из фона и узора коллекции и помечает подарок как пригодный для
-		// account.updateColor (см. core.telegram.org/api/colors). Это независимое
-		// от theme_available свойство: theme_available открывает только темы
-		// оформления чата.
-		out.SetPeerColor(tgPeerColorCollectible(palette))
+	if unique.ThemeAvailable {
+		// Официальная схема: у theme_available коллекций доступна палитра
+		// сообщений (peerColorCollectible), выведенная из фона и узора.
+		out.SetPeerColor(tgPeerColorCollectible(domain.PeerColorCollectibleFromGift(unique)))
 	}
 	if peer := tgPeer(unique.Host); peer != nil {
 		out.SetHostID(peer)
@@ -468,59 +465,10 @@ func tgUniqueGiftChatTheme(gift domain.UniqueStarGift) *tg.ChatThemeUniqueGift {
 // владелец-зависимой проекцией подарка (flag 13 offer_min_stars скрыт от
 // владельца — тот же принцип, что и на страницах подарков).
 func tgUniqueGiftChatThemeForViewer(gift domain.UniqueStarGift, viewerUserID int64) *tg.ChatThemeUniqueGift {
-	settings := tdesktop.UniqueGiftThemeSettings(gift.Backdrop.CenterColor, gift.Backdrop.EdgeColor)
-	applyUniqueGiftPatternWallpaper(settings, gift)
 	return &tg.ChatThemeUniqueGift{
 		Gift:          tgUniqueStarGiftForViewer(gift, viewerUserID),
-		ThemeSettings: settings,
+		ThemeSettings: tdesktop.UniqueGiftThemeSettings(gift.ID, gift.Backdrop.CenterColor, gift.Backdrop.EdgeColor),
 	}
-}
-
-// applyUniqueGiftPatternWallpaper добавляет в каждый набор themeSettings
-// официальный wallpaper с документом узора подарка. По документации клиентов
-// и сервера фон чата для подарочных тем строится именно из
-// themeSettings.wallpaper (wallPaper pattern-типа с wallPaperSettings:
-// градиент центра/края фона коллекции, узор подарка, intensity, rotation 45);
-// без wallpaper рендер внешнего вида чата у клиентов неполон или аварийно
-// завершается. Тёмные base-темы получают инвертированный градиент.
-func applyUniqueGiftPatternWallpaper(settings []tg.ThemeSettings, gift domain.UniqueStarGift) {
-	pattern := gift.Pattern.Document
-	if pattern == nil || pattern.ID == 0 || len(settings) == 0 {
-		return
-	}
-	dark := chatThemeDarkFlags(settings)
-	for i := range settings {
-		background, second := gift.Backdrop.CenterColor, gift.Backdrop.EdgeColor
-		if i < len(dark) && dark[i] {
-			background, second = gift.Backdrop.EdgeColor, gift.Backdrop.CenterColor
-		}
-		wallpaper := &tg.WallPaper{
-			ID:         pattern.ID,
-			AccessHash: pattern.AccessHash,
-			Pattern:    true,
-			Document:   tgDocument(*pattern),
-		}
-		wallpaperSettings := tg.WallPaperSettings{}
-		wallpaperSettings.SetBackgroundColor(background)
-		wallpaperSettings.SetSecondBackgroundColor(second)
-		wallpaperSettings.SetIntensity(50)
-		wallpaperSettings.SetRotation(45)
-		wallpaper.SetSettings(wallpaperSettings)
-		settings[i].SetWallpaper(wallpaper)
-	}
-}
-
-// chatThemeDarkFlags возвращает признак тёмного base theme для каждого набора
-// настроек (порядок соответствует tdesktop.UniqueGiftThemeSettings).
-func chatThemeDarkFlags(settings []tg.ThemeSettings) []bool {
-	out := make([]bool, len(settings))
-	for i, s := range settings {
-		switch s.BaseTheme.(type) {
-		case *tg.BaseThemeNight, *tg.BaseThemeTinted:
-			out[i] = true
-		}
-	}
-	return out
 }
 
 func tgUniqueStarGiftForViewer(unique domain.UniqueStarGift, viewerUserID int64) *tg.StarGiftUnique {

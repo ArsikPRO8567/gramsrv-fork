@@ -1891,18 +1891,10 @@ func accountUpdateColorCollectibleID(req *tg.AccountUpdateColorRequest) (int64, 
 }
 
 // canUseGiftForPalette implements the official eligibility rules for
-// collectible message palettes (core.telegram.org/api/colors): the gift must
-// be an active collectible owned (or hosted) by the user whose immutable
-// model/pattern/backdrop facts yield a complete peerColorCollectible palette.
-// The theme_available flag gates chat themes only and must not block message
-// palettes: clients offer the palette sample from starGiftUnique.peer_color,
-// so rejecting updateColor here left the palette unsaved ("образец есть —
-// изменения нет").
+// collectible message palettes: the gift must be an active collectible owned
+// (or hosted) by the user with the theme_available flag set.
 func (r *Router) canUseGiftForPalette(userID int64, gift domain.UniqueStarGift) bool {
-	if gift.ID == 0 || gift.Burned {
-		return false
-	}
-	if !domain.PeerColorCollectibleFromGift(gift).Valid() {
+	if gift.ID == 0 || gift.Burned || !gift.ThemeAvailable {
 		return false
 	}
 	if gift.Owner.Type == domain.PeerTypeUser && gift.Owner.ID == userID {
@@ -2002,7 +1994,11 @@ func (r *Router) onAccountGetCollectibleEmojiStatuses(ctx context.Context, hash 
 			Collectible: collectible,
 		}))
 	}
-	catalogHash := mediaCatalogHash(ids)
+	// Соль отличает список коллекционных статусов от каталога обычных emoji:
+	// формат title («{имя} #{номер}») менялся, и клиенты с кэшем по hash
+	// обязаны перезапросить список, иначе увидят старые заголовки.
+	const collectibleStatusesHashSalt = int64(0x6e667423) // "nft#"
+	catalogHash := mediaCatalogHash(ids) ^ collectibleStatusesHashSalt
 	if hash != 0 && hash == catalogHash {
 		return &tg.AccountEmojiStatusesNotModified{}, nil
 	}

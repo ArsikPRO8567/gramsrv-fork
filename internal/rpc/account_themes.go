@@ -372,8 +372,11 @@ func (r *Router) onAccountGetUniqueGiftChatThemes(ctx context.Context, req *tg.A
 }
 
 // uniqueGiftChatThemesHash — стабильный hash списка подарочных тем (id+slug).
+// Сеялка 0x63686767 («chgg») версии 2: темы теперь несут wallpaper в каждом
+// themeSettings (обязательное поле Android-клиента), клиенты с кэшем старого
+// списка по hash должны перезапросить его, иначе крашатся на open чата.
 func uniqueGiftChatThemesHash(gifts []domain.UniqueStarGift) int64 {
-	var h int64 = 0x63686766 // "chgf"
+	var h int64 = 0x63686767 // "chgg" v2
 	for _, gift := range gifts {
 		h = (h << 5) - h + gift.ID
 		for _, r := range gift.Slug {
