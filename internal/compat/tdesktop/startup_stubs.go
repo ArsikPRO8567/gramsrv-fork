@@ -208,21 +208,46 @@ func LookupDefaultTheme(input tg.InputThemeClass) (tg.Theme, bool) {
 	return tg.Theme{}, false
 }
 
+// giftThemePatternIntensity — сила узора подарка в wallPaperSettings темы
+// (клиент делит на 100: 50 → полупрозрачный узор поверх градиента фона).
+const giftThemePatternIntensity = 50
+
 // UniqueGiftThemeSettings строит themeSettings для темы чата на базе
 // коллекционного подарка: один набор на каждый base theme из
 // chatThemeBaseThemes (контракт Android: селектор отбрасывает темы, у которых
 // меньше 4 наборов). accent/day — центр фона подарка, тёмные base — край;
 // заливка исходящих и входящих — градиент [центр, край].
-func UniqueGiftThemeSettings(centerColor, edgeColor int) []tg.ThemeSettings {
+//
+// Каждый набор ОБЯЗАН нести wallpaper (wallPaperNoFile с wallPaperSettings):
+// Android собирает фон темы через EmojiThemes.ThemeItem.getThemeWallPaper →
+// settings.wallpaper, и при null получает NPE в
+// ChatActivity.ThemeDelegate.getBackgroundDrawableFromTheme
+// (чтение TLRPC$WallPaper.settings — краш при открытии чата с установленной
+// темой). Цвета фона: светлые base — градиент [центр, край], тёмные —
+// [край, центр] (тот же принцип, что у accent); intensity — сила узора
+// подарка (клиент делит на 100). Узор подарка грузится клиентом напрямую из
+// подарка, поэтому документ обоев не нужен — wallPaperNoFile.
+func UniqueGiftThemeSettings(giftID int64, centerColor, edgeColor int) []tg.ThemeSettings {
 	settings := make([]tg.ThemeSettings, 0, len(chatThemeBaseThemes))
 	for _, b := range chatThemeBaseThemes {
 		accent := centerColor
+		bgColor, gradientColor := centerColor, edgeColor
 		if b.dark {
 			accent = edgeColor
+			bgColor, gradientColor = edgeColor, centerColor
 		}
 		ts := tg.ThemeSettings{BaseTheme: b.make(), AccentColor: accent}
 		ts.SetOutboxAccentColor(edgeColor)
 		ts.SetMessageColors([]int{centerColor, edgeColor})
+		// Флаги выставляются только через Set*-хелперы: прямое присваивание
+		// полей не ставит биты, и Get*-хелперы (как и клиент) не увидят значений.
+		var wallpaperSettings tg.WallPaperSettings
+		wallpaperSettings.SetBackgroundColor(bgColor)
+		wallpaperSettings.SetSecondBackgroundColor(gradientColor)
+		wallpaperSettings.SetIntensity(giftThemePatternIntensity)
+		wallpaper := &tg.WallPaperNoFile{ID: giftID}
+		wallpaper.SetSettings(wallpaperSettings)
+		ts.SetWallpaper(wallpaper)
 		settings = append(settings, ts)
 	}
 	return settings
