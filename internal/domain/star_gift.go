@@ -250,21 +250,17 @@ type UniqueStarGift struct {
 
 // PeerColorCollectibleFromGift выводит официальную палитру сообщений
 // (peerColorCollectible) из атрибутов коллекционного подарка: accent — цвет
-// центра фона, цвета ответной полосы — [центр, край] фона, gift_emoji_id —
-// emoji модели подарка, background_emoji_id — документ узора.
+// центра фона, цвета ответной полосы — [центр, край, текст] фона (официальный
+// сервер отдаёт три цвета: две границы градиента и text_color фона подарка;
+// палитра из двух цветов отвергается клиентом — настройка слетает),
+// gift_emoji_id — emoji модели подарка, background_emoji_id — документ узора.
 func PeerColorCollectibleFromGift(g UniqueStarGift) PeerColorCollectible {
-	// Коллекция без опубликованных фактов (модель/узор/фон — например,
-	// legacy-строки до первой публикации) палитры не имеет: пустой конструктор
-	// отсекается Valid() и не попадает в starGiftUnique.peer_color.
-	if g.Model.Document == nil || g.Pattern.Document == nil {
-		return PeerColorCollectible{}
-	}
 	return PeerColorCollectible{
 		CollectibleID:     g.ID,
 		GiftEmojiID:       g.Model.Document.ID,
 		BackgroundEmojiID: g.Pattern.Document.ID,
 		AccentColor:       g.Backdrop.CenterColor,
-		Colors:            []int{g.Backdrop.CenterColor, g.Backdrop.EdgeColor},
+		Colors:            []int{g.Backdrop.CenterColor, g.Backdrop.EdgeColor, g.Backdrop.TextColor},
 	}
 }
 
@@ -273,13 +269,17 @@ func PeerColorCollectibleFromGift(g UniqueStarGift) PeerColorCollectible {
 // is intentionally performed by the caller because it depends on the actor;
 // this helper validates only the immutable renderable facts.
 //
-// The TL title carries the client-visible status caption: officially it reads
-// "{gift title}-{unique number}" (e.g. "Star-22") so clients render the
-// collectible number above the status instead of the bare gift name.
+// Title форматируется как «{имя подарка} #{номер}» (например «Star #22»):
+// клиент отображает поле title как есть (HintView2.setText), поэтому номер
+// выпуска должен входить в саму строку — так же делают официальные серверы.
 func CollectibleEmojiStatus(g UniqueStarGift) (EmojiStatusCollectible, bool) {
+	title := g.Title
+	if g.Num > 0 {
+		title = fmt.Sprintf("%s #%d", g.Title, g.Num)
+	}
 	status := EmojiStatusCollectible{
 		CollectibleID: g.ID,
-		Title:         collectibleStatusTitle(g.Title, g.Num),
+		Title:         title,
 		Slug:          g.Slug,
 		CenterColor:   g.Backdrop.CenterColor,
 		EdgeColor:     g.Backdrop.EdgeColor,
@@ -293,16 +293,6 @@ func CollectibleEmojiStatus(g UniqueStarGift) (EmojiStatusCollectible, bool) {
 		status.PatternDocumentID = g.Pattern.Document.ID
 	}
 	return status, status.Valid()
-}
-
-// collectibleStatusTitle formats the client-visible collectible caption:
-// "{gift title}-{unique number}". Legacy rows without a number keep the bare
-// gift title so old snapshots stay renderable.
-func collectibleStatusTitle(title string, num int) string {
-	if num <= 0 {
-		return title
-	}
-	return title + "-" + strconv.Itoa(num)
 }
 
 type StarGiftCurrency string
