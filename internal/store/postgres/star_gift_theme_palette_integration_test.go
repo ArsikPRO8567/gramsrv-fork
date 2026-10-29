@@ -230,11 +230,13 @@ func TestStarGiftThemeAvailableFromPeerColorRevisionPostgres(t *testing.T) {
 
 	// Палитра сообщений выводится из фона и узора коллекции (атрибуты
 	// выбираются случайно, поэтому проверяем самосогласованность с фоном).
+	// Официальный сервер отдаёт три цвета: [центр, край, text_color].
 	backdrop := upgraded.Unique.Backdrop
 	palette := domain.PeerColorCollectibleFromGift(upgraded.Unique)
 	if !palette.Valid() || palette.CollectibleID != upgraded.Unique.ID ||
-		palette.AccentColor != backdrop.CenterColor || len(palette.Colors) != 2 ||
+		palette.AccentColor != backdrop.CenterColor || len(palette.Colors) != 3 ||
 		palette.Colors[0] != backdrop.CenterColor || palette.Colors[1] != backdrop.EdgeColor ||
+		palette.Colors[2] != backdrop.TextColor ||
 		palette.GiftEmojiID != upgraded.Unique.Model.Document.ID ||
 		palette.BackgroundEmojiID != upgraded.Unique.Pattern.Document.ID {
 		t.Fatalf("derived palette = %+v, backdrop = %+v", palette, backdrop)
