@@ -8,6 +8,7 @@ import (
         "github.com/iamxvbaba/td/tg"
 
         "telesrv/internal/domain"
+        "telesrv/internal/seed/appearance"
 )
 
 // giftThemeFixture — эталонный подарок #743 «Persimmon» с официального сервера.
@@ -153,5 +154,47 @@ func TestUniqueGiftThemeSettingsDeterministicPerCollection(t *testing.T) {
         b, _ := second[0].GetWallpaper()
         if a.(*tg.WallPaper).ID != b.(*tg.WallPaper).ID {
                 t.Fatalf("wallpaper selection unstable for the same gift")
+        }
+}
+
+// TestUniqueGiftThemeSettingsUsesGameThemePattern фиксирует закрепление узора
+// игровой (🎮) встроенной темы за обоями тем коллекционных подарков: прежний
+// детерминированный выбор по gift_id давал «зимние» узоры, которые владелец
+// сервера воспринимал как ошибку.
+func TestUniqueGiftThemeSettingsUsesGameThemePattern(t *testing.T) {
+        var want appearance.Wallpaper
+        found := false
+        for _, theme := range appearance.Default().ChatThemes {
+                if theme.Emoticon != collectibleGiftChatThemeEmoticon {
+                        continue
+                }
+                for _, setting := range theme.Settings {
+                        wallpaper := setting.Wallpaper
+                        if wallpaper.Type == 0 && wallpaper.Pattern && !wallpaper.Dark &&
+                                wallpaper.Document.ID != 0 && wallpaper.Document.Path != "" {
+                                want = wallpaper
+                                found = true
+                                break
+                        }
+                }
+                break
+        }
+        if !found {
+                t.Fatal("appearance seed has no game theme pattern wallpaper")
+        }
+        for _, giftID := range []int64{1, 5415586798250229762, 9001, 42} {
+                got, ok := collectibleGiftWallpaper(giftID)
+                if !ok {
+                        t.Fatalf("collectibleGiftWallpaper(%d) = ok=false", giftID)
+                }
+                if got.ID != want.ID || got.Slug != want.Slug || got.Document.ID != want.Document.ID {
+                        t.Fatalf("collectibleGiftWallpaper(%d) = id %d slug %q doc %d, want game theme pattern (id %d slug %q doc %d)",
+                                giftID, got.ID, got.Slug, got.Document.ID, want.ID, want.Slug, want.Document.ID)
+                }
+        }
+        settings := UniqueGiftThemeSettings(giftThemeFixture())
+        light, _ := settings[0].GetWallpaper()
+        if light.(*tg.WallPaper).ID != want.ID {
+                t.Fatalf("theme settings light wallpaper id = %d, want game theme pattern %d", light.(*tg.WallPaper).ID, want.ID)
         }
 }

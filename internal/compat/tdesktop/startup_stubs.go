@@ -240,19 +240,30 @@ func UniqueGiftThemeSettings(gift domain.UniqueStarGift) []tg.ThemeSettings {
         return []tg.ThemeSettings{light, dark}
 }
 
-// collectibleGiftWallpaperOptionsCache — ленивый срез светлых pattern-обоев
-// из appearance seed (сортировка по id); проекция темы вызывается на каждое
-// сообщение/профиль, поэтому каталог нормируется один раз.
+// collectibleGiftWallpaperOptionsCache — лениво нормируемый каталог светлых
+// pattern-обоев из appearance seed; проекция темы вызывается на каждое
+// сообщение/профиль, поэтому каталог готовится один раз.
 var collectibleGiftWallpaperOptionsCache struct {
         once    sync.Once
         options []appearance.Wallpaper
+        // gameWallpaper — светлые pattern-обои игровой (🎮) встроенной темы:
+        // владелец сервера закрепил её узор за темами коллекционных подарков
+        // (раньше выбор по gift_id давал «зимние» узоры, воспринимавшиеся как
+        // ошибка). gameFound отличает «нашли» от «не нашли» — явный флаг
+        // надёжнее нулевого id.
+        gameWallpaper appearance.Wallpaper
+        gameFound     bool
 }
 
-// collectibleGiftWallpaper выбирает детерминированный по коллекции
-// (gift_id) документ узора из appearance seed: официальный сервер использует
-// один узор на коллекцию (у обоих эталонных подарков Crystal Ball — один и тот
-// же wallPaper). Светлый экземпляр несёт identity (id/access_hash/slug/документ),
-// по которому LookupWallPaper резолвит вложенные обои тем.
+// collectibleGiftChatThemeEmoticon — эмодзи игровой встроенной темы в seed.
+const collectibleGiftChatThemeEmoticon = "🎮"
+
+// collectibleGiftWallpaper выбирает документ узора обоев темы чата из
+// appearance seed: официально у коллекции один wallPaper, identity (id/
+// access_hash/slug/документ) резолвится LookupWallPaper'ом для вложенных обоев
+// тем. Узор всегда берётся игровой (🎮) встроенной темы — по прямому
+// требованию владельца сервера; детерминированный выбор по gift_id сохранён
+// лишь как запасной путь на случай отсутствия 🎮-темы в нестандартном seed.
 func collectibleGiftWallpaper(giftID int64) (appearance.Wallpaper, bool) {
         collectibleGiftWallpaperOptionsCache.once.Do(func() {
                 catalog := appearance.Default()
@@ -270,8 +281,20 @@ func collectibleGiftWallpaper(giftID int64) (appearance.Wallpaper, bool) {
                                 seen[wallpaper.ID] = true
                                 collectibleGiftWallpaperOptionsCache.options = append(collectibleGiftWallpaperOptionsCache.options, wallpaper)
                         }
+                        if theme.Emoticon == collectibleGiftChatThemeEmoticon && !collectibleGiftWallpaperOptionsCache.gameFound {
+                                for _, setting := range theme.Settings {
+                                        wallpaper := setting.Wallpaper
+                                        if wallpaper.Type == 0 && wallpaper.Pattern && !wallpaper.Dark &&
+                                                wallpaper.Document.ID != 0 && wallpaper.Document.Path != "" {
+                                                collectibleGiftWallpaperOptionsCache.gameWallpaper = wallpaper
+                                                collectibleGiftWallpaperOptionsCache.gameFound = true
+                                                break
+                                        }
+                                }
+                        }
                 }
-                // Стабильный порядок — по id, чтобы выбор не зависел от порядка seed.
+                // Стабильный порядок — по id, чтобы запасной выбор не зависел
+                // от порядка seed.
                 options := collectibleGiftWallpaperOptionsCache.options
                 for i := 1; i < len(options); i++ {
                         for j := i; j > 0 && options[j].ID < options[j-1].ID; j-- {
@@ -279,6 +302,9 @@ func collectibleGiftWallpaper(giftID int64) (appearance.Wallpaper, bool) {
                         }
                 }
         })
+        if collectibleGiftWallpaperOptionsCache.gameFound {
+                return collectibleGiftWallpaperOptionsCache.gameWallpaper, true
+        }
         options := collectibleGiftWallpaperOptionsCache.options
         if len(options) == 0 {
                 return appearance.Wallpaper{}, false
