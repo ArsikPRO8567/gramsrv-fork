@@ -32,6 +32,13 @@ type DialogStore interface {
 	// SetChatThemeGift applies a collectible-gift chat theme (dialogs.theme_gift_slug);
 	// empty slug clears the gift theme.
 	SetChatThemeGift(ctx context.Context, userID int64, peer domain.Peer, slug string) (bool, error)
+	// ClearGiftThemeElsewhere снимает тему чата на базе коллекционного
+	// подарка (dialogs.theme_gift_slug == slug) со всех диалогов, КРОМЕ
+	// пары keepUserID↔keepPeerUserID (в обе стороны). Официальное правило
+	// «тема подарка живёт ровно в одном чате»: перенос в новый чат молча
+	// снимает её из прежних. Возвращает отсортированные id пользователей,
+	// чьи диалоги изменились (для сброса проекций).
+	ClearGiftThemeElsewhere(ctx context.Context, slug string, keepUserID, keepPeerUserID int64) ([]int64, error)
 	SetPeerSettingsBarHidden(ctx context.Context, userID int64, peer domain.Peer) (bool, error)
 	PeerSettingsBarHidden(ctx context.Context, userID int64, peer domain.Peer) (bool, error)
 	// SetTranslationDisabled persists the per-account peer preference used by
