@@ -439,6 +439,49 @@ func (s *DialogStore) SetChatThemeGift(_ context.Context, userID int64, peer dom
 	return true, nil
 }
 
+// ClearGiftThemeElsewhere снимает подарочную тему (ThemeGiftSlug == slug) со
+// всех диалогов, кроме пары keepUserID↔keepPeerUserID в обе стороны:
+// официальное правило «тема коллекционного подарка живёт ровно в одном чате».
+// Возвращает отсортированные id пользователей, чьи диалоги изменились.
+func (s *DialogStore) ClearGiftThemeElsewhere(_ context.Context, slug string, keepUserID, keepPeerUserID int64) ([]int64, error) {
+	if slug == "" {
+		return nil, nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	seen := make(map[int64]bool)
+	affected := make([]int64, 0, 2)
+	for userID, list := range s.m {
+		changed := false
+		for i := range list.Dialogs {
+			dialog := &list.Dialogs[i]
+			if dialog.ThemeGiftSlug != slug {
+				continue
+			}
+			if dialog.Peer.Type == domain.PeerTypeUser {
+				if userID == keepUserID && dialog.Peer.ID == keepPeerUserID {
+					continue
+				}
+				if userID == keepPeerUserID && dialog.Peer.ID == keepUserID {
+					continue
+				}
+			}
+			dialog.ThemeGiftSlug = ""
+			dialog.ThemeEmoticon = ""
+			changed = true
+		}
+		if changed {
+			s.m[userID] = list
+			if userID != 0 && !seen[userID] {
+				seen[userID] = true
+				affected = append(affected, userID)
+			}
+		}
+	}
+	sort.Slice(affected, func(i, j int) bool { return affected[i] < affected[j] })
+	return affected, nil
+}
+
 func (s *DialogStore) SetPeerSettingsBarHidden(_ context.Context, userID int64, peer domain.Peer) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -689,6 +732,14 @@ func upsertMemoryDialog(list domain.DialogList, dialog domain.Dialog) domain.Dia
 			}
 			if dialog.ThemeEmoticon == "" {
 				dialog.ThemeEmoticon = list.Dialogs[i].ThemeEmoticon
+			}
+			// Подарочная тема хранится парным токеном и должна
+			// переживать upsert диалога сервисным сообщением —
+			// иначе установка темы чата стирается собственной
+			// messageActionSetChatTheme-записью (postgres-путь
+			// UpsertOutboxDialog поле не трогает).
+			if dialog.ThemeGiftSlug == "" {
+				dialog.ThemeGiftSlug = list.Dialogs[i].ThemeGiftSlug
 			}
 			if !dialog.HasScheduled {
 				dialog.HasScheduled = list.Dialogs[i].HasScheduled
