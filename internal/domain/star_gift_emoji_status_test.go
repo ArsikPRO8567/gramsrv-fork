@@ -2,9 +2,9 @@ package domain
 
 import "testing"
 
-// Round 10: the collectible emoji status caption must read
-// "{gift title}-{unique number}" (e.g. "Star-22") so clients render the
-// collectible number above the status instead of the bare gift name.
+// Round 10 (подтверждённая владельцем форма): заголовок статуса читается
+// "{gift title} #{unique number}" (e.g. "Star #22"), чтобы клиент показывал
+// номер коллекции над эмодзи статусом вместо голого имени подарка.
 func TestCollectibleEmojiStatusTitleCarriesUniqueNumber(t *testing.T) {
 	gift := UniqueStarGift{
 		ID: 555, GiftID: 8001, Title: "Star", Slug: "Star-22", Num: 22,
@@ -17,8 +17,8 @@ func TestCollectibleEmojiStatusTitleCarriesUniqueNumber(t *testing.T) {
 	if !ok {
 		t.Fatalf("CollectibleEmojiStatus = not valid for a fully populated collectible")
 	}
-	if status.Title != "Star-22" {
-		t.Fatalf("emoji status title = %q, want %q", status.Title, "Star-22")
+	if status.Title != "Star #22" {
+		t.Fatalf("emoji status title = %q, want %q", status.Title, "Star #22")
 	}
 	if status.Slug != "Star-22" || status.DocumentID != 900 || status.PatternDocumentID != 901 {
 		t.Fatalf("emoji status snapshot = %+v", status)

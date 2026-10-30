@@ -94,10 +94,20 @@ func PeerColorCollectibleFromGift(g UniqueStarGift) PeerColorCollectible {
         center := hslFromRGB(giftBackdropColor(g.Backdrop.CenterColor, 0x8a94a6))
         edge := hslFromRGB(giftBackdropColor(g.Backdrop.EdgeColor, 0x5a6270))
         text := hslFromRGB(giftBackdropColor(g.Backdrop.TextColor, 0xfff6ea))
+        // nil-safety: у недоопубликованной коллекции может не быть документов
+        // модели/узора — тогда палитра получается невалидной (0 <= id), но не
+        // паникует; клиенты такие палитры отбрасывают.
+        var giftEmojiID, patternEmojiID int64
+        if g.Model.Document != nil {
+                giftEmojiID = g.Model.Document.ID
+        }
+        if g.Pattern.Document != nil {
+                patternEmojiID = g.Pattern.Document.ID
+        }
         return PeerColorCollectible{
                 CollectibleID:     g.ID,
-                GiftEmojiID:       g.Model.Document.ID,
-                BackgroundEmojiID: g.Pattern.Document.ID,
+                GiftEmojiID:       giftEmojiID,
+                BackgroundEmojiID: patternEmojiID,
                 AccentColor: hslToRGB(
                         edge.h,
                         clampF(edge.s, 0.40, 0.55),

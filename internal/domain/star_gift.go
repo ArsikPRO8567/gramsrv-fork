@@ -256,10 +256,18 @@ type UniqueStarGift struct {
 // status shape consumed by Telegram clients.  Ownership/lifecycle validation
 // is intentionally performed by the caller because it depends on the actor;
 // this helper validates only the immutable renderable facts.
+// Заголовок статуса — «{название} #{номер}» (например "Star #22", раунд 10,
+// подтверждено владельцем сервера): клиенты показывают поле как есть
+// (ProfileActivity: collectibleHint.setText(status.title)), сам номер не
+// добавляют. У коллекций без номера остаётся голое название.
 func CollectibleEmojiStatus(g UniqueStarGift) (EmojiStatusCollectible, bool) {
+        title := g.Title
+        if g.Num > 0 && title != "" {
+                title = fmt.Sprintf("%s #%d", g.Title, g.Num)
+        }
         status := EmojiStatusCollectible{
                 CollectibleID: g.ID,
-                Title:         g.Title,
+                Title:         title,
                 Slug:          g.Slug,
                 CenterColor:   g.Backdrop.CenterColor,
                 EdgeColor:     g.Backdrop.EdgeColor,

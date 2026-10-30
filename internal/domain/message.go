@@ -391,6 +391,11 @@ type SetPrivateChatThemeResult struct {
 	Emoticon    string
 	Changed     bool
 	Send        SendPrivateTextResult
+	// ClearedUserIDs — владельцы диалогов, у которых тема коллекционного
+	// подарка была молча снята при переносе её в новый чат (официальное
+	// правило «тема подарка живёт ровно в одном чате»); без сервисного
+	// сообщения. Нужен вызывающей стороне только для сброса проекций.
+	ClearedUserIDs []int64
 }
 
 // SetPrivateMessageReactionsRequest replaces the current user's reactions for one private message.
