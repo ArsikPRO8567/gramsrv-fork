@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"hash/fnv"
+	"sort"
 
 	"github.com/jackc/pgx/v5"
 
@@ -716,6 +717,45 @@ WHERE user_id = $1 AND peer_type = $2 AND peer_id = $3`,
 		return false, fmt.Errorf("update dialog gift chat theme: %w", err)
 	}
 	return true, nil
+}
+
+// ClearGiftThemeElsewhere снимает подарочную тему (theme_gift_slug == slug)
+// со всех диалогов, кроме пары keepUserID↔keepPeerUserID в обе стороны:
+// официальное правило «тема коллекционного подарка живёт ровно в одном чате».
+// Возвращает отсортированные id пользователей, чьи диалоги изменились.
+func (s *DialogStore) ClearGiftThemeElsewhere(ctx context.Context, slug string, keepUserID, keepPeerUserID int64) ([]int64, error) {
+	if slug == "" {
+		return nil, nil
+	}
+	rows, err := s.db.Query(ctx, `
+UPDATE dialogs
+SET theme_gift_slug = '', theme_emoticon = '', updated_at = now()
+WHERE theme_gift_slug = $1
+  AND NOT (user_id = $2 AND peer_type = 'user' AND peer_id = $3)
+  AND NOT (user_id = $3 AND peer_type = 'user' AND peer_id = $2)
+RETURNING user_id`,
+		slug, keepUserID, keepPeerUserID)
+	if err != nil {
+		return nil, fmt.Errorf("clear gift chat theme elsewhere: %w", err)
+	}
+	defer rows.Close()
+	seen := make(map[int64]bool)
+	affected := make([]int64, 0, 2)
+	for rows.Next() {
+		var userID int64
+		if err := rows.Scan(&userID); err != nil {
+			return nil, fmt.Errorf("scan cleared gift chat theme owner: %w", err)
+		}
+		if userID != 0 && !seen[userID] {
+			seen[userID] = true
+			affected = append(affected, userID)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate cleared gift chat theme owners: %w", err)
+	}
+	sort.Slice(affected, func(i, j int) bool { return affected[i] < affected[j] })
+	return affected, nil
 }
 
 func (s *DialogStore) SetPeerSettingsBarHidden(ctx context.Context, userID int64, peer domain.Peer) (bool, error) {
