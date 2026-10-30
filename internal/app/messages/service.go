@@ -202,6 +202,13 @@ func (s *Service) SetChatTheme(ctx context.Context, userID int64, req domain.Set
         changedPeer := false
         var err error
         if themeGift {
+                // Официальное правило «тема подарка живёт ровно в одном чате»
+                // (core.telegram.org/api/themes): установка в новый чат молча
+                // снимает её из прежних — без сервисного сообщения. Снятие идёт
+                // по slug и чинит даже накопившиеся двойные установки.
+                if cleared, cerr := s.dialogs.ClearGiftThemeElsewhere(ctx, req.ThemeGift.Slug, userID, req.Peer.ID); cerr == nil && len(cleared) > 0 {
+                        out.ClearedUserIDs = cleared
+                }
                 changedSelf, err = s.dialogs.SetChatThemeGift(ctx, userID, req.Peer, req.ThemeGift.Slug)
         } else {
                 changedSelf, err = s.dialogs.SetChatTheme(ctx, userID, req.Peer, req.Emoticon)
