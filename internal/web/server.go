@@ -39,7 +39,7 @@ type Config struct {
 	// TelegramLogin is the optional OIDC/Login HTTP adapter. Public Web owns
 	// the listener so discovery/auth/token and public links share the exact
 	// externally registered origin behind one reverse proxy.
-	PaymentForm       http.HandlerFunc
+	PaymentForm   http.HandlerFunc
 	TelegramLogin http.Handler
 }
 
@@ -184,7 +184,9 @@ func newHandler(cfg Config, logger *zap.Logger) (http.Handler, error) {
 	mux.HandleFunc("GET /nft/{slug}/{$}", h.uniqueGift)
 	mux.HandleFunc("GET /gift-withdrawal/{requestID}", h.starGiftWithdrawal)
 	mux.HandleFunc("POST /gift-withdrawal/{requestID}", h.completeStarGiftWithdrawal)
-	mux.HandleFunc("POST /payments/dev-stars", cfg.PaymentForm)
+	if cfg.PaymentForm != nil {
+		mux.HandleFunc("POST /payments/dev-stars", cfg.PaymentForm)
+	}
 	if cfg.ModerationAppeals != nil {
 		mux.HandleFunc("GET /appeal/{token}", h.moderationAppeal)
 		mux.HandleFunc("POST /appeal/{token}", h.moderationAppeal)
