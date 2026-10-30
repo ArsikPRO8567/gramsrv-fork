@@ -160,11 +160,17 @@ func applyTgUserColorFields(out *tg.User, u domain.User) {
 }
 
 func tgUserPeerColor(color domain.PeerColor) tg.PeerColorClass {
-        if color.Empty() {
-                return nil
-        }
+        // Официальный peerColorCollectible самодостаточен: он хранится при
+        // снятых HasColor/background_emoji_id (см. encodePeerColorCollectible),
+        // поэтому проверка Collectible обязана идти ПЕРВОЙ — иначе
+        // color.Empty() отбрасывает снапшот, user.color не выдаётся вовсе и
+        // клиент не показывает установленный цвет ссылок и цитат (ни самому
+        // владельцу после account.updateColor, ни другим пользователям).
         if !color.Collectible.Empty() {
                 return tgPeerColorCollectible(color.Collectible)
+        }
+        if color.Empty() {
+                return nil
         }
         out := &tg.PeerColor{}
         if color.HasColor {

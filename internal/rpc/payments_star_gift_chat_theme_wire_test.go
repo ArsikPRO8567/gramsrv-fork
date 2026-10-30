@@ -26,10 +26,11 @@ func chatThemeRoundTripGift() domain.UniqueStarGift {
 	}
 }
 
-// TestChatThemeUniqueGiftCarriesWallpaper — контракт Android-клиента: каждый
-// themeSettings в chatThemeUniqueGift обязан нести wallpaper (flag 1) с
-// wallPaperNoFile, у которого задан settings (flag 2) с градиентом фона и
-// intensity. Отсутствие wallpaper → NPE в
+// TestChatThemeUniqueGiftCarriesWallpaper — контракт Android-клиента по
+// ЭТАЛОННОМУ дампу официального сервера (раунд 11): ровно ДВА themeSettings
+// (BaseThemeClassic светлая + BaseThemeNight тёмная), каждый обязан нести
+// wallPaper (flag 1) с pattern-документом и settings (flag 2): четыре цвета
+// фона + intensity 40 (светлая) / -35 (тёмная). Отсутствие wallpaper → NPE в
 // ChatActivity.ThemeDelegate.getBackgroundDrawableFromTheme (краш при открытии
 // чата с установленной темой подарка). Проверяем полный цикл Encode→Decode:
 // структура обязана корректно развернуться обратно, как это сделает клиент.
@@ -37,48 +38,71 @@ func TestChatThemeUniqueGiftCarriesWallpaper(t *testing.T) {
 	gift := chatThemeRoundTripGift()
 	theme := tgUniqueGiftChatThemeForViewer(gift, 0)
 
-	if len(theme.ThemeSettings) < 4 {
-		t.Fatalf("theme settings count = %d, want >= 4 (client picker drops < 4)", len(theme.ThemeSettings))
+	if len(theme.ThemeSettings) != 2 {
+		t.Fatalf("theme settings count = %d, want exactly 2 (classic light + night dark)", len(theme.ThemeSettings))
 	}
-	seenBases := make(map[tg.BaseThemeClass]int, len(theme.ThemeSettings))
+	light, dark := theme.ThemeSettings[0], theme.ThemeSettings[1]
+	if _, ok := light.BaseTheme.(*tg.BaseThemeClassic); !ok {
+		t.Fatalf("light base theme = %T, want BaseThemeClassic", light.BaseTheme)
+	}
+	if _, ok := dark.BaseTheme.(*tg.BaseThemeNight); !ok {
+		t.Fatalf("dark base theme = %T, want BaseThemeNight", dark.BaseTheme)
+	}
 	for i, ts := range theme.ThemeSettings {
 		wallpaper, ok := ts.GetWallpaper()
 		if !ok {
 			t.Fatalf("settings[%d] (%T): wallpaper flag not set", i, ts.BaseTheme)
 		}
-		noFile, ok := wallpaper.(*tg.WallPaperNoFile)
+		fileWallpaper, ok := wallpaper.(*tg.WallPaper)
 		if !ok {
-			t.Fatalf("settings[%d]: wallpaper = %T, want wallPaperNoFile", i, wallpaper)
+			t.Fatalf("settings[%d]: wallpaper = %T, want wallPaper with document", i, wallpaper)
 		}
-		settings, ok := noFile.GetSettings()
-		if !ok {
-			t.Fatalf("settings[%d]: wallPaperNoFile.settings flag not set", i)
+		if !fileWallpaper.Pattern {
+			t.Fatalf("settings[%d]: wallpaper pattern flag missing", i)
 		}
-		bg, ok := settings.GetBackgroundColor()
+		settings, ok := fileWallpaper.GetSettings()
 		if !ok {
+			t.Fatalf("settings[%d]: wallPaper.settings flag not set", i)
+		}
+		if _, ok := settings.GetBackgroundColor(); !ok {
 			t.Fatalf("settings[%d]: background_color missing", i)
 		}
-		second, ok := settings.GetSecondBackgroundColor()
-		if !ok {
+		if _, ok := settings.GetSecondBackgroundColor(); !ok {
 			t.Fatalf("settings[%d]: second_background_color missing", i)
 		}
-		if intensity, ok := settings.GetIntensity(); !ok || intensity <= 0 {
-			t.Fatalf("settings[%d]: intensity = %d/%v, want > 0", i, intensity, ok)
+		if _, ok := settings.GetThirdBackgroundColor(); !ok {
+			t.Fatalf("settings[%d]: third_background_color missing", i)
 		}
-		// Проверяем самосогласованность с accent: светлые base — фон=центр,
-		// тёмные — фон=край (второй цвет — парный).
-		dark := ts.AccentColor == gift.Backdrop.EdgeColor
-		if dark {
-			if bg != gift.Backdrop.EdgeColor || second != gift.Backdrop.CenterColor {
-				t.Fatalf("settings[%d] dark: colors = [%#x,%#x], want [edge,center]", i, bg, second)
-			}
-		} else if bg != gift.Backdrop.CenterColor || second != gift.Backdrop.EdgeColor {
-			t.Fatalf("settings[%d] light: colors = [%#x,%#x], want [center,edge]", i, bg, second)
+		if _, ok := settings.GetFourthBackgroundColor(); !ok {
+			t.Fatalf("settings[%d]: fourth_background_color missing", i)
 		}
-		seenBases[ts.BaseTheme]++
+		wantIntensity := domain.CollectibleChatThemeIntensityLight
+		if i == 1 {
+			wantIntensity = domain.CollectibleChatThemeIntensityDark
+		}
+		if intensity, ok := settings.GetIntensity(); !ok || intensity != wantIntensity {
+			t.Fatalf("settings[%d]: intensity = %d/%v, want %d", i, intensity, ok, wantIntensity)
+		}
 	}
-	if len(seenBases) < 4 {
-		t.Fatalf("distinct base themes = %d, want >= 4", len(seenBases))
+	if _, ok := dark.GetMessageColors(); !ok || len(dark.MessageColors) != 2 {
+		t.Fatalf("dark settings message_colors = %v, want exactly 2", dark.MessageColors)
+	}
+	if _, has := light.GetMessageColors(); has {
+		t.Fatal("light settings must not carry message_colors (official dump)")
+	}
+
+	// Обе базы ссылаются на один wallPaper (эталон: узор один на коллекцию).
+	lightWallpaper := light.Wallpaper.(*tg.WallPaper)
+	darkWallpaper := dark.Wallpaper.(*tg.WallPaper)
+	if lightWallpaper.ID == 0 || lightWallpaper.ID != darkWallpaper.ID || lightWallpaper.Slug == "" {
+		t.Fatalf("wallpapers identity: light id=%d dark id=%d slug=%q",
+			lightWallpaper.ID, darkWallpaper.ID, lightWallpaper.Slug)
+	}
+	if lightWallpaper.Document == nil || darkWallpaper.Document == nil {
+		t.Fatal("wallpaper document missing")
+	}
+	if lightWallpaper.Dark || !darkWallpaper.Dark {
+		t.Fatalf("dark flags: light=%v dark=%v, want false/true", lightWallpaper.Dark, darkWallpaper.Dark)
 	}
 
 	// Полный wire round-trip chatThemeUniqueGift: серверное кодирование должно
@@ -97,7 +121,7 @@ func TestChatThemeUniqueGiftCarriesWallpaper(t *testing.T) {
 	for i, ts := range decoded.ThemeSettings {
 		if wp, ok := ts.GetWallpaper(); !ok {
 			t.Fatalf("decoded settings[%d]: wallpaper lost", i)
-		} else if _, ok := wp.(*tg.WallPaperNoFile); !ok {
+		} else if _, ok := wp.(*tg.WallPaper); !ok {
 			t.Fatalf("decoded settings[%d]: wallpaper = %T", i, wp)
 		}
 	}
@@ -122,8 +146,11 @@ func TestChatThemeUniqueGiftCarriesWallpaper(t *testing.T) {
 }
 
 // TestPeerColorCollectibleThreeColors — официальный сервер отдаёт палитру из
-// трёх цветов: [центр, край, text_color] фона подарка. Палитра из двух цветов
-// отвергается клиентом, из-за чего настройка слетает.
+// ровно трёх цветов colors (+ dark_accent_color по флагу.0): палитра из двух
+// цветов отвергается клиентом, из-за чего настройка слетает. Конкретные
+// значения выводятся из фона подарка по эталонным дампам (см.
+// internal/domain/collectible_theme_test.go) — здесь фиксируются форма и wire
+// round-trip.
 func TestPeerColorCollectibleThreeColors(t *testing.T) {
 	gift := chatThemeRoundTripGift()
 	palette := domain.PeerColorCollectibleFromGift(gift)
@@ -133,11 +160,13 @@ func TestPeerColorCollectibleThreeColors(t *testing.T) {
 	if len(palette.Colors) != 3 {
 		t.Fatalf("colors = %v (%d), want 3", palette.Colors, len(palette.Colors))
 	}
-	if palette.Colors[0] != gift.Backdrop.CenterColor ||
-		palette.Colors[1] != gift.Backdrop.EdgeColor ||
-		palette.Colors[2] != gift.Backdrop.TextColor {
-		t.Fatalf("colors = [%#x %#x %#x], want [center edge text_color]",
-			palette.Colors[0], palette.Colors[1], palette.Colors[2])
+	for i, color := range palette.Colors {
+		if color <= 0 || color > 0xffffff {
+			t.Fatalf("colors[%d] = %#x, want plausible RGB24", i, color)
+		}
+	}
+	if palette.DarkAccentColor <= 0 || palette.DarkAccentColor > 0xffffff {
+		t.Fatalf("dark_accent_color = %#x, want plausible RGB24", palette.DarkAccentColor)
 	}
 
 	// Wire round-trip peerColorCollectible.
@@ -149,8 +178,12 @@ func TestPeerColorCollectibleThreeColors(t *testing.T) {
 	if err := decoded.Decode(&buf); err != nil {
 		t.Fatalf("decode peerColorCollectible: %v", err)
 	}
-	if len(decoded.Colors) != 3 || decoded.Colors[2] != gift.Backdrop.TextColor {
-		t.Fatalf("decoded colors = %v, want 3 with text_color last", decoded.Colors)
+	if len(decoded.Colors) != 3 {
+		t.Fatalf("decoded colors = %v, want 3", decoded.Colors)
+	}
+	if decoded.AccentColor != palette.AccentColor || decoded.DarkAccentColor != palette.DarkAccentColor {
+		t.Fatalf("decoded accent = %#x dark = %#x, want %#x/%#x",
+			decoded.AccentColor, decoded.DarkAccentColor, palette.AccentColor, palette.DarkAccentColor)
 	}
 }
 
