@@ -194,3 +194,144 @@ WHERE sender_user_id=$1 AND id=$2`, target.MessageSenderID, target.PrivateMessag
 	}
 	return edits, nil
 }
+
+// markPrivateStarGiftConvertedTx rewrites the private gift service message
+// after a successful conversion: every visible box of the gift message flips
+// to the terminal "Вы обменяли подарок на N звёзд" projection (converted=true,
+// upgrade/prepaid capability flags cleared, convert_stars kept so clients
+// render the credited amount). The aggregate mutation and all message edits
+// share one transaction and each visible box receives its own durable
+// pts/event/outbox entry, so no session misses the edit. Channel gifts have no
+// private message and deleted boxes are skipped silently.
+func (s *StarGiftLifecycleStore) markPrivateStarGiftConvertedTx(
+	ctx context.Context,
+	pgTx pgx.Tx,
+	saved domain.SavedStarGift,
+	date int,
+) error {
+	if s == nil || s.messages == nil || saved.Owner.Type != domain.PeerTypeUser ||
+		saved.Owner.ID <= 0 || saved.ID <= 0 || saved.MsgID <= 0 || date <= 0 {
+		return nil
+	}
+	messageIDs, err := userStarGiftSourceMessageIDs(ctx, pgTx, saved)
+	if err != nil {
+		return fmt.Errorf("list star gift convert message refs: %w", err)
+	}
+	q := sqlcgen.New(pgTx)
+	seenPrivateMessages := make(map[string]struct{}, len(messageIDs))
+	for _, msgID := range messageIDs {
+		var peerType string
+		var peerID int64
+		err := pgTx.QueryRow(ctx, `
+SELECT peer_type,peer_id FROM message_boxes
+WHERE owner_user_id=$1 AND box_id=$2 AND NOT deleted
+FOR UPDATE`, saved.Owner.ID, msgID).Scan(&peerType, &peerID)
+		if errors.Is(err, pgx.ErrNoRows) {
+			continue
+		}
+		if err != nil {
+			return fmt.Errorf("lock star gift convert message %d: %w", msgID, err)
+		}
+		if peerType != string(domain.PeerTypeUser) || peerID <= 0 {
+			continue
+		}
+		target, err := q.GetMessageBoxForEdit(ctx, sqlcgen.GetMessageBoxForEditParams{
+			OwnerUserID: saved.Owner.ID, BoxID: int32(msgID), PeerType: peerType, PeerID: peerID,
+		})
+		if err != nil {
+			return fmt.Errorf("load star gift convert message %d: %w", msgID, err)
+		}
+		logicalKey := fmt.Sprintf("%d:%d", target.MessageSenderID, target.PrivateMessageID)
+		if _, duplicate := seenPrivateMessages[logicalKey]; duplicate {
+			continue
+		}
+		seenPrivateMessages[logicalKey] = struct{}{}
+
+		boxes, err := q.ListVisibleMessageBoxesByPrivateMessage(ctx, sqlcgen.ListVisibleMessageBoxesByPrivateMessageParams{
+			OwnerUserIds:    privateMessageOwnerIDs(saved.Owner.ID, peerID),
+			MessageSenderID: target.MessageSenderID, PrivateMessageID: target.PrivateMessageID,
+		})
+		if err != nil {
+			return fmt.Errorf("list star gift convert boxes %d: %w", msgID, err)
+		}
+		var privateMediaJSON []byte
+		matched := false
+		for _, box := range boxes {
+			media, err := decodeMessageMedia(box.MediaJson)
+			if err != nil {
+				return fmt.Errorf("decode star gift convert media %d: %w", box.BoxID, err)
+			}
+			action := privateStarGiftAction(media)
+			if action == nil || action.GiftID != saved.GiftID {
+				continue
+			}
+			matched = true
+			// Терминальная проекция: converted=true переключает клиентов на
+			// подпись «Вы обменяли подарок на N звёзд» (сумма — convert_stars),
+			// апгрейд/предоплата сняты — конвертируемого подарка больше нет.
+			action.Converted = true
+			action.CanUpgrade = false
+			action.PrepaidUpgrade = false
+			action.PrepaidUpgradeHash = ""
+			action.UpgradeSeparate = false
+			action.UpgradeStars = 0
+			// convert_stars сознательно сохраняется: клиент показывает сумму.
+
+			mediaJSON, err := encodeMessageMedia(media)
+			if err != nil {
+				return fmt.Errorf("encode converted star gift projection: %w", err)
+			}
+			pts, err := s.messages.reservePts(ctx, pgTx, box.OwnerUserID)
+			if err != nil {
+				return fmt.Errorf("allocate converted star gift pts: %w", err)
+			}
+			tag, err := pgTx.Exec(ctx, `
+UPDATE message_boxes SET media=$3,pts=$4
+WHERE owner_user_id=$1 AND box_id=$2 AND NOT deleted`, box.OwnerUserID, box.BoxID, mediaJSON, int32(pts))
+			if err != nil {
+				return fmt.Errorf("update converted star gift projection: %w", err)
+			}
+			if tag.RowsAffected() != 1 {
+				return fmt.Errorf("update converted star gift projection lost row")
+			}
+			msg, err := messageFromVisibleBoxRow(box)
+			if err != nil {
+				return err
+			}
+			msg.Media = media
+			msg.Pts = pts
+			if err := replaceMessageBoxMediaIndexTx(ctx, pgTx, msg.OwnerUserID, msg.Peer.ID, msg.ID, msg.Date, msg.Media, msg.Entities); err != nil {
+				return err
+			}
+			event := domain.UpdateEvent{UserID: msg.OwnerUserID, Type: domain.UpdateEventEditMessage,
+				Pts: pts, PtsCount: 1, Date: date, Message: msg}
+			if err := appendUserUpdateEvent(ctx, pgTx, q, msg.OwnerUserID, event); err != nil {
+				return fmt.Errorf("append converted star gift edit event: %w", err)
+			}
+			if err := enqueueDispatch(ctx, q, sqlcgen.EnqueueDispatchParams{
+				TargetUserID: msg.OwnerUserID, Pts: int32(pts), EventType: string(domain.UpdateEventEditMessage),
+				ExcludeAuthKeyID: 0, ExcludeSessionID: 0,
+			}); err != nil {
+				return fmt.Errorf("enqueue converted star gift edit: %w", err)
+			}
+			if box.OwnerUserID == box.MessageSenderID || len(privateMediaJSON) == 0 {
+				privateMediaJSON, err = encodeSharedPrivateStarGiftMedia(media)
+				if err != nil {
+					return err
+				}
+			}
+		}
+		if !matched {
+			continue
+		}
+		if len(privateMediaJSON) == 0 {
+			return fmt.Errorf("converted star gift projection missing shared media")
+		}
+		if _, err := pgTx.Exec(ctx, `
+UPDATE private_messages SET media=$3
+WHERE sender_user_id=$1 AND id=$2`, target.MessageSenderID, target.PrivateMessageID, privateMediaJSON); err != nil {
+			return fmt.Errorf("update converted star gift private media: %w", err)
+		}
+	}
+	return nil
+}

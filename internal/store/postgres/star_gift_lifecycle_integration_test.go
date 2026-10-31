@@ -1722,3 +1722,171 @@ func starGiftUniqueActionFromEdit(edit domain.EditedMessageForUser) *domain.Mess
 	}
 	return edit.Message.Media.ServiceAction.StarGiftUnique
 }
+
+func TestStarGiftConvertRewritesPrivateGiftMessage(t *testing.T) {
+	pool := testPool(t)
+	ctx := context.Background()
+	suffix := randomSuffix(t)
+	now := int(time.Now().Unix())
+	users := NewUserStore(pool)
+	buyer := createTestUser(t, ctx, users, "+1883"+suffix+"01", "ConvertBuyer", "")
+	owner := createTestUser(t, ctx, users, "+1883"+suffix+"02", "ConvertOwner", "")
+	ownerPeer := domain.Peer{Type: domain.PeerTypeUser, ID: owner.ID}
+
+	stars := NewStarsStore(pool)
+	for _, user := range []domain.User{buyer, owner} {
+		if _, _, err := stars.EnsureGrant(ctx, user.ID, 10000, now); err != nil {
+			t.Fatalf("grant stars to %d: %v", user.ID, err)
+		}
+	}
+
+	gifts := NewStarGiftStore(pool)
+	baseDocumentID := time.Now().UnixNano() & 0x7ffffffffffff000
+	entry, err := gifts.CreateCatalogRevision(ctx, domain.StarGiftCatalogWrite{
+		Title: "ConvertMsg " + suffix, Stars: 50, ConvertStars: 25, Enabled: true,
+		Document: collectibleTestDocument(baseDocumentID, "convert-msg.tgs"),
+		Blob:     collectibleTestBlob(baseDocumentID, "convert-msg"), Animation: collectibleTestAnimation("convert-msg.tgs"),
+		Actor: "integration", CommandID: "convert-catalog-" + suffix,
+	})
+	if err != nil {
+		t.Fatalf("create convert catalog: %v", err)
+	}
+	zeroEntry, err := gifts.CreateCatalogRevision(ctx, domain.StarGiftCatalogWrite{
+		Title: "ConvertZero " + suffix, Stars: 30, ConvertStars: 0, Enabled: true,
+		Document: collectibleTestDocument(baseDocumentID+10, "convert-zero.tgs"),
+		Blob:     collectibleTestBlob(baseDocumentID+10, "convert-zero"), Animation: collectibleTestAnimation("convert-zero.tgs"),
+		Actor: "integration", CommandID: "convert-zero-catalog-" + suffix,
+	})
+	if err != nil {
+		t.Fatalf("create zero-convert catalog: %v", err)
+	}
+	publishConvertPool := func(entry domain.StarGiftCatalogEntry, documentBase int64, tag string) {
+		t.Helper()
+		if _, err := gifts.PublishCollectibleRevision(ctx, domain.StarGiftCollectibleWrite{
+			GiftID: entry.Gift.ID, UpgradeStars: 100, SupplyTotal: 20, SlugPrefix: "conv-" + tag + "-" + suffix,
+			Models: []domain.StarGiftCollectibleAttribute{
+				{Kind: domain.StarGiftCollectibleModel, Name: "Base", RarityKind: domain.StarGiftRarityPermille, RarityPermille: 1000,
+					Document: collectibleTestDocumentPtr(documentBase+1, tag+"-model.tgs"), Blob: collectibleTestBlobPtr(documentBase+1, tag+"-model"), Animation: collectibleTestAnimationPtr(tag + "-model.tgs")},
+				{Kind: domain.StarGiftCollectibleModel, Name: "Base Two", RarityKind: domain.StarGiftRarityPermille, RarityPermille: 1000,
+					Document: collectibleTestDocumentPtr(documentBase+3, tag+"-model-two.tgs"), Blob: collectibleTestBlobPtr(documentBase+3, tag+"-model-two"), Animation: collectibleTestAnimationPtr(tag + "-model-two.tgs")},
+			},
+			Patterns: []domain.StarGiftCollectibleAttribute{
+				{Kind: domain.StarGiftCollectiblePattern, Name: "Orbit", RarityKind: domain.StarGiftRarityPermille, RarityPermille: 1000,
+					Document: collectibleTestPatternDocumentPtr(documentBase+2, tag+"-pattern.tgs"), Blob: collectibleTestBlobPtr(documentBase+2, tag+"-pattern"), Animation: collectibleTestAnimationPtr(tag + "-pattern.tgs")},
+				{Kind: domain.StarGiftCollectiblePattern, Name: "Orbit Two", RarityKind: domain.StarGiftRarityPermille, RarityPermille: 1000,
+					Document: collectibleTestPatternDocumentPtr(documentBase+4, tag+"-pattern-two.tgs"), Blob: collectibleTestBlobPtr(documentBase+4, tag+"-pattern-two"), Animation: collectibleTestAnimationPtr(tag + "-pattern-two.tgs")},
+			},
+			Backdrops: []domain.StarGiftCollectibleAttribute{
+				{Kind: domain.StarGiftCollectibleBackdrop, Name: "Night", BackdropID: 87, CenterColor: 0x112233, EdgeColor: 0x223344, PatternColor: 0x334455, TextColor: 0xffffff, RarityKind: domain.StarGiftRarityPermille, RarityPermille: 1000},
+				{Kind: domain.StarGiftCollectibleBackdrop, Name: "Day", BackdropID: 88, CenterColor: 0xaabbcc, EdgeColor: 0x778899, PatternColor: 0xddeeff, TextColor: 0x111111, RarityKind: domain.StarGiftRarityPermille, RarityPermille: 1000},
+			},
+			Actor: "integration", CommandID: "convert-pool-" + tag + "-" + suffix,
+		}); err != nil {
+			t.Fatalf("publish convert pool %s: %v", tag, err)
+		}
+	}
+	publishConvertPool(entry, baseDocumentID, "msg")
+	publishConvertPool(zeroEntry, baseDocumentID+20, "zero")
+
+	messages := NewMessageStore(pool)
+	lifecycle := NewStarGiftLifecycleStore(pool, messages, 1_000_000)
+
+	// 1. Обычная покупка: сообщение несёт convert_stars, конвертация доступна.
+	purchaseReq := issueLifecyclePurchaseForm(t, ctx, lifecycle, domain.StarGiftPurchaseRequest{BuyerUserID: buyer.ID, To: ownerPeer,
+		GiftID: entry.Gift.ID, CommandKey: "convert-purchase-" + suffix, Date: now})
+	purchased, err := lifecycle.PurchaseStarGift(ctx, purchaseReq)
+	if err != nil {
+		t.Fatalf("purchase gift: %v", err)
+	}
+	ordinaryAction := purchased.Send.RecipientMessage.Media.ServiceAction.StarGift
+	if ordinaryAction == nil || ordinaryAction.ConvertStars != 25 || ordinaryAction.Converted || ordinaryAction.PrepaidUpgrade {
+		t.Fatalf("ordinary purchase action = %+v", ordinaryAction)
+	}
+
+	// 2. Конвертация владельцем: агрегат переводится в converted, а оба бокса
+	// сообщения о подарке переписываются в терминальную проекцию «Вы обменяли
+	// подарок на N звёзд» (converted=true, апгрейд/предоплата сняты,
+	// convert_stars сохранён) с событием edit_message для каждой стороны.
+	converted, err := lifecycle.ConvertStarGift(ctx, domain.StarGiftConvertRequest{ActorUserID: owner.ID,
+		Ref: domain.SavedStarGiftRef{Owner: ownerPeer, MsgID: purchased.Saved.MsgID}, Date: now + 1})
+	if err != nil || !converted.Saved.Converted {
+		t.Fatalf("convert = %+v err %v", converted, err)
+	}
+	if converted.OwnerBalance != 10025 {
+		t.Fatalf("convert balance = %d, want 10025", converted.OwnerBalance)
+	}
+	for _, box := range []struct {
+		name    string
+		userID  int64
+		message domain.Message
+	}{
+		{"owner", owner.ID, purchased.Send.RecipientMessage},
+		{"sender", buyer.ID, purchased.Send.SenderMessage},
+	} {
+		var mediaJSON string
+		if err := pool.QueryRow(ctx, `SELECT media FROM message_boxes WHERE owner_user_id=$1 AND box_id=$2 AND NOT deleted`,
+			box.userID, box.message.ID).Scan(&mediaJSON); err != nil {
+			t.Fatalf("load converted %s box: %v", box.name, err)
+		}
+		media, err := decodeMessageMedia(mediaJSON)
+		if err != nil {
+			t.Fatalf("decode converted %s media: %v", box.name, err)
+		}
+		rewritten := media.ServiceAction.StarGift
+		if rewritten == nil || !rewritten.Converted || rewritten.CanUpgrade || rewritten.PrepaidUpgrade ||
+			rewritten.UpgradeStars != 0 || rewritten.ConvertStars != 25 {
+			t.Fatalf("converted %s projection = %+v", box.name, rewritten)
+		}
+		var sharedMedia string
+		if err := pool.QueryRow(ctx, `SELECT pm.media FROM private_messages pm
+JOIN message_boxes mb ON mb.message_sender_id=pm.sender_user_id AND mb.private_message_id=pm.id
+WHERE mb.owner_user_id=$1 AND mb.box_id=$2`, box.userID, box.message.ID).Scan(&sharedMedia); err != nil {
+			t.Fatalf("load shared media via %s box: %v", box.name, err)
+		}
+		shared, err := decodeMessageMedia(sharedMedia)
+		if err != nil {
+			t.Fatalf("decode shared media via %s box: %v", box.name, err)
+		}
+		if sharedAction := shared.ServiceAction.StarGift; sharedAction == nil || !sharedAction.Converted {
+			t.Fatalf("shared media action = %+v", sharedAction)
+		}
+		var events int64
+		if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM user_update_events WHERE user_id=$1 AND event_type='edit_message'`,
+			box.userID).Scan(&events); err != nil || events != 1 {
+			t.Fatalf("edit events for %s = %d err %v", box.name, events, err)
+		}
+	}
+
+	// 3. Документация (core.telegram.org/api/gifts): конвертация доступна
+	// только при convert_stars != 0.
+	zeroReq := issueLifecyclePurchaseForm(t, ctx, lifecycle, domain.StarGiftPurchaseRequest{BuyerUserID: buyer.ID, To: ownerPeer,
+		GiftID: zeroEntry.Gift.ID, CommandKey: "convert-zero-" + suffix, Date: now + 2})
+	zeroPurchase, err := lifecycle.PurchaseStarGift(ctx, zeroReq)
+	if err != nil {
+		t.Fatalf("purchase zero-convert gift: %v", err)
+	}
+	if _, err := lifecycle.ConvertStarGift(ctx, domain.StarGiftConvertRequest{ActorUserID: owner.ID,
+		Ref: domain.SavedStarGiftRef{Owner: ownerPeer, MsgID: zeroPurchase.Saved.MsgID}, Date: now + 3}); !errors.Is(err, domain.ErrStarGiftInvalid) {
+		t.Fatalf("zero-convert err = %v, want invalid", err)
+	}
+
+	// 4. Предоплата улучшения: сообщение помечается prepaid_upgrade без
+	// convert_stars, RPC-конвертация такого подарка отклоняется.
+	prepaidReq := issueLifecyclePurchaseForm(t, ctx, lifecycle, domain.StarGiftPurchaseRequest{BuyerUserID: buyer.ID, To: ownerPeer,
+		GiftID: entry.Gift.ID, CommandKey: "convert-prepaid-" + suffix, Date: now + 4, IncludeUpgrade: true})
+	prepaidPurchase, err := lifecycle.PurchaseStarGift(ctx, prepaidReq)
+	if err != nil {
+		t.Fatalf("prepaid purchase: %v", err)
+	}
+	if prepaidPurchase.Saved.PrepaidUpgradeStars == 0 {
+		t.Fatalf("prepaid purchase = %+v", prepaidPurchase)
+	}
+	prepaidAction := prepaidPurchase.Send.RecipientMessage.Media.ServiceAction.StarGift
+	if prepaidAction == nil || !prepaidAction.PrepaidUpgrade || prepaidAction.ConvertStars != 0 || !prepaidAction.CanUpgrade {
+		t.Fatalf("prepaid action = %+v", prepaidAction)
+	}
+	if _, err := lifecycle.ConvertStarGift(ctx, domain.StarGiftConvertRequest{ActorUserID: owner.ID,
+		Ref: domain.SavedStarGiftRef{Owner: ownerPeer, MsgID: prepaidPurchase.Saved.MsgID}, Date: now + 5}); !errors.Is(err, domain.ErrStarGiftInvalid) {
+		t.Fatalf("prepaid convert err = %v, want invalid", err)
+	}
+}

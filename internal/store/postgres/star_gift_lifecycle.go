@@ -90,6 +90,16 @@ func (s *StarGiftLifecycleStore) ConvertStarGift(ctx context.Context, req domain
 		if !saved.LifecycleStatus.Live() || saved.UniqueGiftID != 0 {
 			return domain.ErrStarGiftAlreadyUpgraded
 		}
+		// Документация (core.telegram.org/api/gifts): конвертация доступна
+		// только при convert_stars != 0. Плюс подаркам с предоплаченным
+		// улучшением обмен запрещён: получатель такого подарка может только
+		// распаковать его в уникальный коллекционный.
+		if saved.ConvertStars <= 0 {
+			return domain.ErrStarGiftInvalid
+		}
+		if saved.PrepaidUpgradeStars > 0 {
+			return domain.ErrStarGiftInvalid
+		}
 
 		from := domain.Peer{Type: domain.PeerTypeUser, ID: saved.FromUserID}
 		amount := saved.ConvertStars
@@ -131,6 +141,15 @@ func (s *StarGiftLifecycleStore) ConvertStarGift(ctx context.Context, req domain
 		}
 		if err := removeSavedGiftFromCollections(ctx, tx, saved.Owner, saved.ID); err != nil {
 			return err
+		}
+		// Сервисное сообщение о подарке в чате переписывается в той же
+		// транзакции: клиенты обеих сторон видят «Вы обменяли подарок на
+		// N звёзд» вместо исходного сообщения о дарении. Канальные подарки
+		// пропускаются — у них нет приватного сообщения.
+		if saved.Owner.Type == domain.PeerTypeUser {
+			if err := s.markPrivateStarGiftConvertedTx(ctx, tx, saved, req.Date); err != nil {
+				return err
+			}
 		}
 		if _, err := tx.Exec(ctx, `INSERT INTO star_gift_conversions
 			(saved_gift_id,actor_user_id,owner_peer_type,owner_peer_id,amount,balance_after,converted_at)
