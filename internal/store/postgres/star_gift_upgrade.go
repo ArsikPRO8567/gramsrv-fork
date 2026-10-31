@@ -823,12 +823,13 @@ FOR UPDATE`, req.UserID, sourceMessageID).Scan(&peerType, &peerID)
 			action.PrepaidUpgradeHash = ""
 			action.PrepaidUpgrade = false
 			action.UpgradeSeparate = false
+			// Подарок стал уникальным: ветка «обменять на звёзды» в исходном
+			// сервисном сообщении больше не имеет смысла (конвертация
+			// уникального подарка отклоняется агрегатом), клиент должен
+			// показывать нейтральное «подарок можно добавить в профиль».
+			action.ConvertStars = 0
 			action.CanUpgrade = false
 			action.PrepaidUpgradeHash = ""
-			// Уникальные подарки не конвертируются: у переписанного исходного
-			// сообщения не должно оставаться convert_stars, иначе карточка
-			// улучшенного подарка предлагает недоступный обмен на звёзды.
-			action.ConvertStars = 0
 			mediaJSON, err := encodeMessageMedia(media)
 			if err != nil {
 				return nil, fmt.Errorf("encode upgraded star gift source media: %w", err)

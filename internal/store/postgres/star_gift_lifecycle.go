@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgtype"
 
 	"telesrv/internal/domain"
 	"telesrv/internal/store"
@@ -90,15 +91,15 @@ func (s *StarGiftLifecycleStore) ConvertStarGift(ctx context.Context, req domain
 		if !saved.LifecycleStatus.Live() || saved.UniqueGiftID != 0 {
 			return domain.ErrStarGiftAlreadyUpgraded
 		}
-		// Документация (core.telegram.org/api/gifts): конвертация доступна
-		// только при convert_stars != 0. Плюс подаркам с предоплаченным
-		// улучшением обмен запрещён: получатель такого подарка может только
-		// распаковать его в уникальный коллекционный.
-		if saved.ConvertStars <= 0 {
-			return domain.ErrStarGiftInvalid
-		}
+		// Предоплаченное улучшение — обязательный entitlement «Распаковать»:
+		// конвертировать такой подарок в звёзды нельзя (STARGIFT_INVALID).
 		if saved.PrepaidUpgradeStars > 0 {
-			return domain.ErrStarGiftInvalid
+			return domain.ErrStarGiftUnavailable
+		}
+		// Не-конвертируемый подарок (в сообщении нет ветки «обменять на
+		// звёзды») уничтожать через конвертацию нельзя.
+		if saved.ConvertStars <= 0 {
+			return domain.ErrStarGiftUnavailable
 		}
 
 		from := domain.Peer{Type: domain.PeerTypeUser, ID: saved.FromUserID}
@@ -142,15 +143,6 @@ func (s *StarGiftLifecycleStore) ConvertStarGift(ctx context.Context, req domain
 		if err := removeSavedGiftFromCollections(ctx, tx, saved.Owner, saved.ID); err != nil {
 			return err
 		}
-		// Сервисное сообщение о подарке в чате переписывается в той же
-		// транзакции: клиенты обеих сторон видят «Вы обменяли подарок на
-		// N звёзд» вместо исходного сообщения о дарении. Канальные подарки
-		// пропускаются — у них нет приватного сообщения.
-		if saved.Owner.Type == domain.PeerTypeUser {
-			if err := s.markPrivateStarGiftConvertedTx(ctx, tx, saved, req.Date); err != nil {
-				return err
-			}
-		}
 		if _, err := tx.Exec(ctx, `INSERT INTO star_gift_conversions
 			(saved_gift_id,actor_user_id,owner_peer_type,owner_peer_id,amount,balance_after,converted_at)
 			VALUES($1,$2,$3,$4,$5,$6,$7)`, saved.ID, req.ActorUserID, string(saved.Owner.Type),
@@ -163,12 +155,136 @@ func (s *StarGiftLifecycleStore) ConvertStarGift(ctx context.Context, req domain
 		saved.PinnedOrder = 0
 		saved.CollectionIDs = nil
 		result = domain.StarGiftConvertResult{Saved: saved, OwnerBalance: balanceAfter}
+		// Редактируем исходное сервисное сообщение о подарке (обе копии):
+		// converted=true + convert_stars — клиент перерисовывает подпись в
+		// «Вы обменяли подарок на N звёзд» (получатель) / «{user} обменял…»
+		// без перезапуска диалога, ровно как на официальных серверах.
+		if err := s.editConvertedStarGiftMessagesTx(ctx, tx, saved, amount, req.Date); err != nil {
+			return err
+		}
 		return nil
 	})
 	if err != nil {
 		return domain.StarGiftConvertResult{}, err
 	}
 	return result, nil
+}
+
+// editConvertedStarGiftMessagesTx переписывает обе проекции исходного
+// сервисного сообщения messageActionStarGift (копия получателя и копия
+// отправителя) после конвертации подарка в звёзды: converted=true и
+// convert_stars=сумма конвертации. Клиент по этим флагам сам перерисовывает
+// подпись в «Вы обменяли подарок на N звёзд» (получатель) / «{user} обменял
+// этот подарок на N звёзд» (отправитель, лист подарков), как на официальных
+// серверах. Каждому видимому боксу выделяется свой pts и durable edit-event.
+// Канальные подарки и подарки без живого бокса пропускаются: их
+// конвертация уже зафиксирована агрегатом.
+func (s *StarGiftLifecycleStore) editConvertedStarGiftMessagesTx(
+	ctx context.Context,
+	tx pgx.Tx,
+	saved domain.SavedStarGift,
+	convertStars int64,
+	date int,
+) error {
+	if s == nil || s.messages == nil || date <= 0 || saved.ID <= 0 ||
+		saved.Owner.Type != domain.PeerTypeUser || saved.Owner.ID <= 0 || saved.MsgID <= 0 {
+		return nil
+	}
+	q := sqlcgen.New(tx)
+	var peerType string
+	var peerID int64
+	err := tx.QueryRow(ctx, `
+SELECT peer_type,peer_id FROM message_boxes
+WHERE owner_user_id=$1 AND box_id=$2 AND NOT deleted
+FOR UPDATE`, saved.Owner.ID, saved.MsgID).Scan(&peerType, &peerID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("lock converted star gift message: %w", err)
+	}
+	if peerType != string(domain.PeerTypeUser) || peerID <= 0 {
+		return nil
+	}
+	target, err := q.GetMessageBoxForEdit(ctx, sqlcgen.GetMessageBoxForEditParams{
+		OwnerUserID: saved.Owner.ID, BoxID: int32(saved.MsgID), PeerType: peerType, PeerID: peerID,
+	})
+	if err != nil {
+		return fmt.Errorf("load converted star gift message: %w", err)
+	}
+	boxes, err := q.ListVisibleMessageBoxesByPrivateMessage(ctx, sqlcgen.ListVisibleMessageBoxesByPrivateMessageParams{
+		OwnerUserIds:    privateMessageOwnerIDs(saved.Owner.ID, peerID),
+		MessageSenderID: target.MessageSenderID, PrivateMessageID: target.PrivateMessageID,
+	})
+	if err != nil {
+		return fmt.Errorf("list converted star gift message boxes: %w", err)
+	}
+	var privateMediaJSON []byte
+	for _, box := range boxes {
+		media, err := decodeMessageMedia(box.MediaJson)
+		if err != nil {
+			return fmt.Errorf("decode converted star gift message media: %w", err)
+		}
+		action := privateStarGiftAction(media)
+		if action == nil || action.GiftID != saved.GiftID {
+			// Чужое действие в том же логическом сообщении — не наша проекция.
+			continue
+		}
+		action.Converted = true
+		action.ConvertStars = convertStars
+		mediaJSON, err := encodeMessageMedia(media)
+		if err != nil {
+			return fmt.Errorf("encode converted star gift message media: %w", err)
+		}
+		pts, err := s.messages.reservePts(ctx, tx, box.OwnerUserID)
+		if err != nil {
+			return fmt.Errorf("allocate converted star gift pts: %w", err)
+		}
+		tag, err := tx.Exec(ctx, `
+UPDATE message_boxes SET media=$3,pts=$4
+WHERE owner_user_id=$1 AND box_id=$2 AND NOT deleted`, box.OwnerUserID, box.BoxID, mediaJSON, int32(pts))
+		if err != nil {
+			return fmt.Errorf("update converted star gift message box: %w", err)
+		}
+		if tag.RowsAffected() != 1 {
+			return fmt.Errorf("update converted star gift message box lost row")
+		}
+		msg, err := messageFromVisibleBoxRow(box)
+		if err != nil {
+			return err
+		}
+		msg.Media = media
+		msg.Pts = pts
+		if err := replaceMessageBoxMediaIndexTx(ctx, tx, msg.OwnerUserID, msg.Peer.ID, msg.ID, msg.Date, msg.Media, msg.Entities); err != nil {
+			return err
+		}
+		event := domain.UpdateEvent{UserID: msg.OwnerUserID, Type: domain.UpdateEventEditMessage,
+			Pts: pts, PtsCount: 1, Date: date, Message: msg}
+		if err := appendUserUpdateEvent(ctx, tx, q, msg.OwnerUserID, event); err != nil {
+			return fmt.Errorf("append converted star gift edit event: %w", err)
+		}
+		if err := enqueueDispatch(ctx, q, sqlcgen.EnqueueDispatchParams{
+			TargetUserID: msg.OwnerUserID, Pts: int32(pts), EventType: string(domain.UpdateEventEditMessage),
+			ExcludeAuthKeyID: 0, ExcludeSessionID: 0,
+		}); err != nil {
+			return fmt.Errorf("enqueue converted star gift edit: %w", err)
+		}
+		if box.OwnerUserID == box.MessageSenderID || len(privateMediaJSON) == 0 {
+			privateMediaJSON, err = encodeSharedPrivateStarGiftMedia(media)
+			if err != nil {
+				return err
+			}
+		}
+	}
+	if len(privateMediaJSON) == 0 {
+		return nil
+	}
+	if _, err := tx.Exec(ctx, `
+UPDATE private_messages SET media=$3
+WHERE sender_user_id=$1 AND id=$2`, target.MessageSenderID, target.PrivateMessageID, privateMediaJSON); err != nil {
+		return fmt.Errorf("update converted star gift private media: %w", err)
+	}
+	return nil
 }
 
 // resalePaymentMatchesListing проверяет оплату покупателя против листинга:
@@ -314,40 +430,126 @@ WHERE `+where+` ORDER BY `+order+` LIMIT `+limitArg, args...)
 }
 
 func (s *StarGiftLifecycleStore) UniqueStarGiftValueInfo(ctx context.Context, uniqueGiftID int64) (domain.StarGiftValueInfo, error) {
-	var out domain.StarGiftValueInfo
-	var configuredCurrency string
-	var configuredValue int64
+	var (
+		out                  domain.StarGiftValueInfo
+		giftDate             int
+		giftStars            int64
+		revisionUpgradeStars int64
+		prepaidUpgradeStars  int64
+		upgradeDate          pgtype.Timestamptz
+		lastSaleCurrency     string
+		lastSaleAmount       int64
+		floorStars, floorTon int64
+		sumStars, sumTon     int64
+		cntStars, cntTon     int
+		listedCount          int
+	)
 	err := s.db.QueryRow(ctx, `
-SELECT sg.gift_date, cr.stars, u.value_currency, u.value_amount, u.last_sale_date,
-       COALESCE(CASE WHEN u.last_sale_currency='XTR' THEN u.last_sale_amount END,0),
-       COALESCE((SELECT MIN(l.amount) FROM star_gift_listings l JOIN unique_star_gifts lu ON lu.id=l.unique_gift_id WHERE lu.gift_id=u.gift_id AND l.currency='XTR'),0),
-       COALESCE((SELECT AVG(sa.amount)::bigint FROM star_gift_sales sa JOIN unique_star_gifts su ON su.id=sa.unique_gift_id WHERE su.gift_id=u.gift_id AND sa.currency='XTR'),0),
-       (SELECT COUNT(*) FROM star_gift_listings l JOIN unique_star_gifts lu ON lu.id=l.unique_gift_id WHERE lu.gift_id=u.gift_id)
+SELECT sg.gift_date, cr.stars, COALESCE(cr.upgrade_stars,0), COALESCE(sg.prepaid_upgrade_stars,0),
+       u.created_at, u.last_sale_date, COALESCE(u.last_sale_currency,''), COALESCE(u.last_sale_amount,0),
+       COALESCE((SELECT MIN(l.amount) FROM star_gift_listings l
+                 JOIN unique_star_gifts lu ON lu.id=l.unique_gift_id
+                 WHERE lu.gift_id=u.gift_id AND l.currency='XTR'), 0),
+       COALESCE((SELECT MIN(l.amount) FROM star_gift_listings l
+                 JOIN unique_star_gifts lu ON lu.id=l.unique_gift_id
+                 WHERE lu.gift_id=u.gift_id AND l.currency='TON'), 0),
+       COALESCE((SELECT SUM(sa.amount) FROM star_gift_sales sa
+                 JOIN unique_star_gifts su ON su.id=sa.unique_gift_id
+                 WHERE su.gift_id=u.gift_id AND sa.currency='XTR'), 0),
+       (SELECT COUNT(*) FROM star_gift_sales sa
+        JOIN unique_star_gifts su ON su.id=sa.unique_gift_id
+        WHERE su.gift_id=u.gift_id AND sa.currency='XTR'),
+       COALESCE((SELECT SUM(sa.amount) FROM star_gift_sales sa
+                 JOIN unique_star_gifts su ON su.id=sa.unique_gift_id
+                 WHERE su.gift_id=u.gift_id AND sa.currency='TON'), 0),
+       (SELECT COUNT(*) FROM star_gift_sales sa
+        JOIN unique_star_gifts su ON su.id=sa.unique_gift_id
+        WHERE su.gift_id=u.gift_id AND sa.currency='TON'),
+       (SELECT COUNT(*) FROM star_gift_listings l
+        JOIN unique_star_gifts lu ON lu.id=l.unique_gift_id
+        WHERE lu.gift_id=u.gift_id)
 FROM unique_star_gifts u
 JOIN peer_star_gifts sg ON sg.id=u.source_saved_gift_id
 JOIN star_gift_catalog_revisions cr ON cr.id=sg.catalog_revision_id
-WHERE u.id=$1`, uniqueGiftID).Scan(&out.InitialSaleDate, &out.InitialSaleStars, &configuredCurrency,
-		&configuredValue, &out.LastSaleDate, &out.LastSalePrice, &out.FloorPrice, &out.AveragePrice, &out.ListedCount)
+WHERE u.id=$1`, uniqueGiftID).Scan(&giftDate, &giftStars, &revisionUpgradeStars, &prepaidUpgradeStars,
+		&upgradeDate, &out.LastSaleDate, &lastSaleCurrency, &lastSaleAmount,
+		&floorStars, &floorTon, &sumStars, &cntStars, &sumTon, &cntTon, &listedCount)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return domain.StarGiftValueInfo{}, domain.ErrStarGiftNotFound
 	}
 	if err != nil {
 		return domain.StarGiftValueInfo{}, fmt.Errorf("star gift value info: %w", err)
 	}
-	// The self-hosted ledger has no FX oracle. One Star-cent is the explicit local
-	// valuation unit unless an operator/provider has stored a real fiat estimate.
-	out.Currency = "USD"
-	out.InitialSalePrice = out.InitialSaleStars
-	if configuredCurrency != "" && configuredValue > 0 {
-		out.Currency, out.Value = configuredCurrency, configuredValue
-	} else if out.LastSalePrice > 0 {
+
+	// Графа «Ценность» считается в TON (нанотоны): это валюта маркета этого
+	// сервера, курс звёзды↔нанотоны задаётся оператором
+	// (TELESRV_STARGIFT_RESELL_RATE_STARS / _NANOTON) и уже используется
+	// листингами и оплатами рынка, поэтому все цены согласованы между собой.
+	rate := domain.CurrentStarGiftExchangeRate()
+	tonForStars := func(stars int64) int64 {
+		if stars <= 0 {
+			return 0
+		}
+		return rate.TonForStars(stars)
+	}
+	tonAmount := func(currency string, amount int64) int64 {
+		switch domain.StarGiftCurrency(currency) {
+		case domain.StarGiftCurrencyTON:
+			return amount
+		case domain.StarGiftCurrencyStars:
+			return tonForStars(amount)
+		default:
+			return 0
+		}
+	}
+
+	// Дата первой продажи — момент улучшения подарка до уникального
+	// (создание строки unique_star_gifts); fallback — дата дарения.
+	out.InitialSaleDate = giftDate
+	if upgradeDate.Valid && !upgradeDate.Time.IsZero() {
+		out.InitialSaleDate = int(upgradeDate.Time.Unix())
+	}
+	// Начальная цена в звёздах складывается из стоимости подарка и стоимости
+	// улучшения: предоплаченное улучшение учитывается по фактически
+	// захваченной сумме (saved gift), обычное — по прайсу ревизии каталога.
+	upgradeStars := revisionUpgradeStars
+	if prepaidUpgradeStars > 0 {
+		upgradeStars = prepaidUpgradeStars
+	}
+	out.InitialSaleStars = giftStars + upgradeStars
+	out.InitialSalePrice = tonForStars(out.InitialSaleStars)
+	// Дата последней продажи появляется только после покупки на маркете
+	// (unique_star_gifts.last_sale_* пишутся исключительно resale-покупкой).
+	out.LastSalePrice = tonAmount(lastSaleCurrency, lastSaleAmount)
+
+	// Минимальная цена — минимум среди активных листингов того же типа
+	// подарка (звёздные листинги приводятся к нанотонам по курсу).
+	if f := tonForStars(floorStars); f > 0 {
+		out.FloorPrice = f
+	}
+	if floorTon > 0 && (out.FloorPrice == 0 || floorTon < out.FloorPrice) {
+		out.FloorPrice = floorTon
+	}
+	// Средняя цена — среднее по истории продаж того же типа (обе валюты,
+	// приведённые к нанотонам; TonForStars линеен по звёздам, поэтому
+	// среднее суммы равно сумме средних).
+	if n := cntStars + cntTon; n > 0 {
+		out.AveragePrice = (tonForStars(sumStars) + sumTon) / int64(n)
+	}
+
+	// Оценка ценности: последняя продажа → средняя (флаг value_is_average) →
+	// минимальная → начальная цена.
+	out.Currency = "TON"
+	if out.LastSalePrice > 0 {
 		out.Value = out.LastSalePrice
+	} else if out.AveragePrice > 0 {
+		out.Value, out.ValueIsAverage = out.AveragePrice, true
 	} else if out.FloorPrice > 0 {
 		out.Value = out.FloorPrice
 	} else {
 		out.Value = out.InitialSalePrice
 	}
-	out.ValueIsAverage = out.AveragePrice > 0 && out.LastSalePrice == 0
+	out.ListedCount = listedCount
 	return out, nil
 }
 
