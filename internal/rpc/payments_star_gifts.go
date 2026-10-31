@@ -999,23 +999,15 @@ func (r *Router) sendStarGiftToUser(ctx context.Context, senderID, recipientID i
 func (r *Router) sendStarGiftToChannel(ctx context.Context, senderID, channelID int64, gift domain.StarGift, hideName bool, message string, prepaidUpgradeStars int64) (domain.SavedStarGiftRef, *tg.Updates, error) {
 	now := int(r.clock.Now().Unix())
 	sticker := gift.Sticker
-	// У подарка с предоплаченным улучшением конвертация в звёзды запрещена:
-	// convert_stars не отдаётся, иначе клиенты покажут недоступный обмен.
-	messageConvertStars := gift.ConvertStars
-	if prepaidUpgradeStars > 0 {
-		messageConvertStars = 0
-	}
 	action := domain.ChannelMessageAction{
 		Type: domain.ChannelActionStarGift,
 		StarGift: applyStarGiftSnapshot(&domain.MessageStarGiftAction{
 			GiftID: gift.ID,
-			// Покупка с включённым улучшением — это обычное сообщение о дарении,
-			// помеченное флагом prepaid_upgrade («отправитель уже оплатил
-			// улучшение»): связка prepaid_upgrade + внешний upgrade_stars > 0
-			// включает у получателя кнопку бесплатного «Распаковать» вместо
-			// повторной оплаты улучшения.
+			// Покупка с включённым улучшением — это обычное сообщение о дарении:
+			// цена в объекте равна сумме цены подарка и апгрейда, а флаги
+			// prepaid_upgrade не выставляются.
 			Stars:             gift.Stars + prepaidUpgradeStars,
-			ConvertStars:      messageConvertStars,
+			ConvertStars:      gift.ConvertStars,
 			Title:             gift.Title,
 			Sticker:           &sticker,
 			Message:           message,
@@ -1023,8 +1015,7 @@ func (r *Router) sendStarGiftToChannel(ctx context.Context, senderID, channelID 
 			To:                domain.Peer{Type: domain.PeerTypeChannel, ID: channelID},
 			NameHidden:        hideName,
 			Saved:             true,
-			CanUpgrade:        gift.UpgradeStars > 0 && gift.UpgradeIssued < gift.UpgradeTotal,
-			PrepaidUpgrade:    prepaidUpgradeStars > 0,
+			CanUpgrade:        gift.UpgradeStars > 0,
 			UpgradePriceStars: gift.UpgradeStars,
 		}, gift),
 	}
@@ -1109,28 +1100,26 @@ func (r *Router) deliverStarGift(ctx context.Context, senderID, recipientID int6
 	}
 	sessionID, _ := SessionIDFrom(ctx)
 	sticker := gift.Sticker
-	// У подарка с предоплаченным улучшением конвертация в звёзды запрещена:
-	// convert_stars не отдаётся, иначе клиенты покажут недоступный обмен.
-	messageConvertStars := gift.ConvertStars
-	if prepaidUpgradeStars > 0 {
-		messageConvertStars = 0
-	}
+	// Матрица подписей сервисного сообщения (см. StarGiftMessageFlags):
+	// улучшаемый/предоплаченный подарок не несёт convert_stars — клиент
+	// показывает ветку «превратить в уникальный коллекционный»/
+	// «Распаковать» вместо «обменять на звёзды».
+	canUpgrade, actionConvertStars := domain.StarGiftMessageFlags(gift, gift.ConvertStars, prepaidUpgradeStars)
 	media := &domain.MessageMedia{
 		Kind: domain.MessageMediaKindService,
 		ServiceAction: &domain.MessageServiceAction{
 			Kind: domain.MessageServiceActionStarGift,
 			StarGift: applyStarGiftSnapshot(&domain.MessageStarGiftAction{
 				GiftID: gift.ID,
-				// Покупка с включённым улучшением — это обычное сообщение о дарении,
-				// помеченное флагом prepaid_upgrade («отправитель уже оплатил
-				// улучшение»): внутренний gift.stars несёт чистую цену подарка,
-				// а сумма предоплаты выносится во внешний action upgrade_stars.
-				// Клиенты сами складывают gift.stars + upgrade_stars (суммарная цена
-				// в блоке не меняется), а связка prepaid_upgrade + upgrade_stars > 0
-				// включает у получателя кнопку бесплатного «Распаковать» вместо
-				// повторной оплаты улучшения.
+				// Покупка с включённым улучшением — это обычное сообщение о дарении:
+				// флаги prepaid_upgrade не выставляются, внутренний gift.stars несёт
+				// чистую цену подарка, а сумма предоплаты выносится во внешний
+				// action upgrade_stars. Клиенты сами складывают gift.stars +
+				// upgrade_stars (суммарная цена в блоке не меняется), а внешний
+				// upgrade_stars > 0 включает у получателя кнопку бесплатного
+				// «Распаковать» вместо повторной оплаты улучшения.
 				Stars:        gift.Stars,
-				ConvertStars: messageConvertStars,
+				ConvertStars: actionConvertStars,
 				Title:        gift.Title,
 				Sticker:      &sticker,
 				Message:      message,
@@ -1143,8 +1132,7 @@ func (r *Router) deliverStarGift(ctx context.Context, senderID, recipientID int6
 				// подарок виден в вашем профиле» вместо подсказки об
 				// улучшении до уникального коллекционного.
 				Saved:              false,
-				CanUpgrade:         gift.UpgradeStars > 0 && gift.UpgradeIssued < gift.UpgradeTotal,
-				PrepaidUpgrade:     prepaidUpgradeStars > 0,
+				CanUpgrade:         canUpgrade,
 				PrepaidUpgradeHash: prepaidUpgradeHash,
 				UpgradePriceStars:  gift.UpgradeStars,
 				UpgradeStars:       prepaidUpgradeStars,
@@ -1748,18 +1736,15 @@ func tgMessageActionStarGift(in *domain.MessageStarGiftAction) tg.MessageActionC
 		Saved:      in.Saved,
 		NameHidden: in.NameHidden,
 		CanUpgrade: in.CanUpgrade,
+		// convert_stars на самом action (flags.4) — то, что клиенты 12.x читают
+		// в ячейке сервисного сообщения: «…или обменять на N звёзд» и
+		// «Вы обменяли подарок на N звёзд» после конвертации. Без него клиенты
+		// показывали ветку без суммы. Улучшаемые/предоплаченные подарки приходят
+		// сюда с ConvertStars=0 (см. StarGiftMessageFlags) — ветка конвертации
+		// исчезает, остаётся «превратить в уникальный коллекционный».
+		ConvertStars: in.ConvertStars,
 	}
 
-	// convert_stars (flags.4) на уровне messageActionStarGift — единственный
-	// источник подписей «{user} может добавить этот подарок в профиль или
-	// обменять на звёзды» / «Вы можете добавить этот подарок в профиль или
-	// обменять на звёзды» (core.telegram.org/constructor/messageActionStarGift:
-	// "The receiver of this gift may convert it to this many Telegram Stars").
-	// Ранее сумма жила только на внутреннем StarGift, и клиенты считали обмен
-	// недоступным, показывая резервные подписи без упоминания звёзд.
-	if in.ConvertStars > 0 && !in.PrepaidUpgrade {
-		action.SetConvertStars(in.ConvertStars)
-	}
 	if in.Converted {
 		action.SetConverted(true)
 	}
@@ -1877,10 +1862,7 @@ func tgSavedStarGifts(viewerUserID int64, gifts []domain.SavedStarGift, catalog 
 		if g.Owner.Type == domain.PeerTypeChannel && g.SavedID > 0 {
 			item.SetSavedID(g.SavedID)
 		}
-		// У подарка с предоплаченным улучшением конвертация запрещена:
-		// convert_stars не отдаётся, иначе «Подробнее» предложит обмен,
-		// который сервер отклонит.
-		if g.ConvertStars > 0 && g.PrepaidUpgradeStars == 0 {
+		if g.ConvertStars > 0 {
 			item.SetConvertStars(g.ConvertStars)
 		}
 		if g.Message != "" && savedStarGiftOriginalDetailsVisible(viewerUserID, g) {
@@ -1961,12 +1943,6 @@ func tgSavedStarGiftGift(g domain.SavedStarGift, viewerUserID int64, catalog map
 		}
 		out := tgStarGift(gift)
 		out.ConvertStars = g.ConvertStars
-		// У подарка с предоплаченным улучшением конвертация запрещена:
-		// convert_stars не отдаётся, иначе карточка профиля предложит
-		// недоступный обмен.
-		if g.PrepaidUpgradeStars > 0 {
-			out.ConvertStars = 0
-		}
 		if gift.Limited {
 			out.SetAvailabilityRemains(gift.AvailabilityRemains)
 			out.SetAvailabilityTotal(gift.AvailabilityTotal)
@@ -1988,15 +1964,12 @@ func tgSavedStarGiftGift(g domain.SavedStarGift, viewerUserID int64, catalog map
 
 		return out
 	}
-	fallback := &tg.StarGift{
-		ID:      g.GiftID,
-		Sticker: &tg.DocumentEmpty{},
-		Stars:   0,
+	return &tg.StarGift{
+		ID:           g.GiftID,
+		Sticker:      &tg.DocumentEmpty{},
+		Stars:        0,
+		ConvertStars: g.ConvertStars,
 	}
-	if g.PrepaidUpgradeStars == 0 {
-		fallback.ConvertStars = g.ConvertStars
-	}
-	return fallback
 }
 
 func savedStarGiftOriginalDetailsVisible(viewerUserID int64, gift domain.SavedStarGift) bool {
