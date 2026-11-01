@@ -75,7 +75,13 @@ type StarGiftStore interface {
 	DeleteCollection(ctx context.Context, owner domain.Peer, collectionID int) (bool, error)
 	ReorderCollections(ctx context.Context, owner domain.Peer, collectionIDs []int) error
 	SetPinned(ctx context.Context, owner domain.Peer, savedGiftIDs []int64) error
-	GetWhitelistInfo(ctx context.Context, giftID, userID int64) (allowed bool, hidden bool, numbered bool, hasWhitelist bool, err error)
+	// GetWhitelistInfo возвращает спроецированное состояние вайтлиста одного
+	// подарка для зрителя (см. domain.GiftWhitelistInfo): без строки —
+	// domain.NoWhitelist.
+	GetWhitelistInfo(ctx context.Context, giftID, userID int64) (domain.GiftWhitelistInfo, error)
+	// GetWhitelistInfos — батч-вариант для страниц с несколькими подарками;
+	// подарки без строки отсутствуют в карте.
+	GetWhitelistInfos(ctx context.Context, giftIDs []int64, userID int64) (map[int64]domain.GiftWhitelistInfo, error)
 	BurnAuctionGifts(ctx context.Context, giftID int64, count int) error
 }
 
