@@ -471,6 +471,20 @@ func (r *Router) onPaymentsCheckCanSendGift(ctx context.Context, req *tg.Payment
 		return &tg.PaymentsCheckCanSendGiftResultFail{Reason: tg.TextWithEntities{Text: "This gift is sold out."}}, nil
 	}
 
+	// Исчерпанный персональный лимит (starGift.limited_per_user): клиент
+	// получает Fail с тем же текстом, что показывает по ошибке
+	// STARGIFT_USER_USAGE_LIMITED при отправке, — «Вы отправили уже {число}
+	// таких подарков, это максимальное количество».
+	if gift.LimitedPerUser && gift.PerUserTotal > 0 {
+		if usage, ok := r.deps.Gifts.(starGiftUserUsageSource); ok {
+			counts, err := usage.UserPurchaseCounts(ctx, userID, []int64{gift.ID})
+			if err == nil && counts[gift.ID] >= gift.PerUserTotal {
+				reasonText := fmt.Sprintf("Вы отправили уже %d таких подарков, это максимальное количество.", gift.PerUserTotal)
+				return &tg.PaymentsCheckCanSendGiftResultFail{Reason: tg.TextWithEntities{Text: reasonText}}, nil
+			}
+		}
+	}
+
 	return &tg.PaymentsCheckCanSendGiftResultOk{}, nil
 }
 
@@ -1105,6 +1119,12 @@ func starGiftLifecycleErr(err error) error {
 		return tgerr.New(400, "STARGIFT_OWNER_INVALID")
 	case errors.Is(err, domain.ErrStarGiftWithdrawalUnavailable):
 		return tgerr.New(400, "STARGIFT_WITHDRAWAL_UNAVAILABLE")
+	case errors.Is(err, domain.ErrStarGiftUserLimit):
+		// Документация payments.sendStarsForm: «STARGIFT_USER_USAGE_LIMITED:
+		// You've reached the starGift.limited_per_user limit, you can't buy any
+		// more gifts of this type». Клиент по этому коду показывает
+		// «Вы отправили уже {число} таких подарков, это максимальное количество».
+		return tgerr.New(400, "STARGIFT_USER_USAGE_LIMITED")
 	case errors.Is(err, domain.ErrStarGiftCraftUnavailable):
 		return tgerr.New(400, "STARGIFT_CRAFT_UNAVAILABLE")
 	case errors.Is(err, domain.ErrStarGiftNotFound), errors.Is(err, domain.ErrStarGiftResaleUnavailable),
