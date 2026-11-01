@@ -16,7 +16,10 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.22'
+          # go.mod требует go 1.25.0 (и зависимости td/pgx/minio/jwx тоже
+          # объявляют go 1.24–1.25), поэтому тулчейн 1.22 падал на
+          # "go.mod requires go >= 1.25.0 (running go 1.22.x)".
+          go-version: '1.25'
 
           cache: false 
 
