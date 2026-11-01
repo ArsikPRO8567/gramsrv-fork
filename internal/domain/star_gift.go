@@ -71,26 +71,30 @@ func StarGiftUpgradeAvailable(gift StarGift, prepaidUpgradeStars int64) bool {
 }
 
 // StarGiftMessageFlags — матрица флагов messageActionStarGift для ячейки
-// сервисного сообщения (логика ChatActionCell официального клиента 12.x):
+// сервисного сообщения. Калибрована по официальным дампам messageActionStarGift
+// (raw_messages.txt, реальные сообщения официального сервера):
 //
-//   - convert_stars > 0 (и не конвертирован) → подпись «{user} может добавить
-//     этот подарок в профиль или обменять на N звёзд» / «Вы можете добавить…»;
-//   - can_upgrade без convert_stars → «…или превратить в уникальный
-//     коллекционный» (информация об улучшении вытесняет конверт-ветку);
-//   - can_upgrade && upgrade_stars > 0 → ветка бесплатного улучшения:
-//     «Нажмите “Распаковать”…» (получатель) / «{user} сможет превратить…»
-//     (отправитель), конвертация предоплаченного подарка запрещена сервером.
+//   - сообщение 81530: can_upgrade=true И convert_stars=9 на самом action —
+//     улучшаемый и конвертируемый подарок несёт ОБА флага одновременно;
+//   - сообщение 57253: can_upgrade=true И convert_stars=21 — то же сочетание;
+//   - сообщение 183490 (prepaid_upgrade=true): convert_stars отсутствует —
+//     предоплаченное улучшение запрещает конвертацию, поэтому action без него;
+//   - сообщение 100802 (can_upgrade=false): convert_stars=43 — обычный
+//     конвертируемый подарок.
 //
-// Поэтому: улучшаемый или предоплаченный подарок не несёт convert_stars
-// (в самом сообщении), конвертируемый не-улучшаемый — несёт. В профиле
-// (payments.getSavedStarGifts) конвертация не-предоплаченных подарков
-// по-прежнему доступна по данным saved-gift записи.
+// Итог: convert_stars выставляется всегда, когда конвертация разрешена
+// (в т.ч. вместе с can_upgrade — клиент сам совмещает подписи), и убирается
+// только у предоплаченных подарков. action.upgrade_stars несётся только для
+// prepaid (сумма предоплаты), обычная цена улучшения живёт в gift.upgrade_stars.
 func StarGiftMessageFlags(gift StarGift, savedConvertStars, prepaidUpgradeStars int64) (canUpgrade bool, convertStars int64) {
 	canUpgrade = StarGiftUpgradeAvailable(gift, prepaidUpgradeStars)
-	if canUpgrade || prepaidUpgradeStars > 0 {
+	if prepaidUpgradeStars > 0 {
+		// Предоплата улучшения блокирует конвертацию в звёзды
+		// (ConvertStarGift отклоняет такие подарки), поэтому и подпись
+		// конвертации в сервисном сообщении отсутствует (дамп 183490).
 		return canUpgrade, 0
 	}
-	return false, savedConvertStars
+	return canUpgrade, savedConvertStars
 }
 
 // StarGiftBackground is the release-level palette used by auction cards and
@@ -103,24 +107,27 @@ type StarGiftBackground struct {
 
 // SavedStarGift 是一条已收到的礼物实例（peer_star_gifts 一行）。
 type SavedStarGift struct {
-	ID                       int64
-	Owner                    Peer  // 收礼 peer（user/channel）
-	FromUserID               int64 // 送礼人（匿名也保留真实值供账本，下发时按 NameHidden 决定是否暴露）
-	GiftID                   int64 // → StarGift.ID
-	RevisionID               int64 // → star_gift_catalog_revisions.id，历史查询必须按此版本投影
-	MsgID                    int   // 用户礼物的私聊 msg_id；频道礼物不进历史，固定为 0
-	SavedID                  int64 // 频道礼物 inputSavedStarGiftChat.saved_id；用户礼物为 0
-	Date                     int   // 收到时刻 Unix 秒
-	NameHidden               bool  // 送礼人请求隐藏姓名
-	Unsaved                  bool  // 未展示在个人资料（saveStarGift 切换）
-	Converted                bool  // 已转换回 Stars（终态，从列表排除）
-	LifecycleStatus          StarGiftLifecycleStatus
-	ConvertStars             int64  // 转换可退回的 Stars
-	PrepaidUpgradeStars      int64  // 送礼人随礼物预付的唯一礼物升级额
-	PrepaidUpgradeHash       string // 第三方单独代付升级的一次性 entitlement
-	GiftNum                  int    // auction-acquired release number for regular gifts
-	Message                  string // 附言（可选）
-	UniqueGiftID             int64  // 非 0 表示已升级为唯一礼物；与 Converted 互斥
+	ID                  int64
+	Owner               Peer  // 收礼 peer（user/channel）
+	FromUserID          int64 // 送礼人（匿名也保留真实值供账本，下发时按 NameHidden 决定是否暴露）
+	GiftID              int64 // → StarGift.ID
+	RevisionID          int64 // → star_gift_catalog_revisions.id，历史查询必须按此版本投影
+	MsgID               int   // 用户礼物的私聊 msg_id；频道礼物不进历史，固定为 0
+	SavedID             int64 // 频道礼物 inputSavedStarGiftChat.saved_id；用户礼物为 0
+	Date                int   // 收到时刻 Unix 秒
+	NameHidden          bool  // 送礼人请求隐藏姓名
+	Unsaved             bool  // 未展示在个人资料（saveStarGift 切换）
+	Converted           bool  // 已转换回 Stars（终态，从列表排除）
+	LifecycleStatus     StarGiftLifecycleStatus
+	ConvertStars        int64  // 转换可退回的 Stars
+	PrepaidUpgradeStars int64  // 送礼人随礼物预付的唯一礼物升级额
+	PrepaidUpgradeHash  string // 第三方单独代付升级的一次性 entitlement
+	GiftNum             int    // auction-acquired release number for regular gifts
+	Message             string // 附言（可选）
+	// MessageEntities — entity-разметка附言 (премиум-эмодзи и стиль); хранится
+	// в peer_star_gifts.message_entities, отдаётся в savedStarGift.message.
+	MessageEntities          []MessageEntity
+	UniqueGiftID             int64 // 非 0 表示已升级为唯一礼物；与 Converted 互斥
 	TransferStars            int64
 	CanExportAt              int
 	CanTransferAt            int
@@ -284,20 +291,6 @@ type UniqueStarGift struct {
 	OriginalMessage     string
 	OriginalNameHidden  bool
 	CreatedAt           time.Time
-}
-
-// PeerColorCollectibleFromGift выводит официальную палитру сообщений
-// (peerColorCollectible) из атрибутов коллекционного подарка: accent — цвет
-// центра фона, цвета ответной полосы — [центр, край] фона, gift_emoji_id —
-// emoji модели подарка, background_emoji_id — документ узора.
-func PeerColorCollectibleFromGift(g UniqueStarGift) PeerColorCollectible {
-	return PeerColorCollectible{
-		CollectibleID:     g.ID,
-		GiftEmojiID:       g.Model.Document.ID,
-		BackgroundEmojiID: g.Pattern.Document.ID,
-		AccentColor:       g.Backdrop.CenterColor,
-		Colors:            []int{g.Backdrop.CenterColor, g.Backdrop.EdgeColor},
-	}
 }
 
 // CollectibleEmojiStatus projects an immutable unique gift into the complete
@@ -505,14 +498,18 @@ type AdminStarGiftGrantResult struct {
 }
 
 type StarGiftPurchaseRequest struct {
-	BuyerUserID      int64
-	BuyerPremium     bool
-	To               Peer
-	GiftID           int64
-	RevisionID       int64
-	IncludeUpgrade   bool
-	HideName         bool
-	Message          string
+	BuyerUserID    int64
+	BuyerPremium   bool
+	To             Peer
+	GiftID         int64
+	RevisionID     int64
+	IncludeUpgrade bool
+	HideName       bool
+	Message        string
+	// MessageEntities — entity-разметка附言 (премиум-эмодзи и т.п.) из
+	// invoice.message.entities. Валидация формы сравнивает только текст,
+	// разметка следует за покупкой без отдельного поля в star_gift_purchase_forms.
+	MessageEntities  []MessageEntity
 	ChargeStars      int64
 	FormID           int64
 	CommandKey       string
@@ -1103,17 +1100,23 @@ var (
 	ErrStarGiftCollectionNotFound     = errors.New("stargift: collection not found")
 	ErrStarGiftCollectionsFull        = errors.New("stargift: collections full")
 	ErrStarGiftUnavailable            = errors.New("stargift: unavailable")
-	ErrStarGiftOwnerInvalid           = errors.New("stargift: owner invalid")
-	ErrStarGiftTransferUnavailable    = errors.New("stargift: transfer unavailable")
-	ErrStarGiftResaleUnavailable      = errors.New("stargift: resale unavailable")
-	ErrStarGiftOfferInvalid           = errors.New("stargift: offer invalid")
-	ErrStarGiftOfferExpired           = errors.New("stargift: offer expired")
-	ErrStarGiftCraftUnavailable       = errors.New("stargift: craft unavailable")
-	ErrStarGiftAuctionUnavailable     = errors.New("stargift: auction unavailable")
-	ErrStarGiftWithdrawalUnavailable  = errors.New("stargift: withdrawal provider unavailable")
-	ErrStarGiftFormExpired            = errors.New("stargift: payment form expired")
-	ErrStarGiftFormPurposeInvalid     = errors.New("stargift: payment form purpose invalid")
-	ErrStarGiftFormAmountMismatch     = errors.New("stargift: payment form amount mismatch")
+	// ErrStarGiftUserLimit — исчерпан лимит starGift.limited_per_user:
+	// покупатель уже отправил per_user_total таких подарков. Отдаётся
+	// клиентам как STARGIFT_USER_USAGE_LIMITED (400), см. документацию
+	// payments.sendStarsForm — по ней клиент показывает «Вы отправили уже
+	// {число} таких подарков, это максимальное количество».
+	ErrStarGiftUserLimit             = errors.New("stargift: user usage limited")
+	ErrStarGiftOwnerInvalid          = errors.New("stargift: owner invalid")
+	ErrStarGiftTransferUnavailable   = errors.New("stargift: transfer unavailable")
+	ErrStarGiftResaleUnavailable     = errors.New("stargift: resale unavailable")
+	ErrStarGiftOfferInvalid          = errors.New("stargift: offer invalid")
+	ErrStarGiftOfferExpired          = errors.New("stargift: offer expired")
+	ErrStarGiftCraftUnavailable      = errors.New("stargift: craft unavailable")
+	ErrStarGiftAuctionUnavailable    = errors.New("stargift: auction unavailable")
+	ErrStarGiftWithdrawalUnavailable = errors.New("stargift: withdrawal provider unavailable")
+	ErrStarGiftFormExpired           = errors.New("stargift: payment form expired")
+	ErrStarGiftFormPurposeInvalid    = errors.New("stargift: payment form purpose invalid")
+	ErrStarGiftFormAmountMismatch    = errors.New("stargift: payment form amount mismatch")
 	// Раунд 20: ошибки серверных ограничений маркета.
 	// ErrStarGiftOfferNotAllowed — вайтлист подарка (disallow_resell) запрещает
 	// оффер этому пользователю → STARGIFT_OFFER_NOT_ALLOWED.
@@ -1156,7 +1159,7 @@ type StarGiftPriceLimits struct {
 	TonMax   int64
 }
 
-// Allows сообщает, проходит ли цену (в звёздах или нанотон) настроенные лимиты.
+// Allows сообщает, проходит ли цену (в звездах или нанотон) настроенные лимиты.
 func (l StarGiftPriceLimits) Allows(currency StarGiftCurrency, amount int64) bool {
 	var min, max int64
 	if currency == StarGiftCurrencyTON {
