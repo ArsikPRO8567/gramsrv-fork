@@ -160,11 +160,17 @@ func applyTgUserColorFields(out *tg.User, u domain.User) {
 }
 
 func tgUserPeerColor(color domain.PeerColor) tg.PeerColorClass {
-	if color.Empty() {
-		return nil
-	}
+	// Официальный peerColorCollectible самодостаточен: он хранится при
+	// снятых HasColor/background_emoji_id (см. encodePeerColorCollectible),
+	// поэтому проверка Collectible обязана идти ПЕРВОЙ — иначе
+	// color.Empty() отбрасывает снапшот, user.color не выдаётся вовсе и
+	// клиент не показывает установленный цвет ссылок и цитат (ни самому
+	// владельцу после account.updateColor, ни другим пользователям).
 	if !color.Collectible.Empty() {
 		return tgPeerColorCollectible(color.Collectible)
+	}
+	if color.Empty() {
+		return nil
 	}
 	out := &tg.PeerColor{}
 	if color.HasColor {
@@ -177,7 +183,9 @@ func tgUserPeerColor(color domain.PeerColor) tg.PeerColorClass {
 }
 
 // tgPeerColorCollectible проецирует снапшот палитры сообщений коллекционного
-// подарка в официальный peerColorCollectible.
+// подарка в официальный peerColorCollectible. По эталонному дампу
+// dark_accent_color (флаг.0) установлен всегда, а dark_colors (флаг.1) не
+// передаётся — потому тёмный вектор здесь не задаётся намеренно.
 func tgPeerColorCollectible(c domain.PeerColorCollectible) *tg.PeerColorCollectible {
 	out := &tg.PeerColorCollectible{
 		CollectibleID:     c.CollectibleID,
@@ -185,6 +193,9 @@ func tgPeerColorCollectible(c domain.PeerColorCollectible) *tg.PeerColorCollecti
 		BackgroundEmojiID: c.BackgroundEmojiID,
 		AccentColor:       c.AccentColor,
 		Colors:            append([]int(nil), c.Colors...),
+	}
+	if c.DarkAccentColor != 0 {
+		out.SetDarkAccentColor(c.DarkAccentColor)
 	}
 	return out
 }
