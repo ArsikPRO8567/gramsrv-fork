@@ -1,11 +1,13 @@
 package tdesktop
 
 import (
+	"sync"
 	"time"
 
 	"github.com/iamxvbaba/td/tg"
 
 	"telesrv/internal/branding"
+	"telesrv/internal/domain"
 	"telesrv/internal/seed/appearance"
 	"telesrv/internal/seed/catalog"
 )
@@ -208,24 +210,139 @@ func LookupDefaultTheme(input tg.InputThemeClass) (tg.Theme, bool) {
 	return tg.Theme{}, false
 }
 
-// UniqueGiftThemeSettings строит themeSettings для темы чата на базе
-// коллекционного подарка: один набор на каждый base theme из
-// chatThemeBaseThemes (контракт Android: селектор отбрасывает темы, у которых
-// меньше 4 наборов). accent/day — центр фона подарка, тёмные base — край;
-// заливка исходящих и входящих — градиент [центр, край].
-func UniqueGiftThemeSettings(centerColor, edgeColor int) []tg.ThemeSettings {
-	settings := make([]tg.ThemeSettings, 0, len(chatThemeBaseThemes))
-	for _, b := range chatThemeBaseThemes {
-		accent := centerColor
-		if b.dark {
-			accent = edgeColor
-		}
-		ts := tg.ThemeSettings{BaseTheme: b.make(), AccentColor: accent}
-		ts.SetOutboxAccentColor(edgeColor)
-		ts.SetMessageColors([]int{centerColor, edgeColor})
-		settings = append(settings, ts)
+// UniqueGiftThemeSettings строит theme_settings для темы чата на базе
+// коллекционного подарка строго по эталонному дампу официального сервера:
+// ровно ДВА набора themeSettings — BaseThemeClassic (флаги: wallpaper) и
+// BaseThemeNight (флаги: message_colors + wallpaper, два цвета). Ранее здесь
+// отдавалось 5 наборов без обоев: Android-клиент на такой теме падает
+// (NPE wallPaper.settings == null при открытии меню выбора обоев и при
+// повторном входе в чат с темой), а палитра из двух цветов сбрасывалась.
+//
+// Обои — wallPaper с pattern=true (у ночной ещё dark=true), одним и тем же
+// документом узора для обеих баз (как на эталоне: светлая и тёмная базы ссылаются
+// на один wallPaper) и wallPaperSettings из четырёх цветов фона + intensity
+// 40 (светлая) / -35 (ночная). Документ узора берётся из appearance seed
+// (загружается клиентом с нашего сервера как обычный облачный узор), цвета —
+// из фона подарка (domain.CollectibleChatThemePaletteFromGift).
+func UniqueGiftThemeSettings(gift domain.UniqueStarGift) []tg.ThemeSettings {
+	palette := domain.CollectibleChatThemePaletteFromGift(gift)
+	light := tg.ThemeSettings{BaseTheme: &tg.BaseThemeClassic{}, AccentColor: palette.ClassicAccent}
+	dark := tg.ThemeSettings{
+		BaseTheme:   &tg.BaseThemeNight{},
+		AccentColor: palette.NightAccent,
 	}
-	return settings
+	// Обои опциональны только при пустом seed: у рабочего сервера документ
+	// узора всегда есть, и обе базы получают wallPaper (эталонная форма).
+	if wallpaper, ok := collectibleGiftWallpaper(gift.GiftID); ok {
+		light.SetWallpaper(collectibleWallpaperShade(wallpaper, palette.WallpaperLight, false))
+		dark.SetWallpaper(collectibleWallpaperShade(wallpaper, palette.WallpaperDark, true))
+	}
+	dark.SetMessageColors([]int{palette.NightMessageColors[0], palette.NightMessageColors[1]})
+	return []tg.ThemeSettings{light, dark}
+}
+
+// collectibleGiftWallpaperOptionsCache — лениво нормируемый каталог светлых
+// pattern-обоев из appearance seed; проекция темы вызывается на каждое
+// сообщение/профиль, поэтому каталог готовится один раз.
+var collectibleGiftWallpaperOptionsCache struct {
+	once    sync.Once
+	options []appearance.Wallpaper
+	// gameWallpaper — светлые pattern-обои игровой (🎮) встроенной темы:
+	// владелец сервера закрепил её узор за темами коллекционных подарков
+	// (раньше выбор по gift_id давал «зимние» узоры, воспринимавшиеся как
+	// ошибка). gameFound отличает «нашли» от «не нашли» — явный флаг
+	// надёжнее нулевого id.
+	gameWallpaper appearance.Wallpaper
+	gameFound     bool
+}
+
+// collectibleGiftChatThemeEmoticon — эмодзи игровой встроенной темы в seed.
+const collectibleGiftChatThemeEmoticon = "\U0001f3ae"
+
+// collectibleGiftWallpaper выбирает документ узора обоев темы чата из
+// appearance seed: официально у коллекции один wallPaper, identity (id/
+// access_hash/slug/документ) резолвится LookupWallPaper'ом для вложенных обоев
+// тем. Узор всегда берётся игровой (🎮) встроенной темы — по прямому
+// требованию владельца сервера; детерминированный выбор по gift_id сохранён
+// лишь как запасной путь на случай отсутствия 🎮-темы в нестандартном seed.
+func collectibleGiftWallpaper(giftID int64) (appearance.Wallpaper, bool) {
+	collectibleGiftWallpaperOptionsCache.once.Do(func() {
+		catalog := appearance.Default()
+		seen := make(map[int64]bool)
+		for _, theme := range catalog.ChatThemes {
+			for _, setting := range theme.Settings {
+				wallpaper := setting.Wallpaper
+				if wallpaper.Type != 0 || !wallpaper.Pattern || wallpaper.Dark ||
+					wallpaper.Document.ID == 0 || wallpaper.Document.Path == "" {
+					continue
+				}
+				if seen[wallpaper.ID] {
+					continue
+				}
+				seen[wallpaper.ID] = true
+				collectibleGiftWallpaperOptionsCache.options = append(collectibleGiftWallpaperOptionsCache.options, wallpaper)
+			}
+			if theme.Emoticon == collectibleGiftChatThemeEmoticon && !collectibleGiftWallpaperOptionsCache.gameFound {
+				for _, setting := range theme.Settings {
+					wallpaper := setting.Wallpaper
+					if wallpaper.Type == 0 && wallpaper.Pattern && !wallpaper.Dark &&
+						wallpaper.Document.ID != 0 && wallpaper.Document.Path != "" {
+						collectibleGiftWallpaperOptionsCache.gameWallpaper = wallpaper
+						collectibleGiftWallpaperOptionsCache.gameFound = true
+						break
+					}
+				}
+			}
+		}
+		// Стабильный порядок — по id, чтобы запасной выбор не зависел
+		// от порядка seed.
+		options := collectibleGiftWallpaperOptionsCache.options
+		for i := 1; i < len(options); i++ {
+			for j := i; j > 0 && options[j].ID < options[j-1].ID; j-- {
+				options[j], options[j-1] = options[j-1], options[j]
+			}
+		}
+	})
+	if collectibleGiftWallpaperOptionsCache.gameFound {
+		return collectibleGiftWallpaperOptionsCache.gameWallpaper, true
+	}
+	options := collectibleGiftWallpaperOptionsCache.options
+	if len(options) == 0 {
+		return appearance.Wallpaper{}, false
+	}
+	index := giftID % int64(len(options))
+	if index < 0 {
+		index = -index
+	}
+	return options[index], true
+}
+
+// collectibleWallpaperShade строит wallPaper одного оттенка (светлый/ночной)
+// поверх identity из seed: флаги pattern (+dark) и свежие wallPaperSettings
+// с цветами подарка. По эталону intensity 40 у светлой и -35 у ночной базы.
+func collectibleWallpaperShade(base appearance.Wallpaper, colors domain.CollectibleWallpaperColors, dark bool) *tg.WallPaper {
+	out := &tg.WallPaper{
+		ID:         base.ID,
+		AccessHash: base.AccessHash,
+		Slug:       base.Slug,
+		Document:   DefaultDocument(base.Document),
+	}
+	out.SetPattern(true)
+	if dark {
+		out.SetDark(true)
+	}
+	settings := tg.WallPaperSettings{}
+	settings.SetBackgroundColor(colors.Background)
+	settings.SetSecondBackgroundColor(colors.Second)
+	settings.SetThirdBackgroundColor(colors.Third)
+	settings.SetFourthBackgroundColor(colors.Fourth)
+	intensity := domain.CollectibleChatThemeIntensityLight
+	if dark {
+		intensity = domain.CollectibleChatThemeIntensityDark
+	}
+	settings.SetIntensity(intensity)
+	out.SetSettings(settings)
+	return out
 }
 
 func UniqueGiftChatThemes(hash int64) tg.AccountChatThemesClass {
