@@ -11,7 +11,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"unicode/utf16"
 
 	"github.com/iamxvbaba/td/tg"
 	"github.com/iamxvbaba/td/tgerr"
@@ -26,6 +25,24 @@ import (
 // 并由持久 notification job 向启用通知的礼物管理员投递私聊 service message。
 
 func starGiftInvalidErr() error { return tgerr.New(400, "STARGIFT_INVALID") }
+
+// stargiftUpgradeUnavailableErr — документированная ошибка payments.getPaymentForm:
+// «A received gift can only be upgraded to a collectible gift if the
+// can_upgrade flag is set»; используется и для запрета улучшений вайтлистом.
+func stargiftUpgradeUnavailableErr() error { return tgerr.New(400, "STARGIFT_UPGRADE_UNAVAILABLE") }
+
+// stargiftResellNotAllowedErr — вайтлист подарка (disallow_resell) запрещает
+// покупку улучшенного экземпляра с маркета этому пользователю.
+func stargiftResellNotAllowedErr() error { return tgerr.New(400, "STARGIFT_RESELL_NOT_ALLOWED") }
+
+// stargiftOfferNotAllowedErr — документированная ошибка payments.sendStarGiftOffer;
+// используется и для запрета офферов вайтлистом (disallow_resell).
+func stargiftOfferNotAllowedErr() error { return tgerr.New(400, "STARGIFT_OFFER_NOT_ALLOWED") }
+
+// resellPriceTooFewErr / resellPriceTooMuchErr — документированные ошибки
+// payments.sendStarGiftOffer для цены вне лимитов; применяются и к листингам.
+func resellPriceTooFewErr() error  { return tgerr.New(400, "RESELL_STARS_TOO_FEW") }
+func resellPriceTooMuchErr() error { return tgerr.New(400, "RESELL_STARS_TOO_MUCH") }
 
 // stargiftUsageLimitedErr mirrors the official server response for gifts whose
 // gift_whitelists row restricts sending/bidding to a specific account list:
@@ -355,18 +372,17 @@ func (r *Router) onPaymentsGetStarGifts(ctx context.Context, hash int) (tg.Payme
 
 	filteredCatalog := make([]domain.StarGift, 0, len(catalog))
 	for _, g := range catalog {
-		allowed, hidden, _, _ := r.getGiftWhitelistData(ctx, g.ID, userID)
+		info := r.getGiftWhitelistData(ctx, g.ID, userID)
 
-		// Скрытие управляется ТОЛЬКО флагом gift_hidden: при True подарок виден
-		// только вайтлист-пользователям (allowed). Запись в gift_whitelists без
-		// gift_hidden ни на что не влияет — подарок виден всем.
-		if hidden && !allowed {
+		// Скрытие управляется ТОЛЬКО флагом gift_hidden (при активном
+		// apply_whitelist): при True подарок виден только вайтлист-пользователям
+		// (allowed). Запись в gift_whitelists без gift_hidden ни на что не
+		// влияет — подарок виден всем.
+		if info.Hidden && !info.Allowed {
 			continue
 		}
 		filteredCatalog = append(filteredCatalog, g)
 	}
-
-	applyStarGiftPerUserRemains(ctx, r, userID, filteredCatalog)
 
 	sort.SliceStable(filteredCatalog, func(i, j int) bool {
 		soldI := filteredCatalog[i].SoldOut || (filteredCatalog[i].Limited && filteredCatalog[i].AvailabilityRemains <= 0)
@@ -383,58 +399,6 @@ func (r *Router) onPaymentsGetStarGifts(ctx context.Context, hash int) (tg.Payme
 		Chats: []tg.ChatClass{},
 		Users: []tg.UserClass{},
 	}, nil
-}
-
-// starGiftUserUsageSource — необязательная возможность хранилища подарков:
-// отдать, сколько экземпляров каждого подарка уже купил конкретный
-// пользователь (таблица star_gift_user_purchases). Нужна для убывающего
-// счётчика starGift.per_user_remains в каталоге payments.getStarGifts.
-type starGiftUserUsageSource interface {
-	UserPurchaseCounts(ctx context.Context, userID int64, giftIDs []int64) (map[int64]int, error)
-}
-
-// applyStarGiftPerUserRemains пересчитывает per_user_remains каталога под
-// конкретного зрителя: per_user_total минус число уже отправленных им
-// экземпляров (минимум 0). Дефолтная проекция хранилища всегда кладёт
-// per_user_remains = per_user_total, из-за чего клиент показывал
-// «Подарок отправлен! Можно отправить еще N» с одним и тем же N.
-// Согласно документации starGift (limited_per_user / per_user_total /
-// per_user_remains) остаток персонален: официальные серверы уменьшают его
-// после каждой покупки этим пользователем.
-func applyStarGiftPerUserRemains(ctx context.Context, r *Router, userID int64, catalog []domain.StarGift) {
-	if userID <= 0 || len(catalog) == 0 {
-		return
-	}
-	usage, ok := r.deps.Gifts.(starGiftUserUsageSource)
-	if !ok {
-		return
-	}
-	ids := make([]int64, 0, len(catalog))
-	for _, g := range catalog {
-		if g.LimitedPerUser && g.PerUserTotal > 0 {
-			ids = append(ids, g.ID)
-		}
-	}
-	if len(ids) == 0 {
-		return
-	}
-	counts, err := usage.UserPurchaseCounts(ctx, userID, ids)
-	if err != nil {
-		// Счётчик — косметика каталога: падение не должно ломать выдачу.
-		r.log.Warn("star gift per-user counts failed", zap.Int64("user_id", userID), zap.Error(err))
-		return
-	}
-	for i := range catalog {
-		g := &catalog[i]
-		if !g.LimitedPerUser || g.PerUserTotal <= 0 {
-			continue
-		}
-		remains := g.PerUserTotal - counts[g.ID]
-		if remains < 0 {
-			remains = 0
-		}
-		g.PerUserRemains = remains
-	}
 }
 
 // onPaymentsGetPaymentForm 处理 Stars 专用 invoice：
@@ -724,15 +688,13 @@ func (r *Router) onPaymentsSendStarsForm(ctx context.Context, req *tg.PaymentsSe
 		upgradeStars = gift.UpgradeStars
 	}
 	giftMessage := ""
-	var giftMessageEntities []domain.MessageEntity
 	if m, ok := inv.GetMessage(); ok {
-		giftMessage, giftMessageEntities = clampGiftMessageEntities(m.Text, m.Entities)
+		giftMessage = clampGiftMessage(m.Text)
 	}
 	now := int(r.clock.Now().Unix())
 	purchaseReq := domain.StarGiftPurchaseRequest{BuyerUserID: userID, BuyerPremium: buyerPremium, To: peer,
 		GiftID: gift.ID, RevisionID: gift.RevisionID, IncludeUpgrade: inv.IncludeUpgrade, HideName: inv.HideName, Message: giftMessage,
-		MessageEntities: giftMessageEntities,
-		ChargeStars:     gift.Stars + upgradeStars, FormID: req.FormID, CommandKey: fmt.Sprintf("purchase:%d", req.FormID), Date: now,
+		ChargeStars: gift.Stars + upgradeStars, FormID: req.FormID, CommandKey: fmt.Sprintf("purchase:%d", req.FormID), Date: now,
 		OriginAuthKeyID: rawAuthKeyIDForOrigin(ctx), OriginSessionID: sessionIDOrZero(ctx)}
 	recipientBlocked := false
 	recipientUnsaved := false
@@ -753,7 +715,7 @@ func (r *Router) onPaymentsSendStarsForm(ctx context.Context, req *tg.PaymentsSe
 		if _, err := r.deps.Stars.GetBalance(ctx, userID); err != nil {
 			return nil, starsErr(err)
 		}
-		return r.sendStarGiftMemoryPurchase(ctx, userID, peer, gift, inv, giftMessage, giftMessageEntities, upgradeStars)
+		return r.sendStarGiftMemoryPurchase(ctx, userID, peer, gift, inv, giftMessage, upgradeStars)
 	}
 	if _, err := r.deps.Stars.GetBalance(ctx, userID); err != nil {
 		return nil, starsErr(err)
@@ -893,7 +855,7 @@ func starsPurchaseErr(err error) error {
 }
 
 func (r *Router) sendStarGiftMemoryPurchase(ctx context.Context, userID int64, peer domain.Peer, gift domain.StarGift,
-	inv *tg.InputInvoiceStarGift, giftMessage string, giftMessageEntities []domain.MessageEntity, upgradeStars int64) (tg.PaymentsPaymentResultClass, error) {
+	inv *tg.InputInvoiceStarGift, giftMessage string, upgradeStars int64) (tg.PaymentsPaymentResultClass, error) {
 	purchaseStars := gift.Stars + upgradeStars
 	balance, err := r.deps.Stars.Debit(ctx, userID, purchaseStars, domain.StarsReasonGift, peer, "Star gift", gift.Title)
 	if err != nil {
@@ -902,9 +864,9 @@ func (r *Router) sendStarGiftMemoryPurchase(ctx context.Context, userID int64, p
 	var updates *tg.Updates
 	switch peer.Type {
 	case domain.PeerTypeUser:
-		_, updates, err = r.sendStarGiftToUser(ctx, userID, peer.ID, gift, inv.HideName, giftMessage, giftMessageEntities, upgradeStars)
+		_, updates, err = r.sendStarGiftToUser(ctx, userID, peer.ID, gift, inv.HideName, giftMessage, upgradeStars)
 	case domain.PeerTypeChannel:
-		_, updates, err = r.sendStarGiftToChannel(ctx, userID, peer.ID, gift, inv.HideName, giftMessage, giftMessageEntities, upgradeStars)
+		_, updates, err = r.sendStarGiftToChannel(ctx, userID, peer.ID, gift, inv.HideName, giftMessage, upgradeStars)
 	default:
 		err = domain.ErrStarGiftInvalid
 	}
@@ -1009,8 +971,7 @@ func (r *Router) sendStarsTopupForm(ctx context.Context, userID, formID int64, i
 	return &tg.PaymentsPaymentResult{Updates: starsBalanceUpdates(result.Balance.Balance, r.clock.Now().Unix())}, nil
 }
 
-func (r *Router) sendStarGiftToUser(ctx context.Context, senderID, recipientID int64, gift domain.StarGift, hideName bool,
-	message string, messageEntities []domain.MessageEntity, prepaidUpgradeStars int64) (domain.SavedStarGiftRef, *tg.Updates, error) {
+func (r *Router) sendStarGiftToUser(ctx context.Context, senderID, recipientID int64, gift domain.StarGift, hideName bool, message string, prepaidUpgradeStars int64) (domain.SavedStarGiftRef, *tg.Updates, error) {
 	unsaved, err := r.starGiftRecipientUnsaved(ctx, senderID, domain.Peer{Type: domain.PeerTypeUser, ID: recipientID})
 	if err != nil {
 		return domain.SavedStarGiftRef{}, nil, err
@@ -1024,7 +985,7 @@ func (r *Router) sendStarGiftToUser(ctx context.Context, senderID, recipientID i
 		prepaidUpgradeHash = base64.RawURLEncoding.EncodeToString(token[:])
 	}
 	// 2. 投递礼物服务消息到收礼人私聊（双盒 + 推送）。
-	send, err := r.deliverStarGift(ctx, senderID, recipientID, gift, hideName, message, messageEntities, prepaidUpgradeStars, prepaidUpgradeHash)
+	send, err := r.deliverStarGift(ctx, senderID, recipientID, gift, hideName, message, prepaidUpgradeStars, prepaidUpgradeHash)
 	if err != nil {
 		return domain.SavedStarGiftRef{}, nil, err
 	}
@@ -1042,7 +1003,6 @@ func (r *Router) sendStarGiftToUser(ctx context.Context, senderID, recipientID i
 		PrepaidUpgradeStars: prepaidUpgradeStars,
 		PrepaidUpgradeHash:  prepaidUpgradeHash,
 		Message:             message,
-		MessageEntities:     messageEntities,
 	}); err != nil {
 		return domain.SavedStarGiftRef{}, nil, err
 	}
@@ -1055,8 +1015,7 @@ func (r *Router) sendStarGiftToUser(ctx context.Context, senderID, recipientID i
 	return ref, tgPrivateMessageUpdates(send.SenderEvent, send.SenderMessage, 0, false, users, chats), nil
 }
 
-func (r *Router) sendStarGiftToChannel(ctx context.Context, senderID, channelID int64, gift domain.StarGift, hideName bool,
-	message string, messageEntities []domain.MessageEntity, prepaidUpgradeStars int64) (domain.SavedStarGiftRef, *tg.Updates, error) {
+func (r *Router) sendStarGiftToChannel(ctx context.Context, senderID, channelID int64, gift domain.StarGift, hideName bool, message string, prepaidUpgradeStars int64) (domain.SavedStarGiftRef, *tg.Updates, error) {
 	now := int(r.clock.Now().Unix())
 	sticker := gift.Sticker
 	action := domain.ChannelMessageAction{
@@ -1071,7 +1030,6 @@ func (r *Router) sendStarGiftToChannel(ctx context.Context, senderID, channelID 
 			Title:             gift.Title,
 			Sticker:           &sticker,
 			Message:           message,
-			MessageEntities:   messageEntities,
 			FromUserID:        senderID,
 			To:                domain.Peer{Type: domain.PeerTypeChannel, ID: channelID},
 			NameHidden:        hideName,
@@ -1093,7 +1051,6 @@ func (r *Router) sendStarGiftToChannel(ctx context.Context, senderID, channelID 
 		ConvertStars:        gift.ConvertStars,
 		PrepaidUpgradeStars: prepaidUpgradeStars,
 		Message:             message,
-		MessageEntities:     messageEntities,
 	})
 	if err != nil {
 		return domain.SavedStarGiftRef{}, nil, err
@@ -1138,21 +1095,6 @@ func applyStarGiftSnapshot(action *domain.MessageStarGiftAction, gift domain.Sta
 		action.AvailabilityTotal = gift.AvailabilityTotal
 		action.AvailabilityRemains = gift.AvailabilityRemains
 	}
-	// Полный снимок каталога (официальные дампы 81530/57253/100802: блок
-	// подарка в сервисном сообщении несёт limited, sold_out, даты продаж,
-	// peer_color_available — как catalog-проекция tgStarGift).
-	action.Limited = gift.Limited
-	soldOut := gift.SoldOut || (gift.Limited && gift.AvailabilityRemains <= 0)
-	if soldOut {
-		action.SoldOut = true
-		// Даты продаж рисуются клиентом только у sold-out подарка
-		// (дампы 81530/57253), поэтому выставляем их вместе с флагом.
-		action.FirstSaleDate = gift.FirstSaleDate
-		action.LastSaleDate = gift.LastSaleDate
-	}
-	if gift.PeerColorAvailable {
-		action.PeerColorAvailable = true
-	}
 	if releasedBy := gift.ReleasedBy; releasedBy.Type == domain.PeerTypeUser || releasedBy.Type == domain.PeerTypeChannel {
 		released := releasedBy
 		action.ReleasedBy = &released
@@ -1170,8 +1112,7 @@ func applyStarGiftSnapshot(action *domain.MessageStarGiftAction, gift domain.Sta
 }
 
 // deliverStarGift 经 SendPrivateText 把 messageActionStarGift 服务消息投递到收礼人私聊。
-func (r *Router) deliverStarGift(ctx context.Context, senderID, recipientID int64, gift domain.StarGift, hideName bool,
-	message string, messageEntities []domain.MessageEntity, prepaidUpgradeStars int64, prepaidUpgradeHash string) (domain.SendPrivateTextResult, error) {
+func (r *Router) deliverStarGift(ctx context.Context, senderID, recipientID int64, gift domain.StarGift, hideName bool, message string, prepaidUpgradeStars int64, prepaidUpgradeHash string) (domain.SendPrivateTextResult, error) {
 	recipientBlocked, err := r.peerBlocksUser(ctx, senderID, recipientID)
 	if err != nil {
 		return domain.SendPrivateTextResult{}, err
@@ -1179,9 +1120,9 @@ func (r *Router) deliverStarGift(ctx context.Context, senderID, recipientID int6
 	sessionID, _ := SessionIDFrom(ctx)
 	sticker := gift.Sticker
 	// Матрица подписей сервисного сообщения (см. StarGiftMessageFlags):
-	// convert_stars живёт на action всегда, когда конвертация разрешена
-	// (в том числе одновременно с can_upgrade — официальные дампы 81530/57253),
-	// и убирается только у предоплаченных подарков (дамп 183490).
+	// улучшаемый/предоплаченный подарок не несёт convert_stars — клиент
+	// показывает ветку «превратить в уникальный коллекционный»/
+	// «Распаковать» вместо «обменять на звёзды».
 	canUpgrade, actionConvertStars := domain.StarGiftMessageFlags(gift, gift.ConvertStars, prepaidUpgradeStars)
 	media := &domain.MessageMedia{
 		Kind: domain.MessageMediaKindService,
@@ -1196,16 +1137,15 @@ func (r *Router) deliverStarGift(ctx context.Context, senderID, recipientID int6
 				// upgrade_stars (суммарная цена в блоке не меняется), а внешний
 				// upgrade_stars > 0 включает у получателя кнопку бесплатного
 				// «Распаковать» вместо повторной оплаты улучшения.
-				Stars:           gift.Stars,
-				ConvertStars:    actionConvertStars,
-				Title:           gift.Title,
-				Sticker:         &sticker,
-				Message:         message,
-				MessageEntities: messageEntities,
-				FromUserID:      senderID,
-				PeerUserID:      recipientID,
-				To:              domain.Peer{Type: domain.PeerTypeUser, ID: recipientID},
-				NameHidden:      hideName,
+				Stars:        gift.Stars,
+				ConvertStars: actionConvertStars,
+				Title:        gift.Title,
+				Sticker:      &sticker,
+				Message:      message,
+				FromUserID:   senderID,
+				PeerUserID:   recipientID,
+				To:           domain.Peer{Type: domain.PeerTypeUser, ID: recipientID},
+				NameHidden:   hideName,
 				// Свежий подарок ещё не отображается в профиле получателя:
 				// Saved=false — иначе клиент получателя показывает «сейчас
 				// подарок виден в вашем профиле» вместо подсказки об
@@ -1597,7 +1537,17 @@ func (r *Router) tgSavedStarGiftsResponse(ctx context.Context, viewerUserID int6
 	if err != nil {
 		return nil, err
 	}
-	projected := tgSavedStarGifts(viewerUserID, gifts, catalog, availability)
+	// Вайтлисты коллекционных подарков страницы одной пачкой (раунд 20):
+	// при disallow_resell не-вайтлист зритель не получает offer_min_stars —
+	// кнопка «Предложить сделку» скрыта и на страницах профилей.
+	whitelistedGiftIDs := make([]int64, 0, len(gifts))
+	for i := range gifts {
+		if gifts[i].Unique != nil {
+			whitelistedGiftIDs = append(whitelistedGiftIDs, gifts[i].Unique.GiftID)
+		}
+	}
+	whitelists := r.giftWhitelistInfos(ctx, whitelistedGiftIDs, viewerUserID)
+	projected := tgSavedStarGifts(viewerUserID, gifts, catalog, availability, whitelists)
 	out := &tg.PaymentsSavedStarGifts{
 		Count: count,
 		Gifts: projected,
@@ -1765,11 +1715,6 @@ func tgMessageActionStarGift(in *domain.MessageStarGiftAction) tg.MessageActionC
 		ID:           in.GiftID,
 		Stars:        in.Stars,
 		ConvertStars: in.ConvertStars,
-		// Полный снимок каталога (официальные дампы 81530/57253/100802):
-		// limited и sold_out живут в action-копии StarGift, даты продаж —
-		// только у sold-out (как в catalog-проекции tgStarGift).
-		Limited:            in.Limited,
-		PeerColorAvailable: in.PeerColorAvailable,
 	}
 	if in.Sticker != nil {
 		gift.Sticker = tgDocument(*in.Sticker)
@@ -1792,15 +1737,6 @@ func tgMessageActionStarGift(in *domain.MessageStarGiftAction) tg.MessageActionC
 		gift.SetAvailabilityRemains(in.AvailabilityRemains)
 	} else if in.AvailabilityRemains > 0 {
 		gift.SetAvailabilityRemains(in.AvailabilityRemains)
-	}
-	if in.SoldOut {
-		gift.SetSoldOut(true)
-		if in.FirstSaleDate > 0 {
-			gift.SetFirstSaleDate(in.FirstSaleDate)
-		}
-		if in.LastSaleDate > 0 {
-			gift.SetLastSaleDate(in.LastSaleDate)
-		}
 	}
 	if in.UpgradeVariants > 0 {
 		gift.SetUpgradeVariants(in.UpgradeVariants)
@@ -1831,10 +1767,10 @@ func tgMessageActionStarGift(in *domain.MessageStarGiftAction) tg.MessageActionC
 		CanUpgrade: in.CanUpgrade,
 		// convert_stars на самом action (flags.4) — то, что клиенты 12.x читают
 		// в ячейке сервисного сообщения: «…или обменять на N звёзд» и
-		// «Вы обменяли подарок на N звёзд» после конвертации. По официальным
-		// дампам (81530/57253) он выставляется одновременно с can_upgrade;
-		// отсутствует только у предоплаченных подарков (дамп 183490,
-		// StarGiftMessageFlags возвращает для них 0).
+		// «Вы обменяли подарок на N звёзд» после конвертации. Без него клиенты
+		// показывали ветку без суммы. Улучшаемые/предоплаченные подарки приходят
+		// сюда с ConvertStars=0 (см. StarGiftMessageFlags) — ветка конвертации
+		// исчезает, остаётся «превратить в уникальный коллекционный».
 		ConvertStars: in.ConvertStars,
 	}
 
@@ -1869,14 +1805,7 @@ func tgMessageActionStarGift(in *domain.MessageStarGiftAction) tg.MessageActionC
 		action.SetPrepaidUpgradeHash(in.PrepaidUpgradeHash)
 	}
 	if in.Message != "" {
-		msg := tg.TextWithEntities{Text: in.Message}
-		// Премиум-эмодзи и стиль附言: entity-разметка сохраняется при
-		// покупке и отдаётся обеим сторонам, как на оригинальном сервере
-		// (дамп 57253: message=TextWithEntities{...}).
-		if ents := tgMessageEntities(in.MessageEntities); len(ents) > 0 {
-			msg.Entities = ents
-		}
-		action.SetMessage(msg)
+		action.SetMessage(tg.TextWithEntities{Text: in.Message})
 	}
 
 	// from_id is the gift sender. hide_name only hides the sender on the
@@ -1940,12 +1869,12 @@ func (r *Router) resolveStarGiftCatalog(ctx context.Context, gifts []domain.Save
 }
 
 // tgSavedStarGifts 把已收到礼物实例投影为 []tg.SavedStarGift。
-func tgSavedStarGifts(viewerUserID int64, gifts []domain.SavedStarGift, catalog map[int64]domain.StarGift, availability map[int64]domain.StarGiftCollectibleAvailability) []tg.SavedStarGift {
+func tgSavedStarGifts(viewerUserID int64, gifts []domain.SavedStarGift, catalog map[int64]domain.StarGift, availability map[int64]domain.StarGiftCollectibleAvailability, whitelists ...map[int64]domain.GiftWhitelistInfo) []tg.SavedStarGift {
 	out := make([]tg.SavedStarGift, 0, len(gifts))
 	for _, g := range gifts {
 		item := tg.SavedStarGift{
 			Date: g.Date,
-			Gift: tgSavedStarGiftGift(g, viewerUserID, catalog, availability),
+			Gift: tgSavedStarGiftGift(g, viewerUserID, catalog, availability, whitelists...),
 		}
 		if g.NameHidden {
 			item.NameHidden = true
@@ -1966,13 +1895,7 @@ func tgSavedStarGifts(viewerUserID int64, gifts []domain.SavedStarGift, catalog 
 			item.SetConvertStars(g.ConvertStars)
 		}
 		if g.Message != "" && savedStarGiftOriginalDetailsVisible(viewerUserID, g) {
-			msg := tg.TextWithEntities{Text: g.Message}
-			// Премиум-эмодзи附言 в профиле: разметка читается из
-			// peer_star_gifts.message_entities (миграция 0181).
-			if ents := tgMessageEntities(g.MessageEntities); len(ents) > 0 {
-				msg.Entities = ents
-			}
-			item.SetMessage(msg)
+			item.SetMessage(tg.TextWithEntities{Text: g.Message})
 		}
 		if g.UniqueGiftID == 0 {
 			current, available := availability[g.GiftID]
@@ -2036,10 +1959,17 @@ func tgSavedStarGifts(viewerUserID int64, gifts []domain.SavedStarGift, catalog 
 
 // tgSavedStarGiftGift 按收到时的不可变 revision 投影，目录停用或后续改版不影响历史显示。
 // viewerUserID нужен, чтобы не отдавать владельцу его же offer_min_stars (кнопка
-// «Предложить сделку» на собственном подарке).
-func tgSavedStarGiftGift(g domain.SavedStarGift, viewerUserID int64, catalog map[int64]domain.StarGift, availability map[int64]domain.StarGiftCollectibleAvailability) tg.StarGiftClass {
+// «Предложить сделку» на собственном подарке); whitelists (раунд 20) дополнительно
+// скрывает кнопку у не-вайтлист зрителей подарков с disallow_resell.
+func tgSavedStarGiftGift(g domain.SavedStarGift, viewerUserID int64, catalog map[int64]domain.StarGift, availability map[int64]domain.StarGiftCollectibleAvailability, whitelists ...map[int64]domain.GiftWhitelistInfo) tg.StarGiftClass {
 	if g.Unique != nil {
-		return tgUniqueStarGiftForViewer(*g.Unique, viewerUserID)
+		out := tgUniqueStarGiftForViewer(*g.Unique, viewerUserID)
+		for _, wl := range whitelists {
+			if info, ok := wl[g.Unique.GiftID]; ok && info.HasWhitelist && info.DisallowResell && !info.Allowed {
+				hideUniqueGiftOfferFlag(out)
+			}
+		}
+		return out
 	}
 	if gift, ok := catalog[g.RevisionID]; ok {
 		if current, ok := availability[g.GiftID]; ok {
@@ -2125,49 +2055,20 @@ func clampGiftMessage(s string) string {
 	return s
 }
 
-// clampGiftMessageEntities обрезает附言 к подарку и оставляет только entities,
-// целиком попадающие в обрезанный текст. Смещения entity в TL считаются в
-// единицах UTF-16, поэтому границы сверяются в UTF-16-длине текста, а не в
-// рунах. Разметка нужна клиенту, чтобы отрисовать премиум-эмодзи в сообщении
-// к подарку (на оригинальном сервере они сохраняются).
-func clampGiftMessageEntities(s string, entities []tg.MessageEntityClass) (string, []domain.MessageEntity) {
-	text := clampGiftMessage(s)
-	if len(entities) == 0 {
-		return text, nil
-	}
-	converted := domainMessageEntitiesForViewer(0, entities)
-	// TL-смещения entities считаются в единицах UTF-16.
-	limit := len(utf16.Encode([]rune(text)))
-	out := make([]domain.MessageEntity, 0, len(converted))
-	for _, entity := range converted {
-		if len(out) >= domain.MaxMessageEntityCount {
-			break
-		}
-		if entity.Offset < 0 || entity.Length <= 0 || entity.Offset+entity.Length > limit {
-			continue
-		}
-		out = append(out, entity)
-	}
-	if len(out) == 0 {
-		return text, nil
-	}
-	return text, out
-}
-
-func (r *Router) getGiftWhitelistData(ctx context.Context, giftID, userID int64) (allowed, hidden, numbered, hasWhitelist bool) {
-	allowed, hidden, numbered, hasWhitelist = true, false, false, false
+func (r *Router) getGiftWhitelistData(ctx context.Context, giftID, userID int64) (info domain.GiftWhitelistInfo) {
+	info = domain.NoWhitelist
 	if r.deps.Gifts == nil {
 		return
 	}
 
 	type whitelistFetcher interface {
-		GetWhitelistInfo(ctx context.Context, giftID, userID int64) (bool, bool, bool, bool, error)
+		GetWhitelistInfo(ctx context.Context, giftID, userID int64) (domain.GiftWhitelistInfo, error)
 	}
 
 	if fetcher, ok := r.deps.Gifts.(whitelistFetcher); ok {
-		a, h, n, hw, err := fetcher.GetWhitelistInfo(ctx, giftID, userID)
+		data, err := fetcher.GetWhitelistInfo(ctx, giftID, userID)
 		if err == nil {
-			return a, h, n, hw
+			return data
 		}
 		r.log.Error("whitelist_fetch_failed", zap.Error(err))
 	}
@@ -2179,16 +2080,41 @@ func (r *Router) checkGiftWhitelist(ctx context.Context, userID, giftID int64) e
 		return nil
 	}
 
-	allowed, _, _, hasWhitelist := r.getGiftWhitelistData(ctx, giftID, userID)
+	info := r.getGiftWhitelistData(ctx, giftID, userID)
 
 	// Ограничение ОТПРАВКИ определяется записью в gift_whitelists: если запись для
 	// подарка существует и пользователь не входит в список allowed_buyers, отправка
 	// подарка и ставка в аукционе запрещены (STARGIFT_USAGE_LIMITED). Видимость при
 	// этом не меняется: окно отправки/список/аукцион остаются доступны всем, а
 	// скрытие не-вайтлист пользователей управляется отдельно флагом gift_hidden.
-	if hasWhitelist && !allowed {
+	// (С раунда 20 ограничение действует только при apply_whitelist=true —
+	// гейт уже выполнен в проекции.)
+	if info.HasWhitelist && !info.Allowed {
 		return stargiftUsageLimitedErr()
 	}
 
 	return nil
+}
+
+// giftWhitelistInfos — батч-проекция вайтлистов страницы (один SQL-запрос на
+// страницу подарков одного зрителя). Ошибки не ломают выдачу: страница
+// проецируется так, будто вайтлистов нет (domain.NoWhitelist).
+func (r *Router) giftWhitelistInfos(ctx context.Context, giftIDs []int64, userID int64) map[int64]domain.GiftWhitelistInfo {
+	out := make(map[int64]domain.GiftWhitelistInfo, len(giftIDs))
+	if r.deps.Gifts == nil || len(giftIDs) == 0 {
+		return out
+	}
+
+	type whitelistBatchFetcher interface {
+		GetWhitelistInfos(ctx context.Context, giftIDs []int64, userID int64) (map[int64]domain.GiftWhitelistInfo, error)
+	}
+
+	if fetcher, ok := r.deps.Gifts.(whitelistBatchFetcher); ok {
+		data, err := fetcher.GetWhitelistInfos(ctx, giftIDs, userID)
+		if err == nil {
+			return data
+		}
+		r.log.Error("whitelist_batch_fetch_failed", zap.Error(err))
+	}
+	return out
 }

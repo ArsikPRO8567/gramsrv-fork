@@ -265,21 +265,24 @@ func tgMessageServiceAction(msg domain.Message) tg.MessageActionClass {
 		}
 		return out
 	case domain.MessageServiceActionStarGiftUnique:
-		return tgMessageActionStarGiftUnique(m.ServiceAction.StarGiftUnique)
+		// Раунд 20: проекция с учётом зрителя — владелец не видит
+		// offer_min_stars (кнопку «Предложить сделку») ни на одном экране
+		// своего подарка, включая анимацию улучшения.
+		return tgMessageActionStarGiftUnique(m.ServiceAction.StarGiftUnique, msg.OwnerUserID)
 	case domain.MessageServiceActionStarGiftOffer:
 		action := m.ServiceAction.StarGiftOffer
 		if action == nil {
 			return &tg.MessageActionEmpty{}
 		}
 		return &tg.MessageActionStarGiftPurchaseOffer{Accepted: action.Accepted, Declined: action.Declined,
-			Gift: tgUniqueStarGift(action.Gift), Price: tgStarGiftAmount(action.Price), ExpiresAt: action.ExpiresAt}
+			Gift: tgUniqueStarGiftForViewer(action.Gift, msg.OwnerUserID), Price: tgStarGiftAmount(action.Price), ExpiresAt: action.ExpiresAt}
 	case domain.MessageServiceActionStarGiftOfferDeclined:
 		action := m.ServiceAction.StarGiftOfferDeclined
 		if action == nil {
 			return &tg.MessageActionEmpty{}
 		}
 		return &tg.MessageActionStarGiftPurchaseOfferDeclined{Expired: action.Expired,
-			Gift: tgUniqueStarGift(action.Gift), Price: tgStarGiftAmount(action.Price)}
+			Gift: tgUniqueStarGiftForViewer(action.Gift, msg.OwnerUserID), Price: tgStarGiftAmount(action.Price)}
 	case domain.MessageServiceActionGiftPremium:
 		action := m.ServiceAction.GiftPremium
 		if action == nil || action.Currency == "" || action.Amount <= 0 || action.Days <= 0 {
@@ -302,7 +305,11 @@ func tgMessageServiceAction(msg domain.Message) tg.MessageActionClass {
 	}
 }
 
-func tgMessageActionStarGiftUnique(action *domain.MessageStarGiftUniqueAction) tg.MessageActionClass {
+// tgMessageActionStarGiftUnique проецирует messageActionStarGiftUnique с учётом
+// зрителя (viewerUserID — owner_user_id бокса сообщения): владелец не получает
+// offer_min_stars своего подарка. viewerUserID<=0 (канальные проекции без
+// зрителя) сохраняет прежнее поведение.
+func tgMessageActionStarGiftUnique(action *domain.MessageStarGiftUniqueAction, viewerUserID int64) tg.MessageActionClass {
 	if action == nil {
 		return &tg.MessageActionEmpty{}
 	}
@@ -310,7 +317,7 @@ func tgMessageActionStarGiftUnique(action *domain.MessageStarGiftUniqueAction) t
 		Upgrade: action.Upgrade, Saved: action.Saved, PrepaidUpgrade: action.PrepaidUpgrade,
 		Transferred: action.Transferred, Refunded: action.Refunded, Assigned: action.Assigned,
 		FromOffer: action.FromOffer, Craft: action.Craft,
-		Gift: tgUniqueStarGift(action.Gift),
+		Gift: tgUniqueStarGiftForViewer(action.Gift, viewerUserID),
 	}
 	if action.CanExportAt > 0 {
 		out.SetCanExportAt(action.CanExportAt)

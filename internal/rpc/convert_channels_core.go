@@ -307,7 +307,10 @@ func tgChannelMessageAction(action domain.ChannelMessageAction) tg.MessageAction
 	case domain.ChannelActionStarGift:
 		return tgMessageActionStarGift(action.StarGift)
 	case domain.ChannelActionStarGiftUnique:
-		return tgMessageActionStarGiftUnique(action.StarGiftUnique)
+		// Канальная проекция без зрителя (viewerUserID=0): offer_min_stars
+		// сохраняется, как и раньше — канал не может быть владельцем подарка
+		// с офферами.
+		return tgMessageActionStarGiftUnique(action.StarGiftUnique, 0)
 	case domain.ChannelActionSetChatWallpaper:
 		if wallpaper := tgWallpaper(action.Wallpaper); wallpaper != nil {
 			return &tg.MessageActionSetChatWallPaper{Wallpaper: wallpaper}

@@ -784,7 +784,7 @@ func TestChannelUniqueActionSuppressesCraftReadinessAcrossProfiles(t *testing.T)
 	}
 	action := tgMessageActionStarGiftUnique(&domain.MessageStarGiftUniqueAction{
 		Gift: unique, Peer: unique.Owner, SavedID: 52, Saved: true, CanCraftAt: readyAt,
-	}).(*tg.MessageActionStarGiftUnique)
+	}, 0).(*tg.MessageActionStarGiftUnique)
 	if _, ok := action.GetCanCraftAt(); ok {
 		t.Fatal("channel unique action must not expose can_craft_at")
 	}

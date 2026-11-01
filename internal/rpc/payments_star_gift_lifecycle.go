@@ -139,6 +139,12 @@ func (r *Router) starGiftResaleTarget(ctx context.Context, userID int64, inv *tg
 	if !found || gift.ResellAmount == nil || gift.Burned || gift.OwnerAddress != "" {
 		return domain.UniqueStarGift{}, domain.Peer{}, domain.StarGiftAmount{}, starGiftInvalidErr()
 	}
+	// Вайтлист disallow_resell (раунд 20): покупать улучшенный экземпляр на
+	// маркете могут только пользователи из allowed_buyers; остальным
+	// STARGIFT_RESELL_NOT_ALLOWED возвращается уже на этапе формы покупки.
+	if info := r.getGiftWhitelistData(ctx, gift.GiftID, userID); info.HasWhitelist && info.DisallowResell && !info.Allowed {
+		return domain.UniqueStarGift{}, domain.Peer{}, domain.StarGiftAmount{}, stargiftResellNotAllowedErr()
+	}
 	to, err := r.checkedDomainPeerFromInputPeer(ctx, userID, inv.ToID)
 	if err != nil {
 		return domain.UniqueStarGift{}, domain.Peer{}, domain.StarGiftAmount{}, err
@@ -167,9 +173,7 @@ func (r *Router) starGiftAuctionBidPaymentForm(ctx context.Context, userID int64
 	// Ставки ограничены записью в gift_whitelists: не-вайтлист пользователю
 	// ставку совершить нельзя (STARGIFT_USAGE_LIMITED), при этом сам аукцион
 	// и его статус остаются доступны для просмотра.
-	allowed, _, _, hasWhitelist := r.getGiftWhitelistData(ctx, inv.GiftID, userID)
-
-	if hasWhitelist && !allowed {
+	if info := r.getGiftWhitelistData(ctx, inv.GiftID, userID); info.HasWhitelist && !info.Allowed {
 		return nil, stargiftUsageLimitedErr()
 	}
 
@@ -195,9 +199,7 @@ func (r *Router) sendStarGiftAuctionBidForm(ctx context.Context, userID, formID 
 	// Ставки ограничены записью в gift_whitelists: не-вайтлист пользователю
 	// ставку совершить нельзя (STARGIFT_USAGE_LIMITED), при этом сам аукцион
 	// и его статус остаются доступны для просмотра.
-	allowed, _, _, hasWhitelist := r.getGiftWhitelistData(ctx, inv.GiftID, userID)
-
-	if hasWhitelist && !allowed {
+	if info := r.getGiftWhitelistData(ctx, inv.GiftID, userID); info.HasWhitelist && !info.Allowed {
 		return nil, stargiftUsageLimitedErr()
 	}
 
@@ -281,8 +283,15 @@ func (r *Router) starGiftAuctionBidTarget(ctx context.Context, userID int64, inv
 			return domain.StarGiftAuction{}, domain.Peer{}, 0, err
 		}
 	}
+	// Раунд 20: нижняя граница ставки — максимум из min_bid_amount записи,
+	// текущей лидирующей ставки (последняя ставка становится полом, ниже
+	// которого поставить нельзя) и собственной минимальной ставки пользователя
+	// (повторная ставка строго выше своей собственной).
 	minimum := state.MinBidAmount
-	if oldAmount > 0 {
+	if state.TopBidAmount > minimum {
+		minimum = state.TopBidAmount
+	}
+	if oldAmount > 0 && state.UserState.MinBidAmount > minimum {
 		minimum = state.UserState.MinBidAmount
 	}
 	if inv.BidAmount < minimum || inv.BidAmount <= oldAmount {
@@ -434,9 +443,9 @@ func (r *Router) onPaymentsCheckCanSendGift(ctx context.Context, req *tg.Payment
 	}
 	userID, _, _ := r.currentUserID(ctx)
 
-	allowed, hidden, _, hasWhitelist := r.getGiftWhitelistData(ctx, req.GiftID, userID)
+	info := r.getGiftWhitelistData(ctx, req.GiftID, userID)
 
-	if hidden && !allowed {
+	if info.Hidden && !info.Allowed {
 		return nil, starGiftInvalidErr()
 	}
 
@@ -451,7 +460,7 @@ func (r *Router) onPaymentsCheckCanSendGift(ctx context.Context, req *tg.Payment
 	now := int(r.clock.Now().Unix())
 
 	if gift.LockedUntilDate > now {
-		isWhitelisted := hasWhitelist && allowed
+		isWhitelisted := info.HasWhitelist && info.Allowed
 
 		if !isWhitelisted {
 			if gift.Auction {
@@ -469,20 +478,6 @@ func (r *Router) onPaymentsCheckCanSendGift(ctx context.Context, req *tg.Payment
 
 	if gift.SoldOut || (gift.Limited && gift.AvailabilityRemains <= 0) {
 		return &tg.PaymentsCheckCanSendGiftResultFail{Reason: tg.TextWithEntities{Text: "This gift is sold out."}}, nil
-	}
-
-	// Исчерпанный персональный лимит (starGift.limited_per_user): клиент
-	// получает Fail с тем же текстом, что показывает по ошибке
-	// STARGIFT_USER_USAGE_LIMITED при отправке, — «Вы отправили уже {число}
-	// таких подарков, это максимальное количество».
-	if gift.LimitedPerUser && gift.PerUserTotal > 0 {
-		if usage, ok := r.deps.Gifts.(starGiftUserUsageSource); ok {
-			counts, err := usage.UserPurchaseCounts(ctx, userID, []int64{gift.ID})
-			if err == nil && counts[gift.ID] >= gift.PerUserTotal {
-				reasonText := fmt.Sprintf("Вы отправили уже %d таких подарков, это максимальное количество.", gift.PerUserTotal)
-				return &tg.PaymentsCheckCanSendGiftResultFail{Reason: tg.TextWithEntities{Text: reasonText}}, nil
-			}
-		}
 	}
 
 	return &tg.PaymentsCheckCanSendGiftResultOk{}, nil
@@ -556,11 +551,24 @@ func (r *Router) onPaymentsGetResaleStarGifts(ctx context.Context, req *tg.Payme
 	if err != nil {
 		return nil, starGiftLifecycleErr(err)
 	}
+	viewerID, _, _ := r.currentUserID(ctx)
 	out := &tg.PaymentsResaleStarGifts{Count: page.Count, Gifts: make([]tg.StarGiftClass, 0, len(page.Gifts)),
 		Users: []tg.UserClass{}, Chats: []tg.ChatClass{}}
 	userIDs, channelIDs := make([]int64, 0), make([]int64, 0)
+	// Вайтлисты страницы одной пачкой: при disallow_resell не-вайтлист зритель
+	// не получает offer_min_stars (кнопка «Предложить сделку») для подарков
+	// этой страницы (раунд 20).
+	giftIDs := make([]int64, 0, len(page.Gifts))
 	for _, gift := range page.Gifts {
-		out.Gifts = append(out.Gifts, tgUniqueStarGift(gift))
+		giftIDs = append(giftIDs, gift.GiftID)
+	}
+	whitelists := r.giftWhitelistInfos(ctx, giftIDs, viewerID)
+	for _, gift := range page.Gifts {
+		projected := tgUniqueStarGiftForViewer(gift, viewerID)
+		if info, ok := whitelists[gift.GiftID]; ok && info.HasWhitelist && info.DisallowResell && !info.Allowed {
+			hideUniqueGiftOfferFlag(projected)
+		}
+		out.Gifts = append(out.Gifts, projected)
 		if gift.Owner.Type == domain.PeerTypeUser {
 			userIDs = append(userIDs, gift.Owner.ID)
 		} else if gift.Owner.Type == domain.PeerTypeChannel {
@@ -570,7 +578,6 @@ func (r *Router) onPaymentsGetResaleStarGifts(ctx context.Context, req *tg.Payme
 	if page.NextOffset != "" {
 		out.SetNextOffset(page.NextOffset)
 	}
-	viewerID, _, _ := r.currentUserID(ctx)
 	out.Users = tgUsersForViewer(viewerID, r.domainUsersForIDs(ctx, viewerID, uniqueInt64(userIDs)))
 	out.Chats = r.tgChatsForChannelIDs(ctx, viewerID, uniqueInt64(channelIDs))
 	if attributesHash, requested := req.GetAttributesHash(); requested {
@@ -875,7 +882,7 @@ func (r *Router) onPaymentsGetStarGiftAuctionState(ctx context.Context, req *tg.
 	}
 	// Скрытые (gift_hidden) аукционы не открываются ни по gift_id, ни по slug —
 	// проверка выполняется после резолва подарка, чтобы покрыть и slug-ссылки.
-	if allowed, hidden, _, _ := r.getGiftWhitelistData(ctx, state.Gift.ID, userID); hidden && !allowed {
+	if info := r.getGiftWhitelistData(ctx, state.Gift.ID, userID); info.Hidden && !info.Allowed {
 		return nil, starGiftInvalidErr()
 	}
 	stateClass := tgStarGiftAuctionState(state)
@@ -981,11 +988,25 @@ func tgStarGiftAuctionState(state domain.StarGiftAuction) tg.StarGiftAuctionStat
 	for _, level := range state.BidLevels {
 		levels = append(levels, tg.AuctionBidLevel{Pos: level.Pos, Amount: level.Amount, Date: level.Date})
 	}
+	// Раунд 20: полная карта раундов с индивидуальными длительностями —
+	// клиент показывает длительность первого и всех остальных раундов.
+	// Для раундов без значения в round_durations действует round_duration;
+	// при NULL-jsonb вектор идентичен прежнему поведению для каждого раунда.
+	// Защитный потолок ограничивает размер ответа при вырожденно большом
+	// total_rounds (supply/gifts_per_round).
+	totalRounds := state.TotalRounds
+	if totalRounds > 2000 {
+		totalRounds = 2000
+	}
+	rounds := make([]tg.StarGiftAuctionRoundClass, 0, totalRounds)
+	for round := 1; round <= totalRounds; round++ {
+		rounds = append(rounds, &tg.StarGiftAuctionRound{Num: round, Duration: state.RoundDurationFor(round)})
+	}
 	return &tg.StarGiftAuctionState{Version: state.Version, StartDate: state.StartDate, EndDate: state.EndDate,
 		MinBidAmount: state.MinBidAmount, BidLevels: levels, TopBidders: state.TopBidders,
 		NextRoundAt: state.NextRoundAt, LastGiftNum: state.LastGiftNum, GiftsLeft: state.GiftsLeft,
 		CurrentRound: state.CurrentRound, TotalRounds: state.TotalRounds,
-		Rounds: []tg.StarGiftAuctionRoundClass{&tg.StarGiftAuctionRound{Num: 1, Duration: state.RoundDuration}}}
+		Rounds: rounds}
 }
 
 func tgStarGiftAuctionUserState(state domain.StarGiftAuctionUserState) tg.StarGiftAuctionUserState {
@@ -1117,14 +1138,18 @@ func starGiftLifecycleErr(err error) error {
 		return tgerr.New(400, "STARGIFT_OFFER_EXPIRED")
 	case errors.Is(err, domain.ErrStarGiftOwnerInvalid):
 		return tgerr.New(400, "STARGIFT_OWNER_INVALID")
+	// Раунд 20: серверные ограничения маркета — документированные коды
+	// sendStarGiftOffer плюс пользовательский код для покупки с маркета.
+	case errors.Is(err, domain.ErrStarGiftOfferNotAllowed):
+		return stargiftOfferNotAllowedErr()
+	case errors.Is(err, domain.ErrStarGiftResaleNotAllowed):
+		return stargiftResellNotAllowedErr()
+	case errors.Is(err, domain.ErrStarGiftResalePriceTooLow):
+		return resellPriceTooFewErr()
+	case errors.Is(err, domain.ErrStarGiftResalePriceTooHigh):
+		return resellPriceTooMuchErr()
 	case errors.Is(err, domain.ErrStarGiftWithdrawalUnavailable):
 		return tgerr.New(400, "STARGIFT_WITHDRAWAL_UNAVAILABLE")
-	case errors.Is(err, domain.ErrStarGiftUserLimit):
-		// Документация payments.sendStarsForm: «STARGIFT_USER_USAGE_LIMITED:
-		// You've reached the starGift.limited_per_user limit, you can't buy any
-		// more gifts of this type». Клиент по этому коду показывает
-		// «Вы отправили уже {число} таких подарков, это максимальное количество».
-		return tgerr.New(400, "STARGIFT_USER_USAGE_LIMITED")
 	case errors.Is(err, domain.ErrStarGiftCraftUnavailable):
 		return tgerr.New(400, "STARGIFT_CRAFT_UNAVAILABLE")
 	case errors.Is(err, domain.ErrStarGiftNotFound), errors.Is(err, domain.ErrStarGiftResaleUnavailable),

@@ -18,6 +18,9 @@ func (r *Router) starGiftUpgradePaymentForm(ctx context.Context, userID int64, i
 	if err != nil {
 		return nil, err
 	}
+	if err := r.checkGiftWhitelistUpgrade(ctx, userID, saved.GiftID); err != nil {
+		return nil, err
+	}
 	return &tg.PaymentsPaymentFormStarGift{
 		FormID: starGiftUpgradeFormID(userID, saved.ID, preview.UpgradeStars, inv.KeepOriginalDetails),
 		Invoice: tg.Invoice{
@@ -27,9 +30,24 @@ func (r *Router) starGiftUpgradePaymentForm(ctx context.Context, userID int64, i
 	}, nil
 }
 
+// checkGiftWhitelistUpgrade ограничение вайтлиста disallow_upgrades (раунд 20):
+// улучшать подарок могут только пользователи из allowed_buyers, остальным
+// ошибка STARGIFT_UPGRADE_UNAVAILABLE возвращается уже на этапе получения
+// формы улучшения (нажатия на кнопку «Улучшить»), до оплаты. Флаг уже прогейтен
+// по apply_whitelist; не-вайтлист — это !Allowed.
+func (r *Router) checkGiftWhitelistUpgrade(ctx context.Context, userID, giftID int64) error {
+	if info := r.getGiftWhitelistData(ctx, giftID, userID); info.HasWhitelist && info.DisallowUpgrades && !info.Allowed {
+		return stargiftUpgradeUnavailableErr()
+	}
+	return nil
+}
+
 func (r *Router) sendStarGiftUpgradeForm(ctx context.Context, userID, formID int64, inv *tg.InputInvoiceStarGiftUpgrade) (tg.PaymentsPaymentResultClass, error) {
 	saved, err := r.starGiftUpgradeSavedTarget(ctx, userID, inv.Stargift)
 	if err != nil {
+		return nil, err
+	}
+	if err := r.checkGiftWhitelistUpgrade(ctx, userID, saved.GiftID); err != nil {
 		return nil, err
 	}
 	commandKey := fmt.Sprintf("paid:%d:%d:%t", saved.ID, formID, inv.KeepOriginalDetails)
@@ -80,6 +98,9 @@ func (r *Router) onPaymentsUpgradeStarGift(ctx context.Context, req *tg.Payments
 	}
 	saved, err := r.starGiftUpgradeSavedTarget(ctx, userID, req.Stargift)
 	if err != nil {
+		return nil, err
+	}
+	if err := r.checkGiftWhitelistUpgrade(ctx, userID, saved.GiftID); err != nil {
 		return nil, err
 	}
 	commandKey := fmt.Sprintf("prepaid:%d:%t", saved.ID, req.KeepOriginalDetails)
@@ -282,7 +303,7 @@ func (r *Router) onPaymentsGetUniqueStarGift(ctx context.Context, slug string) (
 		return nil, starGiftInvalidErr()
 	}
 	out := &tg.PaymentsUniqueStarGift{
-		Gift:  tgUniqueStarGiftForViewer(unique, viewerUserID),
+		Gift:  r.uniqueStarGiftForViewer(ctx, unique, viewerUserID),
 		Chats: []tg.ChatClass{},
 		Users: []tg.UserClass{},
 	}
@@ -467,7 +488,7 @@ func tgUniqueGiftChatTheme(gift domain.UniqueStarGift) *tg.ChatThemeUniqueGift {
 func tgUniqueGiftChatThemeForViewer(gift domain.UniqueStarGift, viewerUserID int64) *tg.ChatThemeUniqueGift {
 	return &tg.ChatThemeUniqueGift{
 		Gift:          tgUniqueStarGiftForViewer(gift, viewerUserID),
-		ThemeSettings: tdesktop.UniqueGiftThemeSettings(gift),
+		ThemeSettings: tdesktop.UniqueGiftThemeSettings(gift.Backdrop.CenterColor, gift.Backdrop.EdgeColor),
 	}
 }
 
@@ -477,6 +498,33 @@ func tgUniqueStarGiftForViewer(unique domain.UniqueStarGift, viewerUserID int64)
 		// flag 13 = offer_min_stars; сбрасываем и бит, и значение.
 		out.Flags.Unset(13)
 		out.OfferMinStars = 0
+	}
+	return out
+}
+
+// hideUniqueGiftOfferFlag сбрасывает starGiftUnique.offer_min_stars (flag 13) —
+// единственный серверный маркер кнопки «Предложить сделку» в официальных
+// клиентах. Сброс бита и значения нужен одновременно: клиент читает поле
+// только при активном флаге.
+func hideUniqueGiftOfferFlag(out *tg.StarGiftUnique) {
+	if out == nil {
+		return
+	}
+	out.Flags.Unset(13)
+	out.OfferMinStars = 0
+}
+
+// uniqueStarGiftForViewer — full-проекция экранов коллекционного подарка
+// (раунд 20): владелец не видит кнопку «Предложить сделку» нигде, а при
+// активном вайтлисте disallow_resell её не видит ни один зритель вне
+// allowed_buyers. Вейтлист-ограничение применяется только к user-owned
+// подаркам: у канальных офферов нет по определению.
+func (r *Router) uniqueStarGiftForViewer(ctx context.Context, unique domain.UniqueStarGift, viewerUserID int64) *tg.StarGiftUnique {
+	out := tgUniqueStarGiftForViewer(unique, viewerUserID)
+	if out.OfferMinStars > 0 && unique.Owner.Type == domain.PeerTypeUser && unique.Owner.ID != viewerUserID {
+		if info := r.getGiftWhitelistData(ctx, unique.GiftID, viewerUserID); info.HasWhitelist && info.DisallowResell && !info.Allowed {
+			hideUniqueGiftOfferFlag(out)
+		}
 	}
 	return out
 }
