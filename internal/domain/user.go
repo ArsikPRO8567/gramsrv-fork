@@ -34,6 +34,10 @@ type PeerColorCollectible struct {
 	BackgroundEmojiID int64 `json:"background_emoji_id"`
 	AccentColor       int   `json:"accent_color"`
 	Colors            []int `json:"colors"`
+	// DarkAccentColor — акцент тёмной темы (peerColorCollectible.dark_accent_color,
+	// флаг.0). Официальный сервер всегда передаёт его; тёмный вектор dark_colors
+	// (флаг.1) на эталоне не установлен и потому не проектируется.
+	DarkAccentColor int `json:"dark_accent_color,omitempty"`
 }
 
 // Empty reports whether no collectible palette is present.
@@ -43,7 +47,9 @@ func (c PeerColorCollectible) Empty() bool {
 
 // Valid enforces the complete collectible palette shape. Partial snapshots are
 // forbidden because clients would render a gradient without its pattern emoji
-// or accent color.
+// or accent color. Официальная форма (эталонные дампы) несёт ровно три цвета
+// colors и dark_accent_color; палитры с меньшим числом цветов клиенты
+// отбрасывают и сбрасывают настройку — потому форма строже трёх цветов.
 func (c PeerColorCollectible) Valid() bool {
 	if c.CollectibleID <= 0 || c.GiftEmojiID <= 0 || c.BackgroundEmojiID <= 0 {
 		return false
@@ -51,13 +57,16 @@ func (c PeerColorCollectible) Valid() bool {
 	if c.AccentColor < 0 || c.AccentColor > 0xffffff {
 		return false
 	}
-	if len(c.Colors) == 0 || len(c.Colors) > 3 {
+	if len(c.Colors) != 3 {
 		return false
 	}
 	for _, v := range c.Colors {
 		if v < 0 || v > 0xffffff {
 			return false
 		}
+	}
+	if c.DarkAccentColor < 0 || c.DarkAccentColor > 0xffffff {
+		return false
 	}
 	return true
 }
