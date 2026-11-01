@@ -504,16 +504,6 @@ func (r *Router) onMessagesSetChatTheme(ctx context.Context, req *tg.MessagesSet
 		}
 		return nil, internalErr()
 	}
-	// Официальное правило «один чат на подарок-тему»: перенос темы в
-	// новый чат автоматически снимает её из прежних (без сервисного
-	// сообщения — официальные серверы удаляют её молча). Список
-	// затронутых владельцев возвращает сервис; сбрасываем их проекции,
-	// чтобы userFull.theme обновился на дефолт. Снятие выполняется
-	// сервисом даже при changed=false (повторная установка), поэтому
-	// инвалидация не должна зависеть от res.Changed.
-	for _, clearedUserID := range res.ClearedUserIDs {
-		r.invalidateRPCProjectionForUser(clearedUserID)
-	}
 	if res.Changed {
 		r.invalidateRPCProjectionForPeer(userID, peer)
 		r.invalidateRPCProjectionForPeer(peer.ID, domain.Peer{Type: domain.PeerTypeUser, ID: userID})

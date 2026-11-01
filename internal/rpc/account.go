@@ -1994,11 +1994,7 @@ func (r *Router) onAccountGetCollectibleEmojiStatuses(ctx context.Context, hash 
 			Collectible: collectible,
 		}))
 	}
-	// Соль отличает список коллекционных статусов от каталога обычных emoji:
-	// формат title («{имя} #{номер}») менялся, и клиенты с кэшем по hash
-	// обязаны перезапросить список, иначе увидят старые заголовки.
-	const collectibleStatusesHashSalt = int64(0x6e667423) // "nft#"
-	catalogHash := mediaCatalogHash(ids) ^ collectibleStatusesHashSalt
+	catalogHash := mediaCatalogHash(ids)
 	if hash != 0 && hash == catalogHash {
 		return &tg.AccountEmojiStatusesNotModified{}, nil
 	}
