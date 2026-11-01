@@ -129,22 +129,6 @@ func (s *Service) Catalog(ctx context.Context) ([]domain.StarGift, error) {
 	return append([]domain.StarGift(nil), s.gifts...), nil
 }
 
-// UserPurchaseCounts делегирует в хранилище число уже отправленных пользователем
-// экземпляров подарков (star_gift_user_purchases). Персональный остаток
-// per_user_remains считается в rpc-слое; хранилища без персистентных покупок
-// (in-memory) отдают пустую карту — счётчик просто не убывает.
-func (s *Service) UserPurchaseCounts(ctx context.Context, userID int64, giftIDs []int64) (map[int64]int, error) {
-	if s == nil || s.store == nil {
-		return map[int64]int{}, nil
-	}
-	if src, ok := s.store.(interface {
-		UserPurchaseCounts(ctx context.Context, userID int64, giftIDs []int64) (map[int64]int, error)
-	}); ok {
-		return src.UserPurchaseCounts(ctx, userID, giftIDs)
-	}
-	return map[int64]int{}, nil
-}
-
 func (s *Service) CatalogHash(ctx context.Context) (int, error) {
 	if err := s.ensureCatalog(ctx); err != nil {
 		return 0, err
@@ -1014,11 +998,20 @@ func randomPositiveInt64() (int64, error) {
 	return id, nil
 }
 
-func (s *Service) GetWhitelistInfo(ctx context.Context, giftID, userID int64) (bool, bool, bool, bool, error) {
+func (s *Service) GetWhitelistInfo(ctx context.Context, giftID, userID int64) (domain.GiftWhitelistInfo, error) {
 	if s == nil || s.store == nil {
-		return true, false, false, false, nil
+		return domain.NoWhitelist, nil
 	}
 	return s.store.GetWhitelistInfo(ctx, giftID, userID)
+}
+
+// GetWhitelistInfos — батч-проекция вайтлистов для страниц (один SQL-запрос на
+// страницу). Подарки без строки в gift_whitelists отсутствуют в карте.
+func (s *Service) GetWhitelistInfos(ctx context.Context, giftIDs []int64, userID int64) (map[int64]domain.GiftWhitelistInfo, error) {
+	if s == nil || s.store == nil || len(giftIDs) == 0 {
+		return map[int64]domain.GiftWhitelistInfo{}, nil
+	}
+	return s.store.GetWhitelistInfos(ctx, giftIDs, userID)
 }
 
 func (s *Service) ProcessAuctionRoundEnd(ctx context.Context, giftID int64, actualBids int) error {
