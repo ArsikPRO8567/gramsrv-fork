@@ -1095,6 +1095,14 @@ func run(logger *zap.Logger) error {
 		postgres.WithStarGiftMarketPolicy(domain.StarGiftMarketPolicy{
 			StarsProceedsPermille: cfg.StarGiftStarsProceedsPermille,
 			TONProceedsPermille:   cfg.StarGiftTONProceedsPermille,
+		}),
+		// Лимиты цены маркета (раунд 20): звёзды 125..35000, TON 0.01..10000
+		// по умолчанию; применяются к выставлению на продажу и к офферам.
+		postgres.WithStarGiftPriceLimits(domain.StarGiftPriceLimits{
+			StarsMin: cfg.StarGiftResellMinStars,
+			StarsMax: cfg.StarGiftResellMaxStars,
+			TonMin:   cfg.StarGiftResellMinTon,
+			TonMax:   cfg.StarGiftResellMaxTon,
 		}))
 	starGiftWithdrawalProvider, err := stargifts.NewLocalWithdrawalProvider(cfg.PublicBaseURL)
 	if err != nil {
