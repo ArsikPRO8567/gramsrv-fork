@@ -24,6 +24,7 @@ type StarGiftLifecycleStore struct {
 	messages         *MessageStore
 	tonStartingGrant int64
 	market           domain.StarGiftMarketPolicy
+	priceLimits      domain.StarGiftPriceLimits
 	craftDraw        func(int) (int, error)
 }
 
@@ -33,6 +34,18 @@ func WithStarGiftMarketPolicy(policy domain.StarGiftMarketPolicy) StarGiftLifecy
 	return func(s *StarGiftLifecycleStore) {
 		if policy.Valid() {
 			s.market = policy
+		}
+	}
+}
+
+// WithStarGiftPriceLimits включает серверные лимиты цены листингов и офферов
+// (раунд 20). По умолчанию лимиты выключены (нулевая структура ничего не
+// запрещает), чтобы интеграционные тесты и legacy-развёртывания сохраняли
+// поведение; прод-конструктор передаёт значения из конфига.
+func WithStarGiftPriceLimits(limits domain.StarGiftPriceLimits) StarGiftLifecycleOption {
+	return func(s *StarGiftLifecycleStore) {
+		if limits.Valid() {
+			s.priceLimits = limits
 		}
 	}
 }
@@ -120,13 +133,13 @@ func (s *StarGiftLifecycleStore) ConvertStarGift(ctx context.Context, req domain
 		case domain.PeerTypeChannel:
 			if amount > 0 {
 				if err := tx.QueryRow(ctx, `INSERT INTO channel_stars_balances(channel_id,balance) VALUES($1,$2)
-					ON CONFLICT(channel_id) DO UPDATE SET balance=channel_stars_balances.balance+EXCLUDED.balance,updated_at=now()
-					RETURNING balance`, saved.Owner.ID, amount).Scan(&balanceAfter); err != nil {
+                                        ON CONFLICT(channel_id) DO UPDATE SET balance=channel_stars_balances.balance+EXCLUDED.balance,updated_at=now()
+                                        RETURNING balance`, saved.Owner.ID, amount).Scan(&balanceAfter); err != nil {
 					return fmt.Errorf("credit channel star gift conversion: %w", err)
 				}
 				if _, err := tx.Exec(ctx, `INSERT INTO channel_stars_transactions
-					(channel_id,actor_user_id,amount,reason,peer_type,peer_id,gift_id,date)
-					VALUES($1,$2,$3,$4,$5,$6,$7,$8)`, saved.Owner.ID, req.ActorUserID, amount,
+                                        (channel_id,actor_user_id,amount,reason,peer_type,peer_id,gift_id,date)
+                                        VALUES($1,$2,$3,$4,$5,$6,$7,$8)`, saved.Owner.ID, req.ActorUserID, amount,
 					string(domain.StarsReasonGift), string(from.Type), from.ID, saved.GiftID, req.Date); err != nil {
 					return fmt.Errorf("record channel star gift conversion: %w", err)
 				}
@@ -136,16 +149,16 @@ func (s *StarGiftLifecycleStore) ConvertStarGift(ctx context.Context, req domain
 		}
 
 		if _, err := tx.Exec(ctx, `UPDATE peer_star_gifts
-			SET converted=true,lifecycle_status='converted',unsaved=true,pinned_order=0
-			WHERE id=$1`, saved.ID); err != nil {
+                        SET converted=true,lifecycle_status='converted',unsaved=true,pinned_order=0
+                        WHERE id=$1`, saved.ID); err != nil {
 			return fmt.Errorf("mark star gift converted: %w", err)
 		}
 		if err := removeSavedGiftFromCollections(ctx, tx, saved.Owner, saved.ID); err != nil {
 			return err
 		}
 		if _, err := tx.Exec(ctx, `INSERT INTO star_gift_conversions
-			(saved_gift_id,actor_user_id,owner_peer_type,owner_peer_id,amount,balance_after,converted_at)
-			VALUES($1,$2,$3,$4,$5,$6,$7)`, saved.ID, req.ActorUserID, string(saved.Owner.Type),
+                        (saved_gift_id,actor_user_id,owner_peer_type,owner_peer_id,amount,balance_after,converted_at)
+                        VALUES($1,$2,$3,$4,$5,$6,$7)`, saved.ID, req.ActorUserID, string(saved.Owner.Type),
 			saved.Owner.ID, amount, balanceAfter, req.Date); err != nil {
 			return fmt.Errorf("record star gift conversion command: %w", err)
 		}
@@ -283,6 +296,142 @@ WHERE owner_user_id=$1 AND box_id=$2 AND NOT deleted`, box.OwnerUserID, box.BoxI
 UPDATE private_messages SET media=$3
 WHERE sender_user_id=$1 AND id=$2`, target.MessageSenderID, target.PrivateMessageID, privateMediaJSON); err != nil {
 		return fmt.Errorf("update converted star gift private media: %w", err)
+	}
+	return nil
+}
+
+// classifyResalePrice проверяет цену листинга/оффера против настроенных лимитов
+// (раунд 20) и возвращает точную доменную ошибку для маппинга в
+// RESELL_STARS_TOO_FEW / RESELL_STARS_TOO_MUCH. Лимиты с нулевой границей не
+// действуют; при выключенной политике (нулевая структура) цена всегда проходит.
+func (s *StarGiftLifecycleStore) classifyResalePrice(currency domain.StarGiftCurrency, amount int64) error {
+	if s == nil || s.priceLimits.Allows(currency, amount) {
+		return nil
+	}
+	min := s.priceLimits.StarsMin
+	if currency == domain.StarGiftCurrencyTON {
+		min = s.priceLimits.TonMin
+	}
+	if min > 0 && amount < min {
+		return domain.ErrStarGiftResalePriceTooLow
+	}
+	return domain.ErrStarGiftResalePriceTooHigh
+}
+
+// editStarGiftOfferMessageStateTx обновляет ОБЕ проекции исходного сервисного
+// сообщения-оффера (box продавца offer_msg_id и копию покупателя в том же
+// приватном диалоге): после решения продавца Accepted/Declined клиент
+// показывает статус («принял»/«отклонил») вместо обратного отсчёта, а кнопки
+// Accept/Decline у продавца пропадают (раунд 20). Редактирование выполняется
+// тем же механизмом, что и правка messageActionStarGift при конвертации:
+// перезапись media обеих проекций, pts, media-индекс и durable-событие
+// updateEditMessage для онлайна и difference.
+func (s *StarGiftLifecycleStore) editStarGiftOfferMessageStateTx(
+	ctx context.Context,
+	tx pgx.Tx,
+	ownerUserID int64,
+	offerMsgID int,
+	accepted, declined bool,
+	date int,
+) error {
+	if s == nil || s.messages == nil || date <= 0 || ownerUserID <= 0 || offerMsgID <= 0 {
+		return nil
+	}
+	q := sqlcgen.New(tx)
+	var peerType string
+	var peerID int64
+	err := tx.QueryRow(ctx, `
+SELECT peer_type,peer_id FROM message_boxes
+WHERE owner_user_id=$1 AND box_id=$2 AND NOT deleted
+FOR UPDATE`, ownerUserID, offerMsgID).Scan(&peerType, &peerID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("lock star gift offer message: %w", err)
+	}
+	if peerType != string(domain.PeerTypeUser) || peerID <= 0 {
+		return nil
+	}
+	target, err := q.GetMessageBoxForEdit(ctx, sqlcgen.GetMessageBoxForEditParams{
+		OwnerUserID: ownerUserID, BoxID: int32(offerMsgID), PeerType: peerType, PeerID: peerID,
+	})
+	if err != nil {
+		return fmt.Errorf("load star gift offer message: %w", err)
+	}
+	boxes, err := q.ListVisibleMessageBoxesByPrivateMessage(ctx, sqlcgen.ListVisibleMessageBoxesByPrivateMessageParams{
+		OwnerUserIds:    privateMessageOwnerIDs(ownerUserID, peerID),
+		MessageSenderID: target.MessageSenderID, PrivateMessageID: target.PrivateMessageID,
+	})
+	if err != nil {
+		return fmt.Errorf("list star gift offer message boxes: %w", err)
+	}
+	var privateMediaJSON []byte
+	for _, box := range boxes {
+		media, err := decodeMessageMedia(box.MediaJson)
+		if err != nil {
+			return fmt.Errorf("decode star gift offer message media: %w", err)
+		}
+		if media.ServiceAction == nil || media.ServiceAction.StarGiftOffer == nil {
+			// Не проекция оффера (историческая правка/чужое действие в том
+			// же логическом сообщении) — оставляем как есть.
+			continue
+		}
+		media.ServiceAction.StarGiftOffer.Accepted = accepted
+		media.ServiceAction.StarGiftOffer.Declined = declined
+		mediaJSON, err := encodeMessageMedia(media)
+		if err != nil {
+			return fmt.Errorf("encode star gift offer message media: %w", err)
+		}
+		pts, err := s.messages.reservePts(ctx, tx, box.OwnerUserID)
+		if err != nil {
+			return fmt.Errorf("allocate star gift offer pts: %w", err)
+		}
+		tag, err := tx.Exec(ctx, `
+UPDATE message_boxes SET media=$3,pts=$4
+WHERE owner_user_id=$1 AND box_id=$2 AND NOT deleted`, box.OwnerUserID, box.BoxID, mediaJSON, int32(pts))
+		if err != nil {
+			return fmt.Errorf("update star gift offer message box: %w", err)
+		}
+		if tag.RowsAffected() != 1 {
+			return fmt.Errorf("update star gift offer message box lost row")
+		}
+		msg, err := messageFromVisibleBoxRow(box)
+		if err != nil {
+			return err
+		}
+		msg.Media = media
+		msg.Pts = pts
+		if err := replaceMessageBoxMediaIndexTx(ctx, tx, msg.OwnerUserID, msg.Peer.ID, msg.ID, msg.Date, msg.Media, msg.Entities); err != nil {
+			return err
+		}
+		event := domain.UpdateEvent{UserID: msg.OwnerUserID, Type: domain.UpdateEventEditMessage,
+			Pts: pts, PtsCount: 1, Date: date, Message: msg}
+		if err := appendUserUpdateEvent(ctx, tx, q, msg.OwnerUserID, event); err != nil {
+			return fmt.Errorf("append star gift offer edit event: %w", err)
+		}
+		if err := enqueueDispatch(ctx, q, sqlcgen.EnqueueDispatchParams{
+			TargetUserID: msg.OwnerUserID, Pts: int32(pts), EventType: string(domain.UpdateEventEditMessage),
+			ExcludeAuthKeyID: 0, ExcludeSessionID: 0,
+		}); err != nil {
+			return fmt.Errorf("enqueue star gift offer edit: %w", err)
+		}
+		// Действие оффера одинаково для обеих сторон — общая строка
+		// private_messages обновляется той же правкой.
+		if box.OwnerUserID == box.MessageSenderID || len(privateMediaJSON) == 0 {
+			privateMediaJSON, err = encodeSharedPrivateStarGiftMedia(media)
+			if err != nil {
+				return err
+			}
+		}
+	}
+	if len(privateMediaJSON) == 0 {
+		return nil
+	}
+	if _, err := tx.Exec(ctx, `
+UPDATE private_messages SET media=$3
+WHERE sender_user_id=$1 AND id=$2`, target.MessageSenderID, target.PrivateMessageID, privateMediaJSON); err != nil {
+		return fmt.Errorf("update star gift offer private media: %w", err)
 	}
 	return nil
 }
@@ -557,6 +706,13 @@ func (s *StarGiftLifecycleStore) SetStarGiftListing(ctx context.Context, req dom
 	if req.ActorUserID <= 0 || !req.Ref.Valid() || req.Date <= 0 || req.Amount != nil && !req.Amount.Valid() {
 		return domain.UniqueStarGift{}, domain.ErrStarGiftResaleUnavailable
 	}
+	// Раунд 20: серверные лимиты цены листинга (обе валюты), а не только
+	// per-gift resell_min_stars из каталога.
+	if req.Amount != nil {
+		if err := s.classifyResalePrice(req.Amount.Currency, req.Amount.Amount); err != nil {
+			return domain.UniqueStarGift{}, err
+		}
+	}
 	var uniqueID int64
 	err := withTx(ctx, s.db, "set star gift listing", func(tx pgx.Tx) error {
 		saved, err := lockSavedStarGiftForUpgrade(ctx, tx, req.Ref)
@@ -680,16 +836,16 @@ func (s *StarGiftLifecycleStore) TransferStarGift(ctx context.Context, req domai
 				return domain.ErrStarGiftTransferUnavailable
 			}
 			if _, err := tx.Exec(ctx, `UPDATE peer_star_gifts SET owner_peer_type='user',owner_peer_id=$2,from_user_id=$3,
-			 msg_id=$4,saved_id=0,upgrade_msg_id=$4,gift_date=$5,name_hidden=false,unsaved=$6,pinned_order=0,
-			 can_transfer_at=0 WHERE id=$1`, result.Saved.ID, req.To.ID, req.ActorUserID, msgID, req.Date, req.RecipientUnsaved); err != nil {
+                         msg_id=$4,saved_id=0,upgrade_msg_id=$4,gift_date=$5,name_hidden=false,unsaved=$6,pinned_order=0,
+                         can_transfer_at=0 WHERE id=$1`, result.Saved.ID, req.To.ID, req.ActorUserID, msgID, req.Date, req.RecipientUnsaved); err != nil {
 				return err
 			}
 			if err := registerUserStarGiftMessageRef(ctx, tx, req.To.ID, msgID, result.Saved.ID, result.Unique.ID); err != nil {
 				return err
 			}
 			if _, err := tx.Exec(ctx, `INSERT INTO star_gift_transfer_commands(actor_user_id,command_key,unique_gift_id,
-			 from_peer_type,from_peer_id,to_peer_type,to_peer_id,charge_stars,balance_after,created_at)
-			 VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`, req.ActorUserID, strings.TrimSpace(req.CommandKey), result.Unique.ID,
+                         from_peer_type,from_peer_id,to_peer_type,to_peer_id,charge_stars,balance_after,created_at)
+                         VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`, req.ActorUserID, strings.TrimSpace(req.CommandKey), result.Unique.ID,
 				string(req.Ref.Owner.Type), req.Ref.Owner.ID, string(req.To.Type), req.To.ID, req.ChargeStars, result.Balance.Balance, req.Date); err != nil {
 				return err
 			}
@@ -728,9 +884,9 @@ func (s *StarGiftLifecycleStore) PurchaseResaleStarGift(ctx context.Context, req
 	var replayUniqueID, replayFromID, replayToID, replayAmount int64
 	var replayFromType, replayToType, replayCurrency string
 	replayErr := s.db.QueryRow(ctx, `SELECT t.unique_gift_id,t.from_peer_type,t.from_peer_id,t.to_peer_type,t.to_peer_id,
-		s.currency,s.amount FROM star_gift_transfer_commands t
-		JOIN star_gift_sales s ON s.command_key=t.command_key AND s.unique_gift_id=t.unique_gift_id
-		WHERE t.actor_user_id=$1 AND t.command_key=$2`, req.BuyerUserID, strings.TrimSpace(req.CommandKey)).Scan(
+                s.currency,s.amount FROM star_gift_transfer_commands t
+                JOIN star_gift_sales s ON s.command_key=t.command_key AND s.unique_gift_id=t.unique_gift_id
+                WHERE t.actor_user_id=$1 AND t.command_key=$2`, req.BuyerUserID, strings.TrimSpace(req.CommandKey)).Scan(
 		&replayUniqueID, &replayFromType, &replayFromID, &replayToType, &replayToID, &replayCurrency, &replayAmount)
 	if replayErr == nil {
 		if replayUniqueID != unique.ID || replayToType != string(req.To.Type) || replayToID != req.To.ID ||
@@ -742,6 +898,17 @@ func (s *StarGiftLifecycleStore) PurchaseResaleStarGift(ctx context.Context, req
 		return domain.StarGiftTransferResult{}, replayErr
 	} else if !validLifecyclePeer(unique.Owner) || unique.Owner == req.To {
 		return domain.StarGiftTransferResult{}, domain.ErrStarGiftResaleUnavailable
+	} else {
+		// Вайтлист disallow_resell (раунд 20): покупать улучшенные экземпляры
+		// на маркете могут только пользователи из allowed_buyers; остальным —
+		// STARGIFT_RESELL_NOT_ALLOWED.
+		whitelist, whitelistErr := NewStarGiftStore(s.db).GetWhitelistInfo(ctx, unique.GiftID, req.BuyerUserID)
+		if whitelistErr != nil {
+			return domain.StarGiftTransferResult{}, whitelistErr
+		}
+		if whitelist.HasWhitelist && whitelist.DisallowResell && !whitelist.Allowed {
+			return domain.StarGiftTransferResult{}, domain.ErrStarGiftResaleNotAllowed
+		}
 	}
 	// Сообщение о покупке с маркета отправляет ПОКУПАТЕЛЬ: официальные клиенты
 	// показывают «You bought this gift for X» в out-боксе отправителя и
@@ -768,8 +935,8 @@ func (s *StarGiftLifecycleStore) PurchaseResaleStarGift(ctx context.Context, req
 			var listingCurrency, sellerType string
 			var listingAmount, sellerID, uniqueID int64
 			if err := tx.QueryRow(ctx, `SELECT l.currency,l.amount,l.seller_peer_type,l.seller_peer_id,u.id
-			 FROM star_gift_listings l JOIN unique_star_gifts u ON u.id=l.unique_gift_id
-			 WHERE lower(u.slug)=lower($1) FOR UPDATE OF l,u`, strings.TrimSpace(req.Slug)).Scan(
+                         FROM star_gift_listings l JOIN unique_star_gifts u ON u.id=l.unique_gift_id
+                         WHERE lower(u.slug)=lower($1) FOR UPDATE OF l,u`, strings.TrimSpace(req.Slug)).Scan(
 				&listingCurrency, &listingAmount, &sellerType, &sellerID, &uniqueID); err != nil {
 				if errors.Is(err, pgx.ErrNoRows) {
 					return domain.ErrStarGiftResaleUnavailable
@@ -817,7 +984,7 @@ func (s *StarGiftLifecycleStore) PurchaseResaleStarGift(ctx context.Context, req
 				return err
 			}
 			if _, err := tx.Exec(ctx, `UPDATE unique_star_gifts SET owner_peer_type=$2,owner_peer_id=$3,
-			 last_sale_date=$4,last_sale_currency=$5,last_sale_amount=$6,updated_at=now() WHERE id=$1`,
+                         last_sale_date=$4,last_sale_currency=$5,last_sale_amount=$6,updated_at=now() WHERE id=$1`,
 				uniqueID, string(req.To.Type), req.To.ID, req.Date, listingCurrency, listingAmount); err != nil {
 				return err
 			}
@@ -850,8 +1017,8 @@ func (s *StarGiftLifecycleStore) PurchaseResaleStarGift(ctx context.Context, req
 				return domain.ErrStarGiftResaleUnavailable
 			}
 			if _, err := tx.Exec(ctx, `UPDATE peer_star_gifts SET owner_peer_type=$2,owner_peer_id=$3,from_user_id=$4,
-			 msg_id=$5,saved_id=$6,upgrade_msg_id=$5,gift_date=$7,name_hidden=false,unsaved=$8,pinned_order=0,can_transfer_at=0
-			 WHERE id=$1`, result.Saved.ID, string(req.To.Type), req.To.ID, messageSenderID, msgID, savedID, req.Date,
+                         msg_id=$5,saved_id=$6,upgrade_msg_id=$5,gift_date=$7,name_hidden=false,unsaved=$8,pinned_order=0,can_transfer_at=0
+                         WHERE id=$1`, result.Saved.ID, string(req.To.Type), req.To.ID, messageSenderID, msgID, savedID, req.Date,
 				req.To.Type == domain.PeerTypeUser && req.RecipientUnsaved); err != nil {
 				return err
 			}
@@ -871,15 +1038,15 @@ func (s *StarGiftLifecycleStore) PurchaseResaleStarGift(ctx context.Context, req
 				}
 			}
 			if _, err := tx.Exec(ctx, `INSERT INTO star_gift_sales(unique_gift_id,seller_peer_type,seller_peer_id,
-			 buyer_peer_type,buyer_peer_id,currency,amount,commission_amount,sold_at,command_key)
-			 VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`, result.Unique.ID, string(seller.Type), seller.ID,
+                         buyer_peer_type,buyer_peer_id,currency,amount,commission_amount,sold_at,command_key)
+                         VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`, result.Unique.ID, string(seller.Type), seller.ID,
 				string(req.To.Type), req.To.ID, string(req.Amount.Currency), req.Amount.Amount, commissionAmount,
 				req.Date, strings.TrimSpace(req.CommandKey)); err != nil {
 				return err
 			}
 			if _, err := tx.Exec(ctx, `INSERT INTO star_gift_transfer_commands(actor_user_id,command_key,unique_gift_id,
-			 from_peer_type,from_peer_id,to_peer_type,to_peer_id,charge_stars,balance_after,created_at)
-			 VALUES($1,$2,$3,$4,$5,$6,$7,0,$8,$9)`, req.BuyerUserID, strings.TrimSpace(req.CommandKey),
+                         from_peer_type,from_peer_id,to_peer_type,to_peer_id,charge_stars,balance_after,created_at)
+                         VALUES($1,$2,$3,$4,$5,$6,$7,0,$8,$9)`, req.BuyerUserID, strings.TrimSpace(req.CommandKey),
 				result.Unique.ID, string(seller.Type), seller.ID, string(req.To.Type), req.To.ID, result.Balance.Balance, req.Date); err != nil {
 				return err
 			}
@@ -914,12 +1081,12 @@ func (s *StarGiftLifecycleStore) PurchaseResaleStarGift(ctx context.Context, req
 
 func lockSavedStarGiftByUniqueID(ctx context.Context, tx pgx.Tx, uniqueID int64) (domain.SavedStarGift, bool, error) {
 	row := tx.QueryRow(ctx, `SELECT p.id,p.owner_peer_type,p.owner_peer_id,p.from_user_id,p.gift_id,p.catalog_revision_id,
-	 p.msg_id,p.saved_id,p.gift_date,p.name_hidden,p.unsaved,p.converted,p.convert_stars,p.prepaid_upgrade_stars,p.prepaid_upgrade_hash,p.gift_num,
-	 p.lifecycle_status,p.transfer_stars,p.can_export_at,p.can_transfer_at,p.can_resell_at,p.drop_original_details_stars,p.can_craft_at,
-	 p.message,COALESCE(p.message_entities,'[]'::jsonb)::text,COALESCE(p.unique_gift_id,0),p.upgrade_msg_id,p.pinned_order,
-	 COALESCE((SELECT array_agg(i.collection_id ORDER BY c.sort_order,i.collection_id) FROM star_gift_collection_items i
-	 JOIN star_gift_collections c ON c.collection_id=i.collection_id WHERE i.saved_gift_id=p.id),ARRAY[]::integer[])
-	 FROM peer_star_gifts p WHERE p.unique_gift_id=$1 FOR UPDATE`, uniqueID)
+         p.msg_id,p.saved_id,p.gift_date,p.name_hidden,p.unsaved,p.converted,p.convert_stars,p.prepaid_upgrade_stars,p.prepaid_upgrade_hash,p.gift_num,
+         p.lifecycle_status,p.transfer_stars,p.can_export_at,p.can_transfer_at,p.can_resell_at,p.drop_original_details_stars,p.can_craft_at,
+         p.message,COALESCE(p.unique_gift_id,0),p.upgrade_msg_id,p.pinned_order,
+         COALESCE((SELECT array_agg(i.collection_id ORDER BY c.sort_order,i.collection_id) FROM star_gift_collection_items i
+         JOIN star_gift_collections c ON c.collection_id=i.collection_id WHERE i.saved_gift_id=p.id),ARRAY[]::integer[])
+         FROM peer_star_gifts p WHERE p.unique_gift_id=$1 FOR UPDATE`, uniqueID)
 	saved, err := scanSavedStarGift(row)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return domain.SavedStarGift{}, false, nil
@@ -929,7 +1096,7 @@ func lockSavedStarGiftByUniqueID(ctx context.Context, tx pgx.Tx, uniqueID int64)
 
 func (s *StarGiftLifecycleStore) refundPendingStarGiftOffers(ctx context.Context, tx pgx.Tx, uniqueID int64, date int, reason string) error {
 	rows, err := tx.Query(ctx, `SELECT id,buyer_user_id,currency,amount,owner_peer_type,owner_peer_id
-	 FROM star_gift_offers WHERE unique_gift_id=$1 AND status='pending' FOR UPDATE`, uniqueID)
+         FROM star_gift_offers WHERE unique_gift_id=$1 AND status='pending' FOR UPDATE`, uniqueID)
 	if err != nil {
 		return err
 	}
@@ -994,8 +1161,23 @@ func (s *StarGiftLifecycleStore) SendStarGiftOffer(ctx context.Context, req doma
 			if err != nil || !found || gift.Owner != req.Owner || gift.Burned || gift.OwnerAddress != "" || gift.OfferMinStars <= 0 {
 				return domain.ErrStarGiftOfferInvalid
 			}
+			// Вайтлист disallow_resell (раунд 20): делать офферы на этот
+			// подарок могут только пользователи из allowed_buyers; остальным —
+			// STARGIFT_OFFER_NOT_ALLOWED. Выставлять на продажу и
+			// разрешать/отклонять офферы на свои подарки это не ограничивает.
+			whitelist, whitelistErr := NewStarGiftStore(tx).GetWhitelistInfo(ctx, gift.GiftID, req.BuyerUserID)
+			if whitelistErr != nil {
+				return whitelistErr
+			}
+			if whitelist.HasWhitelist && whitelist.DisallowResell && !whitelist.Allowed {
+				return domain.ErrStarGiftOfferNotAllowed
+			}
 			if req.Price.Currency == domain.StarGiftCurrencyStars && gift.OfferMinStars > 0 && req.Price.Amount < int64(gift.OfferMinStars) {
 				return domain.ErrStarGiftOfferInvalid
+			}
+			// Лимиты цены оффера (раунд 20): обе валюты, серверные настройки.
+			if err := s.classifyResalePrice(req.Price.Currency, req.Price.Amount); err != nil {
+				return err
 			}
 			balance, err := s.debitLifecycleAmount(ctx, tx, req.BuyerUserID, req.Price, domain.StarsReasonGiftOffer,
 				req.Owner, req.Date, "Collectible gift offer")
@@ -1004,8 +1186,8 @@ func (s *StarGiftLifecycleStore) SendStarGiftOffer(ctx context.Context, req doma
 			}
 			var offerID int64
 			if err := tx.QueryRow(ctx, `INSERT INTO star_gift_offers(buyer_user_id,owner_peer_type,owner_peer_id,
-			 unique_gift_id,currency,amount,random_id,created_at,expires_at,balance_after)
-			 VALUES($1,'user',$2,$3,$4,$5,$6,$7,$8,$9) RETURNING id`, req.BuyerUserID, req.Owner.ID,
+                         unique_gift_id,currency,amount,random_id,created_at,expires_at,balance_after)
+                         VALUES($1,'user',$2,$3,$4,$5,$6,$7,$8,$9) RETURNING id`, req.BuyerUserID, req.Owner.ID,
 				gift.ID, string(req.Price.Currency), req.Price.Amount, req.RandomID, req.Date, req.Date+req.Duration, balance.Balance).Scan(&offerID); err != nil {
 				return err
 			}
@@ -1048,8 +1230,8 @@ func validStarGiftOfferDuration(duration int) bool {
 
 func (s *StarGiftLifecycleStore) loadOfferByBuyerRandom(ctx context.Context, buyerUserID, randomID int64, sent domain.SendPrivateTextResult) (domain.StarGiftOfferResult, error) {
 	offer, err := scanStarGiftOffer(s.db.QueryRow(ctx, `SELECT id,buyer_user_id,owner_peer_type,owner_peer_id,unique_gift_id,
-	 currency,amount,random_id,offer_msg_id,buyer_msg_id,status,created_at,expires_at,resolved_at,balance_after
-	 FROM star_gift_offers WHERE buyer_user_id=$1 AND random_id=$2`, buyerUserID, randomID))
+         currency,amount,random_id,offer_msg_id,buyer_msg_id,status,created_at,expires_at,resolved_at,balance_after
+         FROM star_gift_offers WHERE buyer_user_id=$1 AND random_id=$2`, buyerUserID, randomID))
 	if err != nil {
 		return domain.StarGiftOfferResult{}, err
 	}
@@ -1088,8 +1270,8 @@ func (s *StarGiftLifecycleStore) ResolveStarGiftOffer(ctx context.Context, req d
 		return domain.StarGiftOfferResult{}, err
 	}
 	offer, err := scanStarGiftOffer(s.db.QueryRow(ctx, `SELECT id,buyer_user_id,owner_peer_type,owner_peer_id,unique_gift_id,
-	 currency,amount,random_id,offer_msg_id,buyer_msg_id,status,created_at,expires_at,resolved_at,balance_after
-	 FROM star_gift_offers WHERE owner_peer_type='user' AND owner_peer_id=$1 AND offer_msg_id=$2`, req.OwnerUserID, req.OfferMsgID))
+         currency,amount,random_id,offer_msg_id,buyer_msg_id,status,created_at,expires_at,resolved_at,balance_after
+         FROM star_gift_offers WHERE owner_peer_type='user' AND owner_peer_id=$1 AND offer_msg_id=$2`, req.OwnerUserID, req.OfferMsgID))
 	if err != nil || offer.Status != "pending" || offer.ExpiresAt <= req.Date {
 		return domain.StarGiftOfferResult{}, domain.ErrStarGiftOfferExpired
 	}
@@ -1117,8 +1299,8 @@ func (s *StarGiftLifecycleStore) ResolveStarGiftOffer(ctx context.Context, req d
 	hooks := privateSendTxHooks{
 		before: func(ctx context.Context, tx pgx.Tx, send *domain.SendPrivateTextRequest) error {
 			locked, err := scanStarGiftOffer(tx.QueryRow(ctx, `SELECT id,buyer_user_id,owner_peer_type,owner_peer_id,unique_gift_id,
-			 currency,amount,random_id,offer_msg_id,buyer_msg_id,status,created_at,expires_at,resolved_at,balance_after
-			 FROM star_gift_offers WHERE id=$1 FOR UPDATE`, offer.ID))
+                         currency,amount,random_id,offer_msg_id,buyer_msg_id,status,created_at,expires_at,resolved_at,balance_after
+                         FROM star_gift_offers WHERE id=$1 FOR UPDATE`, offer.ID))
 			if err != nil || locked.Status != "pending" || locked.ExpiresAt <= req.Date {
 				return domain.ErrStarGiftOfferExpired
 			}
@@ -1129,6 +1311,12 @@ func (s *StarGiftLifecycleStore) ResolveStarGiftOffer(ctx context.Context, req d
 					return err
 				}
 				if _, err := tx.Exec(ctx, `UPDATE star_gift_offers SET status='declined',resolved_at=$2,resolution_notified=true WHERE id=$1`, locked.ID, req.Date); err != nil {
+					return err
+				}
+				// Раунд 20: исходное сервисное сообщение-оффер перестаёт показывать
+				// обратный отсчёт — обе проекции получают Declined (кнопки у
+				// продавца исчезают, покупатель видит «предложение отклонено»).
+				if err := s.editStarGiftOfferMessageStateTx(ctx, tx, req.OwnerUserID, req.OfferMsgID, false, true, req.Date); err != nil {
 					return err
 				}
 				locked.Status, locked.ResolvedAt = "declined", req.Date
@@ -1157,15 +1345,27 @@ func (s *StarGiftLifecycleStore) ResolveStarGiftOffer(ctx context.Context, req d
 				return err
 			}
 			if _, err := tx.Exec(ctx, `UPDATE unique_star_gifts SET owner_peer_type='user',owner_peer_id=$2,
-			 last_sale_date=$3,last_sale_currency=$4,last_sale_amount=$5,updated_at=now() WHERE id=$1`, current.ID,
+                         last_sale_date=$3,last_sale_currency=$4,last_sale_amount=$5,updated_at=now() WHERE id=$1`, current.ID,
 				locked.BuyerUserID, req.Date, string(locked.Price.Currency), locked.Price.Amount); err != nil {
 				return err
 			}
 			if _, err := tx.Exec(ctx, `UPDATE star_gift_offers SET status='accepted',resolved_at=$2,resolution_notified=true WHERE id=$1`, locked.ID, req.Date); err != nil {
 				return err
 			}
-			if err := s.refundPendingStarGiftOffersExcept(ctx, tx, current.ID, locked.ID, req.Date); err != nil {
+			// Раунд 20: исходное сообщение принятого оффера получает Accepted;
+			// офферы того же подарка, автоматически отменённые этой покупкой,
+			// получают Declined — их кнопки у продавца тоже пропадают.
+			if err := s.editStarGiftOfferMessageStateTx(ctx, tx, req.OwnerUserID, req.OfferMsgID, true, false, req.Date); err != nil {
 				return err
+			}
+			superseded, err := s.refundPendingStarGiftOffersExcept(ctx, tx, current.ID, locked.ID, req.Date)
+			if err != nil {
+				return err
+			}
+			for _, cancelled := range superseded {
+				if err := s.editStarGiftOfferMessageStateTx(ctx, tx, cancelled.ownerID, cancelled.offerMsgID, false, true, req.Date); err != nil {
+					return err
+				}
 			}
 			current.Owner = domain.Peer{Type: domain.PeerTypeUser, ID: locked.BuyerUserID}
 			current.ResellAmount = nil
@@ -1189,8 +1389,8 @@ func (s *StarGiftLifecycleStore) ResolveStarGiftOffer(ctx context.Context, req d
 			}
 			msgID := sent.RecipientMessage.ID
 			if _, err := tx.Exec(ctx, `UPDATE peer_star_gifts SET owner_peer_type='user',owner_peer_id=$2,from_user_id=$3,
-			 msg_id=$4,saved_id=0,upgrade_msg_id=$4,gift_date=$5,name_hidden=false,unsaved=false,pinned_order=0,can_transfer_at=0
-			 WHERE id=$1`, result.Saved.ID, result.Offer.BuyerUserID, req.OwnerUserID, msgID, req.Date); err != nil {
+                         msg_id=$4,saved_id=0,upgrade_msg_id=$4,gift_date=$5,name_hidden=false,unsaved=false,pinned_order=0,can_transfer_at=0
+                         WHERE id=$1`, result.Saved.ID, result.Offer.BuyerUserID, req.OwnerUserID, msgID, req.Date); err != nil {
 				return err
 			}
 			if err := registerUserStarGiftMessageRef(ctx, tx, result.Offer.BuyerUserID, msgID,
@@ -1200,8 +1400,8 @@ func (s *StarGiftLifecycleStore) ResolveStarGiftOffer(ctx context.Context, req d
 			result.Saved.Owner = domain.Peer{Type: domain.PeerTypeUser, ID: result.Offer.BuyerUserID}
 			result.Saved.FromUserID, result.Saved.MsgID, result.Saved.SavedID, result.Saved.UpgradeMsgID, result.Saved.Date = req.OwnerUserID, msgID, 0, msgID, req.Date
 			if _, err := tx.Exec(ctx, `INSERT INTO star_gift_sales(unique_gift_id,seller_peer_type,seller_peer_id,
-			 buyer_peer_type,buyer_peer_id,currency,amount,commission_amount,sold_at,command_key)
-			 VALUES($1,'user',$2,'user',$3,$4,$5,$6,$7,$8)`, result.Offer.UniqueGiftID, req.OwnerUserID,
+                         buyer_peer_type,buyer_peer_id,currency,amount,commission_amount,sold_at,command_key)
+                         VALUES($1,'user',$2,'user',$3,$4,$5,$6,$7,$8)`, result.Offer.UniqueGiftID, req.OwnerUserID,
 				result.Offer.BuyerUserID, string(result.Offer.Price.Currency), result.Offer.Price.Amount, commissionAmount,
 				req.Date, fmt.Sprintf("offer:%d", result.Offer.ID)); err != nil {
 				return err
@@ -1333,36 +1533,52 @@ FROM star_gift_offers WHERE status IN ('expired','cancelled') AND NOT resolution
 	return len(items), nil
 }
 
-func (s *StarGiftLifecycleStore) refundPendingStarGiftOffersExcept(ctx context.Context, tx pgx.Tx, uniqueID, exceptID int64, date int) error {
-	rows, err := tx.Query(ctx, `SELECT id,buyer_user_id,currency,amount,owner_peer_type,owner_peer_id
+// starGiftCancelledOfferRef — ссылка на исходное сообщение отменённого оффера
+// (проекция продавца), чтобы пометить его Declined в той же транзакции.
+type starGiftCancelledOfferRef struct {
+	ownerID    int64
+	offerMsgID int
+}
+
+func (s *StarGiftLifecycleStore) refundPendingStarGiftOffersExcept(ctx context.Context, tx pgx.Tx, uniqueID, exceptID int64, date int) ([]starGiftCancelledOfferRef, error) {
+	rows, err := tx.Query(ctx, `SELECT id,buyer_user_id,currency,amount,owner_peer_type,owner_peer_id,offer_msg_id
 	 FROM star_gift_offers WHERE unique_gift_id=$1 AND status='pending' AND id<>$2 FOR UPDATE`, uniqueID, exceptID)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	type item struct {
 		id, buyer, amount, ownerID int64
 		currency, ownerType        string
+		offerMsgID                 int
 	}
 	items := make([]item, 0)
 	for rows.Next() {
 		var v item
-		if err := rows.Scan(&v.id, &v.buyer, &v.currency, &v.amount, &v.ownerType, &v.ownerID); err != nil {
+		if err := rows.Scan(&v.id, &v.buyer, &v.currency, &v.amount, &v.ownerType, &v.ownerID, &v.offerMsgID); err != nil {
 			rows.Close()
-			return err
+			return nil, err
 		}
 		items = append(items, v)
 	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, err
+	}
 	rows.Close()
+	cancelled := make([]starGiftCancelledOfferRef, 0, len(items))
 	for _, v := range items {
 		if err := s.creditLifecycleAmount(ctx, tx, v.buyer, domain.StarGiftAmount{Currency: domain.StarGiftCurrency(v.currency), Amount: v.amount},
 			domain.StarsReasonGiftOffer, domain.Peer{Type: domain.PeerType(v.ownerType), ID: v.ownerID}, date, "Gift offer refund"); err != nil {
-			return err
+			return nil, err
 		}
 		if _, err := tx.Exec(ctx, `UPDATE star_gift_offers SET status='cancelled',resolved_at=$2 WHERE id=$1`, v.id, date); err != nil {
-			return err
+			return nil, err
+		}
+		if v.offerMsgID > 0 {
+			cancelled = append(cancelled, starGiftCancelledOfferRef{ownerID: v.ownerID, offerMsgID: v.offerMsgID})
 		}
 	}
-	return nil
+	return cancelled, nil
 }
 
 func (s *StarGiftLifecycleStore) transferStarGiftWithoutPrivateMessage(ctx context.Context, req domain.StarGiftTransferRequest) (domain.StarGiftTransferResult, error) {
@@ -1392,7 +1608,7 @@ func (s *StarGiftLifecycleStore) transferStarGiftWithoutPrivateMessage(ctx conte
 			return err
 		}
 		if _, err := tx.Exec(ctx, `UPDATE peer_star_gifts SET owner_peer_type='channel',owner_peer_id=$2,from_user_id=$3,
-		 msg_id=0,saved_id=id,upgrade_msg_id=0,gift_date=$4,name_hidden=false,unsaved=false,pinned_order=0,can_transfer_at=0 WHERE id=$1`,
+                 msg_id=0,saved_id=id,upgrade_msg_id=0,gift_date=$4,name_hidden=false,unsaved=false,pinned_order=0,can_transfer_at=0 WHERE id=$1`,
 			saved.ID, req.To.ID, req.ActorUserID, req.Date); err != nil {
 			return err
 		}
@@ -1405,8 +1621,8 @@ func (s *StarGiftLifecycleStore) transferStarGiftWithoutPrivateMessage(ctx conte
 			return err
 		}
 		if _, err := tx.Exec(ctx, `INSERT INTO star_gift_transfer_commands(actor_user_id,command_key,unique_gift_id,
-		 from_peer_type,from_peer_id,to_peer_type,to_peer_id,charge_stars,balance_after,created_at)
-		 VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`, req.ActorUserID, strings.TrimSpace(req.CommandKey), unique.ID,
+                 from_peer_type,from_peer_id,to_peer_type,to_peer_id,charge_stars,balance_after,created_at)
+                 VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`, req.ActorUserID, strings.TrimSpace(req.CommandKey), unique.ID,
 			string(req.Ref.Owner.Type), req.Ref.Owner.ID, string(req.To.Type), req.To.ID, req.ChargeStars, balance.Balance, req.Date); err != nil {
 			return err
 		}
@@ -1454,7 +1670,7 @@ func lockOwnedUniqueStarGift(ctx context.Context, tx pgx.Tx, actorUserID int64, 
 func ensureNoStarGiftMarketConflict(ctx context.Context, tx pgx.Tx, uniqueID int64) error {
 	var listing, offers bool
 	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM star_gift_listings WHERE unique_gift_id=$1),
-	 EXISTS(SELECT 1 FROM star_gift_offers WHERE unique_gift_id=$1 AND status='pending')`, uniqueID).Scan(&listing, &offers); err != nil {
+         EXISTS(SELECT 1 FROM star_gift_offers WHERE unique_gift_id=$1 AND status='pending')`, uniqueID).Scan(&listing, &offers); err != nil {
 		return err
 	}
 	if listing || offers {
@@ -1505,14 +1721,14 @@ func (s *StarGiftLifecycleStore) debitLifecycleAmount(ctx context.Context, tx pg
 		}
 		var balance int64
 		if err := tx.QueryRow(ctx, `UPDATE ton_balances SET balance_nanoton=balance_nanoton-$2,updated_at=now()
-		 WHERE user_id=$1 AND balance_nanoton>=$2 RETURNING balance_nanoton`, userID, amount.Amount).Scan(&balance); err != nil {
+                 WHERE user_id=$1 AND balance_nanoton>=$2 RETURNING balance_nanoton`, userID, amount.Amount).Scan(&balance); err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
 				return domain.StarsBalance{}, domain.ErrStarsInsufficient
 			}
 			return domain.StarsBalance{}, err
 		}
 		_, err := tx.Exec(ctx, `INSERT INTO ton_transactions(user_id,amount_nanoton,reason,peer_type,peer_id,date)
-		 VALUES($1,$2,$3,$4,$5,$6)`, userID, -amount.Amount, string(reason), nullableStarGiftPeerType(peer), nullableStarGiftPeerID(peer), date)
+                 VALUES($1,$2,$3,$4,$5,$6)`, userID, -amount.Amount, string(reason), nullableStarGiftPeerType(peer), nullableStarGiftPeerID(peer), date)
 		return domain.StarsBalance{UserID: userID, Balance: balance}, err
 	}
 	result := domain.StarsBalance{UserID: userID}
@@ -1539,15 +1755,15 @@ func (s *StarGiftLifecycleStore) creditLifecycleAmount(ctx context.Context, tx p
 	reason domain.StarsTransactionReason, peer domain.Peer, date int, title string) error {
 	if amount.Currency == domain.StarGiftCurrencyTON {
 		if _, err := tx.Exec(ctx, `INSERT INTO ton_balances(user_id,balance_nanoton,granted) VALUES($1,$2,false)
-		 ON CONFLICT(user_id) DO UPDATE SET balance_nanoton=ton_balances.balance_nanoton+EXCLUDED.balance_nanoton,updated_at=now()`, userID, amount.Amount); err != nil {
+                 ON CONFLICT(user_id) DO UPDATE SET balance_nanoton=ton_balances.balance_nanoton+EXCLUDED.balance_nanoton,updated_at=now()`, userID, amount.Amount); err != nil {
 			return err
 		}
 		_, err := tx.Exec(ctx, `INSERT INTO ton_transactions(user_id,amount_nanoton,reason,peer_type,peer_id,date)
-		 VALUES($1,$2,$3,$4,$5,$6)`, userID, amount.Amount, string(reason), nullableStarGiftPeerType(peer), nullableStarGiftPeerID(peer), date)
+                 VALUES($1,$2,$3,$4,$5,$6)`, userID, amount.Amount, string(reason), nullableStarGiftPeerType(peer), nullableStarGiftPeerID(peer), date)
 		return err
 	}
 	if _, err := tx.Exec(ctx, `INSERT INTO stars_balances(user_id,balance,updated_at) VALUES($1,$2,now())
-	 ON CONFLICT(user_id) DO UPDATE SET balance=stars_balances.balance+EXCLUDED.balance,updated_at=now()`, userID, amount.Amount); err != nil {
+         ON CONFLICT(user_id) DO UPDATE SET balance=stars_balances.balance+EXCLUDED.balance,updated_at=now()`, userID, amount.Amount); err != nil {
 		return err
 	}
 	return insertStarsTxn(ctx, tx, userID, amount.Amount, reason, peer, date, title, "")
@@ -1594,13 +1810,13 @@ func (s *StarGiftLifecycleStore) creditPeerLifecycleAmount(ctx context.Context, 
 			return balance, commission, err
 		}
 		if err := tx.QueryRow(ctx, `INSERT INTO channel_ton_balances(channel_id,balance_nanoton) VALUES($1,$2)
-			ON CONFLICT(channel_id) DO UPDATE SET balance_nanoton=channel_ton_balances.balance_nanoton+EXCLUDED.balance_nanoton,updated_at=now()
-			RETURNING balance_nanoton`, owner.ID, proceeds).Scan(&balance); err != nil {
+                        ON CONFLICT(channel_id) DO UPDATE SET balance_nanoton=channel_ton_balances.balance_nanoton+EXCLUDED.balance_nanoton,updated_at=now()
+                        RETURNING balance_nanoton`, owner.ID, proceeds).Scan(&balance); err != nil {
 			return 0, 0, err
 		}
 		if _, err := tx.Exec(ctx, `INSERT INTO channel_ton_transactions
-			(channel_id,actor_user_id,amount_nanoton,reason,peer_type,peer_id,gift_id,date)
-			VALUES($1,$2,$3,$4,$5,$6,$7,$8)`, owner.ID, actorUserID, proceeds, string(reason),
+                        (channel_id,actor_user_id,amount_nanoton,reason,peer_type,peer_id,gift_id,date)
+                        VALUES($1,$2,$3,$4,$5,$6,$7,$8)`, owner.ID, actorUserID, proceeds, string(reason),
 			string(counterparty.Type), counterparty.ID, giftID, date); err != nil {
 			return 0, 0, err
 		}
@@ -1611,13 +1827,13 @@ func (s *StarGiftLifecycleStore) creditPeerLifecycleAmount(ctx context.Context, 
 		return balance, commission, err
 	}
 	if err := tx.QueryRow(ctx, `INSERT INTO channel_stars_balances(channel_id,balance) VALUES($1,$2)
-		ON CONFLICT(channel_id) DO UPDATE SET balance=channel_stars_balances.balance+EXCLUDED.balance,updated_at=now()
-		RETURNING balance`, owner.ID, proceeds).Scan(&balance); err != nil {
+                ON CONFLICT(channel_id) DO UPDATE SET balance=channel_stars_balances.balance+EXCLUDED.balance,updated_at=now()
+                RETURNING balance`, owner.ID, proceeds).Scan(&balance); err != nil {
 		return 0, 0, err
 	}
 	if _, err := tx.Exec(ctx, `INSERT INTO channel_stars_transactions
-		(channel_id,actor_user_id,amount,reason,peer_type,peer_id,gift_id,date)
-		VALUES($1,$2,$3,$4,$5,$6,$7,$8)`, owner.ID, actorUserID, proceeds, string(reason),
+                (channel_id,actor_user_id,amount,reason,peer_type,peer_id,gift_id,date)
+                VALUES($1,$2,$3,$4,$5,$6,$7,$8)`, owner.ID, actorUserID, proceeds, string(reason),
 		string(counterparty.Type), counterparty.ID, giftID, date); err != nil {
 		return 0, 0, err
 	}
@@ -1645,12 +1861,12 @@ func (s *StarGiftLifecycleStore) loadTransferReplay(ctx context.Context, req dom
 
 func savedStarGiftByUniqueID(ctx context.Context, db sqlcgen.DBTX, uniqueID int64) (domain.SavedStarGift, bool, error) {
 	row := db.QueryRow(ctx, `SELECT p.id,p.owner_peer_type,p.owner_peer_id,p.from_user_id,p.gift_id,p.catalog_revision_id,
-	 p.msg_id,p.saved_id,p.gift_date,p.name_hidden,p.unsaved,p.converted,p.convert_stars,p.prepaid_upgrade_stars,p.prepaid_upgrade_hash,p.gift_num,
-	 p.lifecycle_status,p.transfer_stars,p.can_export_at,p.can_transfer_at,p.can_resell_at,p.drop_original_details_stars,p.can_craft_at,
-	 p.message,COALESCE(p.message_entities,'[]'::jsonb)::text,COALESCE(p.unique_gift_id,0),p.upgrade_msg_id,p.pinned_order,
-	 COALESCE((SELECT array_agg(i.collection_id ORDER BY c.sort_order,i.collection_id) FROM star_gift_collection_items i
-	 JOIN star_gift_collections c ON c.collection_id=i.collection_id WHERE i.saved_gift_id=p.id),ARRAY[]::integer[])
-	 FROM peer_star_gifts p WHERE p.unique_gift_id=$1`, uniqueID)
+         p.msg_id,p.saved_id,p.gift_date,p.name_hidden,p.unsaved,p.converted,p.convert_stars,p.prepaid_upgrade_stars,p.prepaid_upgrade_hash,p.gift_num,
+         p.lifecycle_status,p.transfer_stars,p.can_export_at,p.can_transfer_at,p.can_resell_at,p.drop_original_details_stars,p.can_craft_at,
+         p.message,COALESCE(p.unique_gift_id,0),p.upgrade_msg_id,p.pinned_order,
+         COALESCE((SELECT array_agg(i.collection_id ORDER BY c.sort_order,i.collection_id) FROM star_gift_collection_items i
+         JOIN star_gift_collections c ON c.collection_id=i.collection_id WHERE i.saved_gift_id=p.id),ARRAY[]::integer[])
+         FROM peer_star_gifts p WHERE p.unique_gift_id=$1`, uniqueID)
 	saved, err := scanSavedStarGift(row)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return domain.SavedStarGift{}, false, nil

@@ -1,11 +1,14 @@
 package postgres
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math/big"
+	"strconv"
 	"strings"
 
 	"github.com/jackc/pgx/v5"
@@ -18,6 +21,81 @@ const (
 	starGiftAuctionRoundDuration = 3600
 	maxStarGiftAuctionAcquired   = 1000
 )
+
+// parseAuctionRoundDurations разбирает star_gift_auctions.round_durations
+// (раунд 20). Основная форма — объект {"round_1":120,"round_2":300,"round_4":1000};
+// также принимается форма файла-образца — массив из одного такого объекта.
+// Для пропущенных раундов действует общий round_duration; NULL, пустой или
+// некорректный JSON дают nil (общий режим). Ключи не вида round_N и значения
+// <= 0 игнорируются.
+func parseAuctionRoundDurations(raw []byte) map[int]int {
+	if len(raw) == 0 {
+		return nil
+	}
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 {
+		return nil
+	}
+	collect := func(decoded map[string]int) map[int]int {
+		out := make(map[int]int, len(decoded))
+		for key, value := range decoded {
+			if value <= 0 || !strings.HasPrefix(key, "round_") {
+				continue
+			}
+			round, err := strconv.Atoi(strings.TrimPrefix(key, "round_"))
+			if err != nil || round < 1 {
+				continue
+			}
+			out[round] = value
+		}
+		if len(out) == 0 {
+			return nil
+		}
+		return out
+	}
+	if trimmed[0] == '[' {
+		var decoded []map[string]int
+		if err := json.Unmarshal(trimmed, &decoded); err != nil || decoded == nil {
+			return nil
+		}
+		merged := make(map[string]int)
+		for _, entry := range decoded {
+			for key, value := range entry {
+				merged[key] = value
+			}
+		}
+		return collect(merged)
+	}
+	var decoded map[string]int
+	if err := json.Unmarshal(trimmed, &decoded); err != nil || decoded == nil {
+		return nil
+	}
+	return collect(decoded)
+}
+
+// auctionRoundDurationFor — длительность конкретного раунда: индивидуальная из
+// round_durations, иначе общая.
+func auctionRoundDurationFor(durations map[int]int, round, common int) int {
+	if round >= 1 && durations != nil {
+		if d, ok := durations[round]; ok && d > 0 {
+			return d
+		}
+	}
+	return common
+}
+
+// auctionRoundBoundary восстанавливает границу конца раунда round: start_date
+// плюс сумма длительностей раундов 1..round. Инвариант совпадает с пошаговым
+// next_round_at += duration(settle), поэтому пересчёт безопасен и одновременно
+// применяет индивидуальные длительности к уже идущему аукциону (в т.ч. если
+// jsonb заполнили после создания строки).
+func auctionRoundBoundary(startDate int, durations map[int]int, round, common int) int {
+	boundary := startDate
+	for r := 1; r <= round; r++ {
+		boundary += auctionRoundDurationFor(durations, r, common)
+	}
+	return boundary
+}
 
 // starGiftCraftOutputIntent is the immutable message intent committed with a
 // successful craft outcome. The aggregate may subsequently be hidden, listed
@@ -202,11 +280,11 @@ func (s *StarGiftLifecycleStore) ListCraftStarGifts(ctx context.Context, userID,
 	}
 	args := []any{userID, giftID}
 	where := `p.owner_peer_type='user' AND p.owner_peer_id=$1 AND p.gift_id=$2
-	AND p.lifecycle_status='active' AND p.unique_gift_id IS NOT NULL
-	AND p.can_craft_at>0 AND p.can_craft_at<=EXTRACT(EPOCH FROM now())::integer
-	AND NOT u.burned AND u.owner_address='' AND u.craft_chance_permille>0
-	AND EXISTS (SELECT 1 FROM star_gift_collectible_models m
-	            WHERE m.collectible_revision_id=u.collectible_revision_id AND m.crafted)`
+        AND p.lifecycle_status='active' AND p.unique_gift_id IS NOT NULL
+        AND p.can_craft_at>0 AND p.can_craft_at<=EXTRACT(EPOCH FROM now())::integer
+        AND NOT u.burned AND u.owner_address='' AND u.craft_chance_permille>0
+        AND EXISTS (SELECT 1 FROM star_gift_collectible_models m
+                    WHERE m.collectible_revision_id=u.collectible_revision_id AND m.crafted)`
 	var total int
 	if err := s.db.QueryRow(ctx, `SELECT COUNT(*) FROM peer_star_gifts p JOIN unique_star_gifts u ON u.id=p.unique_gift_id WHERE `+where, args...).Scan(&total); err != nil {
 		return domain.SavedStarGiftPage{}, fmt.Errorf("count craft star gifts: %w", err)
@@ -221,7 +299,7 @@ func (s *StarGiftLifecycleStore) ListCraftStarGifts(ctx context.Context, userID,
 	rows, err := s.db.Query(ctx, `SELECT p.id,p.owner_peer_type,p.owner_peer_id,p.from_user_id,p.gift_id,p.catalog_revision_id,
 p.msg_id,p.saved_id,p.gift_date,p.name_hidden,p.unsaved,p.converted,p.convert_stars,p.prepaid_upgrade_stars,p.prepaid_upgrade_hash,p.gift_num,
 p.lifecycle_status,p.transfer_stars,p.can_export_at,p.can_transfer_at,p.can_resell_at,p.drop_original_details_stars,p.can_craft_at,
-p.message,COALESCE(p.message_entities,'[]'::jsonb)::text,COALESCE(p.unique_gift_id,0),p.upgrade_msg_id,p.pinned_order,
+p.message,COALESCE(p.unique_gift_id,0),p.upgrade_msg_id,p.pinned_order,
 COALESCE((SELECT array_agg(i.collection_id ORDER BY c.sort_order,i.collection_id) FROM star_gift_collection_items i
 JOIN star_gift_collections c ON c.collection_id=i.collection_id WHERE i.saved_gift_id=p.id),ARRAY[]::integer[])
 FROM peer_star_gifts p JOIN unique_star_gifts u ON u.id=p.unique_gift_id WHERE `+where+`
@@ -391,7 +469,7 @@ WHERE collectible_revision_id=$1 AND crafted
 				return err
 			}
 			if _, err := tx.Exec(ctx, `UPDATE unique_star_gifts SET model_attribute_id=$2,pattern_attribute_id=$3,
-	backdrop_attribute_id=$4,crafted=true,craft_chance_permille=0,offer_min_stars=0,updated_at=now() WHERE id=$1`, firstUniqueID, modelID, patternID, backdropID); err != nil {
+        backdrop_attribute_id=$4,crafted=true,craft_chance_permille=0,offer_min_stars=0,updated_at=now() WHERE id=$1`, firstUniqueID, modelID, patternID, backdropID); err != nil {
 				return err
 			}
 			if _, err := tx.Exec(ctx, `UPDATE peer_star_gifts SET can_craft_at=0 WHERE id=$1`, firstSavedID); err != nil {
@@ -609,10 +687,11 @@ func (s *StarGiftLifecycleStore) settleStarGiftAuction(ctx context.Context, gift
 	return withTx(ctx, s.db, "settle star gift auction", func(tx pgx.Tx) error {
 		var startDate, endDate, roundDuration, giftsPerRound, totalRounds, currentRound, nextRoundAt, lastGiftNum, giftsLeft int
 		var status string
+		var roundDurationsRaw []byte
 		if err := tx.QueryRow(ctx, `SELECT start_date,end_date,round_duration,gifts_per_round,total_rounds,current_round,
-next_round_at,last_gift_num,gifts_left,status FROM star_gift_auctions WHERE gift_id=$1 FOR UPDATE`, giftID).
+next_round_at,last_gift_num,gifts_left,status,round_durations FROM star_gift_auctions WHERE gift_id=$1 FOR UPDATE`, giftID).
 			Scan(&startDate, &endDate, &roundDuration, &giftsPerRound, &totalRounds, &currentRound,
-				&nextRoundAt, &lastGiftNum, &giftsLeft, &status); err != nil {
+				&nextRoundAt, &lastGiftNum, &giftsLeft, &status, &roundDurationsRaw); err != nil {
 			return err
 		}
 		if status == "cancelled" || status == "completed" {
@@ -621,6 +700,7 @@ next_round_at,last_gift_num,gifts_left,status FROM star_gift_auctions WHERE gift
 		if now < startDate {
 			return nil
 		}
+		roundDurations := parseAuctionRoundDurations(roundDurationsRaw)
 		changed := false
 		if status == "pending" {
 			status = "active"
@@ -628,6 +708,14 @@ next_round_at,last_gift_num,gifts_left,status FROM star_gift_auctions WHERE gift
 			if currentRound == 0 {
 				currentRound = 1
 			}
+		}
+		// Раунд 20: индивидуальные длительности раундов. Пересчёт границы
+		// из start_date и длительностей 1..currentRound идентичен пошаговому
+		// next_round_at += duration при неизменном jsonb и немедленно
+		// применяет его к уже идущему аукциону (в т.ч. к текущему раунду —
+		// поэтому пересчёт выполняется ПОСЛЕ активации pending-строки).
+		if currentRound >= 1 {
+			nextRoundAt = auctionRoundBoundary(startDate, roundDurations, currentRound, roundDuration)
 		}
 
 		totalBurnedInThisExecution := 0
@@ -697,7 +785,9 @@ acquired_count=acquired_count+1,version=version+1 WHERE gift_id=$1 AND bidder_us
 			}
 
 			currentRound++
-			nextRoundAt += roundDuration
+			// Граница нового текущего раунда: индивидуальная длительность
+			// из round_durations (раунд 20), для пропущенных раундов — общая.
+			nextRoundAt += auctionRoundDurationFor(roundDurations, currentRound, roundDuration)
 			changed = true
 			if currentRound > totalRounds || giftsLeft <= 0 || nextRoundAt > endDate {
 				status = "completed"
@@ -1013,6 +1103,21 @@ func (s *StarGiftLifecycleStore) BidStarGiftAuction(ctx context.Context, req dom
 			return err
 		}
 
+		// Раунд 20: пол ставки — максимум из min_bid_amount записи и текущей
+		// лидирующей активной ставки. Если ставок в раунде нет, действует
+		// min_bid_amount; как только появилась последняя ставка — она
+		// становится нижней границей, и так по нарастающей до завершения
+		// раундов. Пол не понижается: GREATEST при записи min_bid_amount
+		// сохраняет достигнутый уровень между раундами.
+		var topBid int64
+		if err := tx.QueryRow(ctx, `SELECT COALESCE(MAX(amount),0) FROM star_gift_auction_bids WHERE gift_id=$1 AND active`, req.GiftID).
+			Scan(&topBid); err != nil {
+			return err
+		}
+		if topBid > minimum {
+			minimum = topBid
+		}
+
 		// ИСПРАВЛЕНИЕ: Разрешаем ставки, если статус 'pending' (предстоящий) ИЛИ 'active'.
 		// Убираем жесткую проверку req.Date < startDate.
 		if (status != "active" && status != "pending") || req.Date >= endDate || req.BidAmount < minimum {
@@ -1056,7 +1161,11 @@ returned=false,active=true,version=star_gift_auction_bids.version+1`,
 VALUES($1,$2,$3,$4,$5,$6)`, req.UserID, req.FormID, req.GiftID, req.BidAmount, balance.Balance, req.Date); err != nil {
 			return err
 		}
-		_, err = tx.Exec(ctx, `UPDATE star_gift_auctions SET version=version+1,updated_at=now() WHERE gift_id=$1`, req.GiftID)
+		// Раунд 20: min_bid_amount монотонно поднимается до новой нижней
+		// границы, чтобы следующее состояние аукциона (и клиент) показывали
+		// актуальный пол ставки.
+		_, err = tx.Exec(ctx, `UPDATE star_gift_auctions SET version=version+1,updated_at=now(),
+min_bid_amount=GREATEST(star_gift_auctions.min_bid_amount,$2) WHERE gift_id=$1`, req.GiftID, minimum)
 		return err
 	})
 	if err != nil {
@@ -1115,13 +1224,25 @@ func (s *StarGiftLifecycleStore) loadStarGiftAuction(ctx context.Context, userID
 	}
 	out := domain.StarGiftAuction{Gift: gift}
 	var status string
+	var roundDurationsRaw []byte
 	if err := s.db.QueryRow(ctx, `SELECT version,start_date,end_date,min_bid_amount,next_round_at,last_gift_num,gifts_left,
-current_round,total_rounds,round_duration,status FROM star_gift_auctions WHERE gift_id=$1`, giftID).Scan(&out.Version, &out.StartDate,
+current_round,total_rounds,round_duration,status,round_durations FROM star_gift_auctions WHERE gift_id=$1`, giftID).Scan(&out.Version, &out.StartDate,
 		&out.EndDate, &out.MinBidAmount, &out.NextRoundAt, &out.LastGiftNum, &out.GiftsLeft, &out.CurrentRound,
-		&out.TotalRounds, &out.RoundDuration, &status); err != nil {
+		&out.TotalRounds, &out.RoundDuration, &status, &roundDurationsRaw); err != nil {
 		return domain.StarGiftAuction{}, err
 	}
+	out.RoundDurations = parseAuctionRoundDurations(roundDurationsRaw)
 	out.Finished = status == "completed" || status == "cancelled"
+	// Раунд 20: граница текущего раунда для отображения пересчитывается из
+	// индивидуальных длительностей (при NULL-jsonb совпадает с сохранённой).
+	// Значение капится end_date так же, как его пишет settle.
+	if !out.Finished && out.CurrentRound >= 1 && out.CurrentRound <= out.TotalRounds {
+		boundary := auctionRoundBoundary(out.StartDate, out.RoundDurations, out.CurrentRound, out.RoundDuration)
+		if boundary > out.EndDate {
+			boundary = out.EndDate
+		}
+		out.NextRoundAt = boundary
+	}
 	if out.Finished {
 		if err := s.db.QueryRow(ctx, `SELECT COALESCE(AVG(bid_amount)::bigint,0) FROM star_gift_auction_acquired WHERE gift_id=$1`, giftID).
 			Scan(&out.AveragePrice); err != nil {
@@ -1147,6 +1268,11 @@ ORDER BY amount DESC,bid_date,bidder_user_id LIMIT 20`, giftID)
 		out.BidLevels = append(out.BidLevels, level)
 	}
 	rows.Close()
+	// Раунд 20: сумма лидирующей активной ставки — нижняя граница следующей
+	// ставки (используется RPC-валидацией формы ставки).
+	if len(out.BidLevels) > 0 {
+		out.TopBidAmount = out.BidLevels[0].Amount
+	}
 	topRows, err := s.db.Query(ctx, `SELECT bidder_user_id FROM star_gift_auction_bids WHERE gift_id=$1 AND active
 ORDER BY amount DESC,bid_date,bidder_user_id LIMIT 3`, giftID)
 	if err != nil {
