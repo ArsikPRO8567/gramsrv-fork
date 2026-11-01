@@ -110,6 +110,18 @@ func fillStarGiftSnapshot(action *domain.MessageStarGiftAction, gift domain.Star
 		action.AvailabilityTotal = gift.AvailabilityTotal
 		action.AvailabilityRemains = gift.AvailabilityRemains
 	}
+	// Полный снимок каталога (официальные дампы 81530/57253/100802): limited,
+	// sold_out, даты продаж (только у sold-out) и peer_color_available —
+	// зеркально catalog-проекции tgStarGift.
+	action.Limited = gift.Limited
+	if gift.SoldOut || (gift.Limited && gift.AvailabilityRemains <= 0) {
+		action.SoldOut = true
+		action.FirstSaleDate = gift.FirstSaleDate
+		action.LastSaleDate = gift.LastSaleDate
+	}
+	if gift.PeerColorAvailable {
+		action.PeerColorAvailable = true
+	}
 	if releasedBy := gift.ReleasedBy; releasedBy.Type == domain.PeerTypeUser || releasedBy.Type == domain.PeerTypeChannel {
 		released := releasedBy
 		action.ReleasedBy = &released
@@ -166,10 +178,11 @@ func (s *StarGiftLifecycleStore) PurchaseStarGift(ctx context.Context, req domai
 			resultGift = gift
 			savedGift = saved
 			sticker := gift.Sticker
-			// Матрица подписей сервисного сообщения (см. domain.StarGiftMessageFlags):
-			// улучшаемый/предоплаченный подарок не несёт convert_stars — клиент
-			// показывает «превратить в уникальный коллекционный»/«Распаковать»
-			// вместо «обменять на звёзды», конвертация предоплаченного запрещена.
+			// Матрица подписей сервисного сообщения (см. domain.StarGiftMessageFlags,
+			// калибровка по официальным дампам 81530/57253/183490):
+			// convert_stars живёт на action всегда, когда конвертация разрешена
+			// (в том числе одновременно с can_upgrade), и убирается только
+			// у предоплаченных подарков — конвертация для них запрещена.
 			canUpgrade, actionConvertStars := domain.StarGiftMessageFlags(gift, saved.ConvertStars, saved.PrepaidUpgradeStars)
 			send.Media = &domain.MessageMedia{Kind: domain.MessageMediaKindService, ServiceAction: &domain.MessageServiceAction{
 				Kind: domain.MessageServiceActionStarGift, StarGift: fillStarGiftSnapshot(&domain.MessageStarGiftAction{
@@ -185,15 +198,16 @@ func (s *StarGiftLifecycleStore) PurchaseStarGift(ctx context.Context, req domai
 					// upgrade_stars > 0 включает у получателя кнопку бесплатного
 					// «Распаковать» (payments.upgradeStarGift без списания звёзд:
 					// entitlement уже лежит в saved gift prepaid_upgrade_stars).
-					Stars:        gift.Stars,
-					ConvertStars: actionConvertStars,
-					Title:        gift.Title,
-					Sticker:      &sticker,
-					Message:      req.Message,
-					FromUserID:   req.BuyerUserID,
-					PeerUserID:   req.To.ID,
-					To:           req.To,
-					NameHidden:   req.HideName,
+					Stars:           gift.Stars,
+					ConvertStars:    actionConvertStars,
+					Title:           gift.Title,
+					Sticker:         &sticker,
+					Message:         req.Message,
+					MessageEntities: req.MessageEntities,
+					FromUserID:      req.BuyerUserID,
+					PeerUserID:      req.To.ID,
+					To:              req.To,
+					NameHidden:      req.HideName,
 					// Свежий подарок ещё не отображается в профиле получателя:
 					// Saved=false — иначе клиент получателя показывает «сейчас
 					// подарок виден в вашем профиле» вместо подсказки об
@@ -263,6 +277,10 @@ func (s *StarGiftLifecycleStore) purchaseStarGiftToChannel(ctx context.Context, 
 		}
 		saved.ID, saved.SavedID = id, id
 		sticker := gift.Sticker
+		// Матрица подписей сервисного сообщения (см. domain.StarGiftMessageFlags):
+		// как и в приватной покупке — convert_stars при разрешённой конвертации,
+		// ноль только у предоплаченных улучшений.
+		canUpgrade, actionConvertStars := domain.StarGiftMessageFlags(gift, saved.ConvertStars, saved.PrepaidUpgradeStars)
 		action := domain.ChannelMessageAction{
 			Type: domain.ChannelActionStarGift,
 			StarGift: fillStarGiftSnapshot(&domain.MessageStarGiftAction{
@@ -270,17 +288,18 @@ func (s *StarGiftLifecycleStore) purchaseStarGiftToChannel(ctx context.Context, 
 				// Канальная покупка — тоже обычное сообщение о дарении: цена в
 				// объекте равна сумме цены подарка и апгрейда, флаги prepaid_upgrade
 				// не выставляются.
-				Stars:         gift.Stars + saved.PrepaidUpgradeStars,
-				ConvertStars:  saved.ConvertStars,
-				Title:         gift.Title,
-				Sticker:       &sticker,
-				Message:       saved.Message,
-				FromUserID:    req.BuyerUserID,
-				PeerChannelID: req.To.ID,
-				SavedID:       id,
-				NameHidden:    saved.NameHidden,
-				Saved:         true,
-				CanUpgrade:    gift.UpgradeStars > 0,
+				Stars:           gift.Stars + saved.PrepaidUpgradeStars,
+				ConvertStars:    actionConvertStars,
+				Title:           gift.Title,
+				Sticker:         &sticker,
+				Message:         saved.Message,
+				MessageEntities: saved.MessageEntities,
+				FromUserID:      req.BuyerUserID,
+				PeerChannelID:   req.To.ID,
+				SavedID:         id,
+				NameHidden:      saved.NameHidden,
+				Saved:           true,
+				CanUpgrade:      canUpgrade,
 				// PrepaidUpgradeHash сознательно не включается: hash — это инвойс
 				// «оплатить улучшение чужого подарка», он привязан к приватному диалогу
 				// плательщика. В канальном действии он заставляет клиентов отправлять
@@ -375,6 +394,13 @@ ON CONFLICT(user_id,gift_id) DO UPDATE SET purchased_count=star_gift_user_purcha
 WHERE NOT $3 OR star_gift_user_purchases.purchased_count<$4 RETURNING purchased_count`, req.BuyerUserID, gift.ID,
 		gift.LimitedPerUser, gift.PerUserTotal).Scan(&purchased); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
+			// Документация payments.sendStarsForm: исчерпанный персональный
+			// лимит starGift.limited_per_user — это STARGIFT_USER_USAGE_LIMITED,
+			// а не общий STARGIFT_INVALID: клиент показывает «Вы отправили
+			// уже {число} таких подарков, это максимальное количество».
+			if gift.LimitedPerUser {
+				return domain.StarGift{}, domain.SavedStarGift{}, domain.StarsBalance{}, domain.ErrStarGiftUserLimit
+			}
 			return domain.StarGift{}, domain.SavedStarGift{}, domain.StarsBalance{}, domain.ErrStarGiftUnavailable
 		}
 		return domain.StarGift{}, domain.SavedStarGift{}, domain.StarsBalance{}, err
@@ -394,6 +420,23 @@ WHERE gift_id=$1 AND availability_remains>0`, gift.ID, req.Date); err != nil || 
 last_sale_date=$2,updated_at=now() WHERE gift_id=$1`, gift.ID, req.Date); err != nil {
 		return domain.StarGift{}, domain.SavedStarGift{}, domain.StarsBalance{}, err
 	}
+	// Снимок каталога для сервисного сообщения отражает состояние ПОСЛЕ этой
+	// покупки (официальный дамп 81530: у получателя последнего экземпляра
+	// remains=0, sold_out=true, last_sale_date = дата сообщения). До этого
+	// места gift.AvailabilityRemains хранил остаток до декремента.
+	if gift.Limited {
+		gift.AvailabilityRemains = remains - 1
+		if gift.AvailabilityRemains < 0 {
+			gift.AvailabilityRemains = 0
+		}
+		if gift.AvailabilityRemains <= 0 {
+			gift.SoldOut = true
+		}
+	}
+	if gift.FirstSaleDate == 0 {
+		gift.FirstSaleDate = req.Date
+	}
+	gift.LastSaleDate = req.Date
 	charge := gift.Stars + upgradePrice
 	balance, err := s.debitLifecycleAmount(ctx, tx, req.BuyerUserID,
 		domain.StarGiftAmount{Currency: domain.StarGiftCurrencyStars, Amount: charge}, domain.StarsReasonGift,
@@ -408,7 +451,8 @@ last_sale_date=$2,updated_at=now() WHERE gift_id=$1`, gift.ID, req.Date); err !=
 	}
 	saved := domain.SavedStarGift{Owner: req.To, FromUserID: req.BuyerUserID, GiftID: gift.ID, RevisionID: gift.RevisionID,
 		Date: req.Date, NameHidden: req.HideName, ConvertStars: gift.ConvertStars, PrepaidUpgradeStars: upgradePrice,
-		PrepaidUpgradeHash: prepayHash, Message: req.Message, Unsaved: req.RecipientUnsaved, GiftNum: giftNum}
+		PrepaidUpgradeHash: prepayHash, Message: req.Message, MessageEntities: req.MessageEntities,
+		Unsaved: req.RecipientUnsaved, GiftNum: giftNum}
 	return gift, saved, balance, nil
 }
 

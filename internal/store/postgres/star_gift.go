@@ -2,6 +2,7 @@ package postgres
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strconv"
@@ -234,8 +235,8 @@ INSERT INTO star_gift_catalog_revisions (
     background_center_color, background_edge_color, background_text_color
 ) VALUES (
     $1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,
-	NULLIF($19::bigint,0),$20,$21::jsonb,$22,$23,$24,$25,$26,$27,$28,$29,
-	$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40
+        NULLIF($19::bigint,0),$20,$21::jsonb,$22,$23,$24,$25,$26,$27,$28,$29,
+        $30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40
 )`,
 			revisionID, giftID, revision, write.Title, write.Stars, write.ConvertStars, write.Document.ID,
 			string(write.Animation.JSON), write.Animation.SHA256, write.Animation.SourceName, string(write.Animation.SourceFormat),
@@ -465,18 +466,44 @@ func (s *StarGiftStore) Create(ctx context.Context, gift domain.SavedStarGift) (
 WITH next_id AS (
     SELECT nextval(pg_get_serial_sequence('public.peer_star_gifts', 'id'))::bigint AS id
 )
-INSERT INTO peer_star_gifts (id, owner_peer_type, owner_peer_id, from_user_id, gift_id, catalog_revision_id, msg_id, saved_id, gift_date, name_hidden, unsaved, converted, convert_stars, prepaid_upgrade_stars, prepaid_upgrade_hash, gift_num, message)
+INSERT INTO peer_star_gifts (id, owner_peer_type, owner_peer_id, from_user_id, gift_id, catalog_revision_id, msg_id, saved_id, gift_date, name_hidden, unsaved, converted, convert_stars, prepaid_upgrade_stars, prepaid_upgrade_hash, gift_num, message, message_entities)
 SELECT next_id.id, $1,$2,$3,$4,$5,$6,
        CASE WHEN $1 = 'channel' AND $7::bigint = 0 THEN next_id.id ELSE $7::bigint END,
-       $8,$9,$10,false,$11,$12,$13,$14,$15
+       $8,$9,$10,false,$11,$12,$13,$14,$15,$16::jsonb
 FROM next_id
 RETURNING id`,
 		string(gift.Owner.Type), gift.Owner.ID, gift.FromUserID, gift.GiftID, gift.RevisionID, gift.MsgID, gift.SavedID, gift.Date,
-		gift.NameHidden, gift.Unsaved, gift.ConvertStars, gift.PrepaidUpgradeStars, gift.PrepaidUpgradeHash, gift.GiftNum, gift.Message).Scan(&id)
+		gift.NameHidden, gift.Unsaved, gift.ConvertStars, gift.PrepaidUpgradeStars, gift.PrepaidUpgradeHash, gift.GiftNum, gift.Message,
+		string(encodeStarGiftMessageEntities(gift.MessageEntities))).Scan(&id)
 	if err != nil {
 		return 0, fmt.Errorf("create star gift: %w", err)
 	}
 	return id, nil
+}
+
+// encodeStarGiftMessageEntities сериализует entity-разметку附言 для
+// peer_star_gifts.message_entities (jsonb).
+func encodeStarGiftMessageEntities(entities []domain.MessageEntity) []byte {
+	if len(entities) == 0 {
+		return []byte("[]")
+	}
+	data, err := json.Marshal(entities)
+	if err != nil {
+		return []byte("[]")
+	}
+	return data
+}
+
+// decodeStarGiftMessageEntities читает entity-разметку附言 из jsonb-колонки.
+func decodeStarGiftMessageEntities(raw string) []domain.MessageEntity {
+	if raw == "" || raw == "[]" {
+		return nil
+	}
+	var entities []domain.MessageEntity
+	if err := json.Unmarshal([]byte(raw), &entities); err != nil {
+		return nil
+	}
+	return entities
 }
 
 func (s *StarGiftStore) ListByOwner(ctx context.Context, owner domain.Peer, excludeUnsaved bool, offset string, limit int) (domain.SavedStarGiftPage, error) {
@@ -582,7 +609,7 @@ SELECT p.id, p.owner_peer_type, p.owner_peer_id, p.from_user_id, p.gift_id, p.ca
        p.msg_id, p.saved_id, p.gift_date, p.name_hidden, p.unsaved, p.converted, p.convert_stars, p.prepaid_upgrade_stars, p.prepaid_upgrade_hash, p.gift_num,
        p.lifecycle_status, p.transfer_stars, p.can_export_at, p.can_transfer_at, p.can_resell_at,
        p.drop_original_details_stars, p.can_craft_at,
-       p.message, COALESCE(p.unique_gift_id, 0), p.upgrade_msg_id, p.pinned_order,
+       p.message, COALESCE(p.message_entities, '[]'::jsonb)::text, COALESCE(p.unique_gift_id, 0), p.upgrade_msg_id, p.pinned_order,
        COALESCE((SELECT array_agg(i.collection_id ORDER BY c.sort_order, i.collection_id)
                  FROM star_gift_collection_items i
                  JOIN star_gift_collections c ON c.collection_id=i.collection_id
@@ -677,8 +704,8 @@ CROSS JOIN LATERAL (
     WHERE r.saved_gift_id=p.id AND r.owner_user_id=p.owner_peer_id
 ) ref
 WHERE p.owner_peer_type=$1 AND p.owner_peer_id=$2 AND p.lifecycle_status='active'
-	  AND (ref.msg_id=ANY($3::bigint[])
-	   OR u.slug=ANY($4::text[]))`
+          AND (ref.msg_id=ANY($3::bigint[])
+           OR u.slug=ANY($4::text[]))`
 	}
 	rows, err := s.db.Query(ctx, query, string(owner.Type), owner.ID, values, slugs)
 	if err != nil {
@@ -734,9 +761,9 @@ func (s *StarGiftStore) GetByRef(ctx context.Context, ref domain.SavedStarGiftRe
 	row := s.db.QueryRow(ctx, `
 SELECT p.id, p.owner_peer_type, p.owner_peer_id, p.from_user_id, p.gift_id, p.catalog_revision_id,
        p.msg_id, p.saved_id, p.gift_date, p.name_hidden, p.unsaved, p.converted, p.convert_stars, p.prepaid_upgrade_stars, p.prepaid_upgrade_hash, p.gift_num,
-	   p.lifecycle_status, p.transfer_stars, p.can_export_at, p.can_transfer_at, p.can_resell_at,
-	   p.drop_original_details_stars, p.can_craft_at,
-       p.message, COALESCE(p.unique_gift_id, 0), p.upgrade_msg_id, p.pinned_order,
+           p.lifecycle_status, p.transfer_stars, p.can_export_at, p.can_transfer_at, p.can_resell_at,
+           p.drop_original_details_stars, p.can_craft_at,
+       p.message, COALESCE(p.message_entities, '[]'::jsonb)::text, COALESCE(p.unique_gift_id, 0), p.upgrade_msg_id, p.pinned_order,
        COALESCE((SELECT array_agg(i.collection_id ORDER BY c.sort_order, i.collection_id)
                  FROM star_gift_collection_items i
                  JOIN star_gift_collections c ON c.collection_id=i.collection_id
@@ -874,9 +901,9 @@ func (s *StarGiftStore) MarkConverted(ctx context.Context, ref domain.SavedStarG
 		row := tx.QueryRow(ctx, `
 SELECT p.id, p.owner_peer_type, p.owner_peer_id, p.from_user_id, p.gift_id, p.catalog_revision_id,
        p.msg_id, p.saved_id, p.gift_date, p.name_hidden, p.unsaved, p.converted, p.convert_stars, p.prepaid_upgrade_stars, p.prepaid_upgrade_hash, p.gift_num,
-	   p.lifecycle_status, p.transfer_stars, p.can_export_at, p.can_transfer_at, p.can_resell_at,
-	   p.drop_original_details_stars, p.can_craft_at,
-       p.message, COALESCE(p.unique_gift_id, 0), p.upgrade_msg_id, p.pinned_order,
+           p.lifecycle_status, p.transfer_stars, p.can_export_at, p.can_transfer_at, p.can_resell_at,
+           p.drop_original_details_stars, p.can_craft_at,
+       p.message, COALESCE(p.message_entities, '[]'::jsonb)::text, COALESCE(p.unique_gift_id, 0), p.upgrade_msg_id, p.pinned_order,
        COALESCE((SELECT array_agg(i.collection_id ORDER BY c.sort_order, i.collection_id)
                  FROM star_gift_collection_items i
                  JOIN star_gift_collections c ON c.collection_id=i.collection_id
@@ -918,15 +945,16 @@ WHERE `+where+` FOR UPDATE`, args...)
 
 func scanSavedStarGift(row rowScanner) (domain.SavedStarGift, error) {
 	var g domain.SavedStarGift
-	var ownerType string
+	var ownerType, messageEntitiesJSON string
 	if err := row.Scan(&g.ID, &ownerType, &g.Owner.ID, &g.FromUserID, &g.GiftID, &g.RevisionID, &g.MsgID, &g.SavedID, &g.Date,
 		&g.NameHidden, &g.Unsaved, &g.Converted, &g.ConvertStars, &g.PrepaidUpgradeStars, &g.PrepaidUpgradeHash, &g.GiftNum,
 		&g.LifecycleStatus, &g.TransferStars, &g.CanExportAt, &g.CanTransferAt, &g.CanResellAt,
-		&g.DropOriginalDetailsStars, &g.CanCraftAt, &g.Message, &g.UniqueGiftID,
+		&g.DropOriginalDetailsStars, &g.CanCraftAt, &g.Message, &messageEntitiesJSON, &g.UniqueGiftID,
 		&g.UpgradeMsgID, &g.PinnedOrder, &g.CollectionIDs); err != nil {
 		return domain.SavedStarGift{}, err
 	}
 	g.Owner.Type = domain.PeerType(ownerType)
+	g.MessageEntities = decodeStarGiftMessageEntities(messageEntitiesJSON)
 	return g, nil
 }
 
@@ -968,22 +996,53 @@ func validStarGiftOwner(owner domain.Peer) bool {
 	return owner.ID != 0 && (owner.Type == domain.PeerTypeUser || owner.Type == domain.PeerTypeChannel)
 }
 
+// UserPurchaseCounts возвращает число экземпляров каждого подарка из giftIDs,
+// которое пользователь уже отправил (таблица star_gift_user_purchases).
+// Источник убывающего счётчика starGift.per_user_remains: официальные серверы
+// уменьшают остаток после каждой отправки, а при исчерпании лимита
+// limited_per_user отклоняют отправку с STARGIFT_USER_USAGE_LIMITED.
+func (s *StarGiftStore) UserPurchaseCounts(ctx context.Context, userID int64, giftIDs []int64) (map[int64]int, error) {
+	if s == nil || s.db == nil || userID <= 0 || len(giftIDs) == 0 {
+		return map[int64]int{}, nil
+	}
+	rows, err := s.db.Query(ctx, `SELECT gift_id, purchased_count FROM star_gift_user_purchases
+WHERE user_id=$1 AND gift_id = ANY($2)`, userID, giftIDs)
+	if err != nil {
+		return nil, fmt.Errorf("list star gift user purchases: %w", err)
+	}
+	defer rows.Close()
+	counts := make(map[int64]int, len(giftIDs))
+	for rows.Next() {
+		var giftID int64
+		var count int
+		if err := rows.Scan(&giftID, &count); err != nil {
+			return nil, fmt.Errorf("scan star gift user purchase: %w", err)
+		}
+		if count > 0 {
+			counts[giftID] = count
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate star gift user purchases: %w", err)
+	}
+	return counts, nil
+}
 
 func (s *StarGiftStore) GetWhitelistInfo(ctx context.Context, giftID, userID int64) (bool, bool, bool, bool, error) {
 	uIDStr := strconv.FormatInt(userID, 10)
 
 	query := `
-		SELECT 
-			(allowed_buyers @> jsonb_build_array($2::text)) as allowed,
-			COALESCE(gift_hidden, FALSE) as hidden,
-			COALESCE(numbered, FALSE) as numbered,
-			TRUE as has_whitelist
-		FROM gift_whitelists 
-		WHERE gift_id = $1;`
+                SELECT 
+                        (allowed_buyers @> jsonb_build_array($2::text)) as allowed,
+                        COALESCE(gift_hidden, FALSE) as hidden,
+                        COALESCE(numbered, FALSE) as numbered,
+                        TRUE as has_whitelist
+                FROM gift_whitelists 
+                WHERE gift_id = $1;`
 
 	var allowed, hidden, numbered, hasWhitelist bool
 	err := s.db.QueryRow(ctx, query, giftID, uIDStr).Scan(&allowed, &hidden, &numbered, &hasWhitelist)
-	
+
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return true, false, false, false, nil
@@ -1020,12 +1079,12 @@ func (s *StarGiftStore) BurnAuctionGifts(ctx context.Context, giftID int64, coun
 	if count <= 0 {
 		return nil
 	}
-	
+
 	return withTx(ctx, s.db, "burn auction gifts", func(tx pgx.Tx) error {
 		_, err := tx.Exec(ctx, `
-			UPDATE star_gift_catalog 
-			SET availability_remains = GREATEST(0, availability_remains - $2) 
-			WHERE gift_id = $1`, giftID, count)
+                        UPDATE star_gift_catalog 
+                        SET availability_remains = GREATEST(0, availability_remains - $2) 
+                        WHERE gift_id = $1`, giftID, count)
 		if err != nil {
 			return err
 		}
@@ -1036,12 +1095,11 @@ func (s *StarGiftStore) BurnAuctionGifts(ctx context.Context, giftID int64, coun
 		// Upsert: на исторических базах строка уже существует и поведение прежнее (инкремент), на свежих базах
 		// строка создаётся первой же раздачей аукционных подарков — прежний UPDATE без совпадений молча терял счётчик номеров.
 		_, err = tx.Exec(ctx, `
-			INSERT INTO star_gift_auction_state (gift_id, last_gift_num)
-			VALUES ($1, $2::bigint)
-			ON CONFLICT (gift_id)
-			DO UPDATE SET last_gift_num = star_gift_auction_state.last_gift_num + $2::bigint`,
+                        INSERT INTO star_gift_auction_state (gift_id, last_gift_num)
+                        VALUES ($1, $2::bigint)
+                        ON CONFLICT (gift_id)
+                        DO UPDATE SET last_gift_num = star_gift_auction_state.last_gift_num + $2::bigint`,
 			giftID, count)
 		return err
 	})
 }
-
