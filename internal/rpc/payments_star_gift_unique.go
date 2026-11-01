@@ -488,7 +488,7 @@ func tgUniqueGiftChatTheme(gift domain.UniqueStarGift) *tg.ChatThemeUniqueGift {
 func tgUniqueGiftChatThemeForViewer(gift domain.UniqueStarGift, viewerUserID int64) *tg.ChatThemeUniqueGift {
 	return &tg.ChatThemeUniqueGift{
 		Gift:          tgUniqueStarGiftForViewer(gift, viewerUserID),
-		ThemeSettings: tdesktop.UniqueGiftThemeSettings(gift.Backdrop.CenterColor, gift.Backdrop.EdgeColor),
+		ThemeSettings: tdesktop.UniqueGiftThemeSettings(gift),
 	}
 }
 
