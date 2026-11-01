@@ -2,16 +2,20 @@ package domain
 
 import "testing"
 
-// Матрица флагов messageActionStarGift воспроизводит выбор подписи ячейки
-// сервисного сообщения в ChatActionCell официального клиента (12.x):
+// Матрица флагов messageActionStarGift калибрована по официальным дампам
+// messageActionStarGift (raw_messages.txt, реальные сообщения официального
+// сервера), а не по частной логике ячейки клиента:
 //
-//	Gift2ActionOutInfo        «{user} может добавить этот подарок в профиль
-//	                           или обменять на N звёзд»       — convert_stars>0
-//	Gift2ActionOutInfoUpgrade «…или превратить в уникальный коллекционный»
-//	                                                          — can_upgrade, без convert_stars
-//	Gift2ActionOutInfoNoConvert «{user} может добавить этот подарок в профиль»
-//	                                                          — без обоих
-//	Gift2ActionUpgradeOut/Gift2ActionUpgrade («Распаковать»)  — can_upgrade && upgrade_stars>0
+//	сообщение 81530: limited+sold_out подарок, can_upgrade=true,
+//	                 action.convert_stars=9, action.upgrade_stars отсутствует;
+//	сообщение 57253: подарок с附言, can_upgrade=true, action.convert_stars=21;
+//	сообщение 100802: name_hidden, can_upgrade=false, action.convert_stars=43;
+//	сообщение 183490: prepaid_upgrade=true, upgrade_separate=true,
+//	                 action.convert_stars отсутствует, action.upgrade_stars=25.
+//
+// Вывод: convert_stars живёт на action всегда, когда конвертация разрешена —
+// в том числе одновременно с can_upgrade; исчезает только у предоплаченных
+// подарков (конвертация для них запрещена сервером).
 func TestStarGiftMessageFlags(t *testing.T) {
 	convertible := StarGift{Stars: 50, ConvertStars: 25, UpgradeStars: 0}
 	upgradeable := StarGift{Stars: 50, ConvertStars: 25, UpgradeStars: 100,
@@ -27,13 +31,17 @@ func TestStarGiftMessageFlags(t *testing.T) {
 		wantCanUpgrade    bool
 		wantActionConvert int64
 	}{
+		// Дамп 100802: can_upgrade=false, convert_stars=43.
 		{"обычный конвертируемый", convertible, 25, 0, false, 25},
 		{"обычный без конвертации", convertible, 0, 0, false, 0},
-		{"улучшаемый лимитированный", upgradeable, 25, 0, true, 0},
+		// Дампы 81530 и 57253: can_upgrade=true И convert_stars>0 одновременно.
+		{"улучшаемый лимитированный", upgradeable, 25, 0, true, 25},
 		{"пул апгрейдов исчерпан", upgradeSoldOut, 25, 0, false, 25},
+		// Дамп 183490: prepaid → convert_stars отсутствует.
 		{"предоплаченный", upgradeable, 25, 100, true, 0},
 		{"предоплаченный без звёзд подарка", upgradeable, 0, 100, true, 0},
-		{"улучшаемый без пула (открытый)", StarGift{ConvertStars: 25, UpgradeStars: 100}, 25, 0, true, 0},
+		// Открытый пул (UpgradeTotal=0) — улучшение доступно, конвертация тоже.
+		{"улучшаемый без пула (открытый)", StarGift{ConvertStars: 25, UpgradeStars: 100}, 25, 0, true, 25},
 	}
 	for _, tc := range cases {
 		canUpgrade, convertStars := StarGiftMessageFlags(tc.gift, tc.savedConvertStars, tc.prepaidStars)

@@ -716,23 +716,26 @@ type MessageGiftStarsAction struct {
 // MessageStarGiftAction 是 messageActionStarGift 的协议中立载荷：内嵌礼物快照（贴纸/星价）
 // 使收礼人无需额外拉取即可渲染。PeerUserID/PeerChannelID 为收礼方；NameHidden 时下发不暴露 from。
 type MessageStarGiftAction struct {
-	GiftID             int64     `json:"gift_id"`
-	Stars              int64     `json:"stars"`
-	ConvertStars       int64     `json:"convert_stars,omitempty"`
-	Title              string    `json:"title,omitempty"`
-	Sticker            *Document `json:"sticker,omitempty"`
-	Message            string    `json:"message,omitempty"`
-	FromUserID         int64     `json:"from_user_id,omitempty"`
-	PeerUserID         int64     `json:"peer_user_id,omitempty"`
-	PeerChannelID      int64     `json:"peer_channel_id,omitempty"`
-	SavedID            int64     `json:"saved_id,omitempty"`
-	NameHidden         bool      `json:"name_hidden,omitempty"`
-	Saved              bool      `json:"saved,omitempty"`
-	Converted          bool      `json:"converted,omitempty"`
-	CanUpgrade         bool      `json:"can_upgrade,omitempty"`
-	PrepaidUpgrade     bool      `json:"prepaid_upgrade,omitempty"`
-	PrepaidUpgradeHash string    `json:"prepaid_upgrade_hash,omitempty"`
-	UpgradeSeparate    bool      `json:"upgrade_separate,omitempty"`
+	GiftID       int64     `json:"gift_id"`
+	Stars        int64     `json:"stars"`
+	ConvertStars int64     `json:"convert_stars,omitempty"`
+	Title        string    `json:"title,omitempty"`
+	Sticker      *Document `json:"sticker,omitempty"`
+	Message      string    `json:"message,omitempty"`
+	// MessageEntities — entity-разметка附言 к подарку (премиум-эмодзи):
+	// попадает в messageActionStarGift.message.entities (TextWithEntities).
+	MessageEntities    []MessageEntity `json:"message_entities,omitempty"`
+	FromUserID         int64           `json:"from_user_id,omitempty"`
+	PeerUserID         int64           `json:"peer_user_id,omitempty"`
+	PeerChannelID      int64           `json:"peer_channel_id,omitempty"`
+	SavedID            int64           `json:"saved_id,omitempty"`
+	NameHidden         bool            `json:"name_hidden,omitempty"`
+	Saved              bool            `json:"saved,omitempty"`
+	Converted          bool            `json:"converted,omitempty"`
+	CanUpgrade         bool            `json:"can_upgrade,omitempty"`
+	PrepaidUpgrade     bool            `json:"prepaid_upgrade,omitempty"`
+	PrepaidUpgradeHash string          `json:"prepaid_upgrade_hash,omitempty"`
+	UpgradeSeparate    bool            `json:"upgrade_separate,omitempty"`
 	// UpgradePriceStars belongs to the inner StarGift.upgrade_stars field and
 	// is the price of a normal paid upgrade. UpgradeStars below belongs to the
 	// outer messageActionStarGift and is only the amount already prepaid by the
@@ -747,9 +750,17 @@ type MessageStarGiftAction struct {
 	ReleasedBy          *Peer `json:"released_by,omitempty"`
 	AvailabilityTotal   int   `json:"availability_total,omitempty"`
 	AvailabilityRemains int   `json:"availability_remains,omitempty"`
-	UpgradeVariants     int   `json:"upgrade_variants,omitempty"`
-	ResellMinStars      int64 `json:"resell_min_stars,omitempty"`
-	LockedUntilDate     int   `json:"locked_until_date,omitempty"`
+	// Полный снимок каталога для блока подарка в сервисном сообщении
+	// (официальные дампы 81530/57253: limited, sold_out, first/last_sale_date
+	// присутствуют в action-копии StarGift, даты — только у sold-out).
+	Limited            bool  `json:"limited,omitempty"`
+	SoldOut            bool  `json:"sold_out,omitempty"`
+	FirstSaleDate      int   `json:"first_sale_date,omitempty"`
+	LastSaleDate       int   `json:"last_sale_date,omitempty"`
+	PeerColorAvailable bool  `json:"peer_color_available,omitempty"`
+	UpgradeVariants    int   `json:"upgrade_variants,omitempty"`
+	ResellMinStars     int64 `json:"resell_min_stars,omitempty"`
+	LockedUntilDate    int   `json:"locked_until_date,omitempty"`
 }
 
 type MessageStarGiftUniqueAction struct {
