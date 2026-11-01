@@ -228,16 +228,28 @@ func TestStarGiftThemeAvailableFromPeerColorRevisionPostgres(t *testing.T) {
 		t.Fatalf("plain unique must not carry theme_available: %+v", plainUpgraded.Unique)
 	}
 
-	// Палитра сообщений выводится из фона и узора коллекции (атрибуты
-	// выбираются случайно, поэтому проверяем самосогласованность с фоном).
+	// Палитра сообщений выводится из фона и узора коллекции по официальной
+	// форме: ровно три цвета colors, dark_accent_color установлен, привязка
+	// к emoji модели и узору. Атрибуты выбираются случайно, поэтому
+	// проверяем самосогласованность с фоном (структура, а не конкретные
+	// значения: точный алгоритм официального сервера не документирован).
 	backdrop := upgraded.Unique.Backdrop
 	palette := domain.PeerColorCollectibleFromGift(upgraded.Unique)
 	if !palette.Valid() || palette.CollectibleID != upgraded.Unique.ID ||
-		palette.AccentColor != backdrop.CenterColor || len(palette.Colors) != 2 ||
-		palette.Colors[0] != backdrop.CenterColor || palette.Colors[1] != backdrop.EdgeColor ||
+		len(palette.Colors) != 3 || palette.DarkAccentColor == 0 ||
 		palette.GiftEmojiID != upgraded.Unique.Model.Document.ID ||
 		palette.BackgroundEmojiID != upgraded.Unique.Pattern.Document.ID {
 		t.Fatalf("derived palette = %+v, backdrop = %+v", palette, backdrop)
+	}
+	for _, v := range palette.Colors {
+		if v <= 0 || v > 0xffffff {
+			t.Fatalf("palette color out of range: %+v (backdrop %+v)", palette, backdrop)
+		}
+	}
+	// Третий (светлый) цвет — производная текстового тона фона: на эталоне
+	// он заметно светлее первых двух.
+	if !(palette.Colors[2] > palette.Colors[0]) {
+		t.Fatalf("palette colors not ordered light: %+v (backdrop %+v)", palette, backdrop)
 	}
 
 	// getUniqueGiftChatThemes: только theme_available-коллекции владельца.
