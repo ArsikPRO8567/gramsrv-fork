@@ -129,6 +129,22 @@ func (s *Service) Catalog(ctx context.Context) ([]domain.StarGift, error) {
 	return append([]domain.StarGift(nil), s.gifts...), nil
 }
 
+// UserPurchaseCounts делегирует в хранилище число уже отправленных пользователем
+// экземпляров подарков (star_gift_user_purchases). Персональный остаток
+// per_user_remains считается в rpc-слое; хранилища без персистентных покупок
+// (in-memory) отдают пустую карту — счётчик просто не убывает.
+func (s *Service) UserPurchaseCounts(ctx context.Context, userID int64, giftIDs []int64) (map[int64]int, error) {
+	if s == nil || s.store == nil {
+		return map[int64]int{}, nil
+	}
+	if src, ok := s.store.(interface {
+		UserPurchaseCounts(ctx context.Context, userID int64, giftIDs []int64) (map[int64]int, error)
+	}); ok {
+		return src.UserPurchaseCounts(ctx, userID, giftIDs)
+	}
+	return map[int64]int{}, nil
+}
+
 func (s *Service) CatalogHash(ctx context.Context) (int, error) {
 	if err := s.ensureCatalog(ctx); err != nil {
 		return 0, err
