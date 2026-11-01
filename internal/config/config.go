@@ -429,6 +429,15 @@ type Config struct {
 	StarGiftResellDelay              time.Duration
 	StarGiftCraftDelay               time.Duration
 	StarGiftCraftChancePermille      int
+	// Лимиты цены листинга/офферов на маркете (раунд 20). Звёзды — целые,
+	// TON — нанотон. Граница со значением 0 не проверяется; значения по
+	// умолчанию повторяют клиентские ограничения официальных приложений
+	// (125..35000 звёзд, 0.01..10000 TON) и применяются и к выставлению на
+	// продажу, и к предложениям сделки.
+	StarGiftResellMinStars int64
+	StarGiftResellMaxStars int64
+	StarGiftResellMinTon   int64
+	StarGiftResellMaxTon   int64
 
 	// RatingEnabled controls the local admin-only composite account rating.
 	// Disabled keeps every local projection empty and refuses rating writes; no
@@ -913,6 +922,13 @@ func Load() (Config, error) {
 		StarGiftResellDelay:         envDurationOr("TELESRV_STARGIFT_RESELL_DELAY", 0),
 		StarGiftCraftDelay:          envDurationOr("TELESRV_STARGIFT_CRAFT_DELAY", 0),
 		StarGiftCraftChancePermille: envIntOr("TELESRV_STARGIFT_CRAFT_CHANCE_PERMILLE", 250),
+		// Лимиты цены продажи/офферов: 125..35000 звёзд, 0.01..10000 TON
+		// (нанотон) — границы официальных клиентов; сервер теперь
+		// проверяет их же и на листинге, и на предложениях сделки.
+		StarGiftResellMinStars: envInt64Or("TELESRV_STARGIFT_RESELL_MIN_STARS", 125),
+		StarGiftResellMaxStars: envInt64Or("TELESRV_STARGIFT_RESELL_MAX_STARS", 35_000),
+		StarGiftResellMinTon:   envInt64Or("TELESRV_STARGIFT_RESELL_MIN_TON_NANOTON", 10_000_000),
+		StarGiftResellMaxTon:   envInt64Or("TELESRV_STARGIFT_RESELL_MAX_TON_NANOTON", 10_000_000_000_000),
 
 		RatingEnabled:           envBoolOr("TELESRV_RATING_ENABLED", true),
 		RatingPendingDelay:      envDurationOr("TELESRV_RATING_PENDING_DELAY", 24*time.Hour),
@@ -1179,6 +1195,19 @@ func validateStarGiftConfig(cfg Config) error {
 	}
 	if cfg.StarGiftResellRateStars <= 0 || cfg.StarGiftResellRateNanoton <= 0 {
 		return fmt.Errorf("TELESRV_STARGIFT_RESELL_RATE_STARS and TELESRV_STARGIFT_RESELL_RATE_NANOTON must be positive")
+	}
+	// Лимиты цены: граница 0 означает «не проверять», поэтому отрицательные
+	// значения запрещены, а min<=max проверяется только когда обе границы
+	// активны. TON задаётся нанотонами.
+	if cfg.StarGiftResellMinStars < 0 || cfg.StarGiftResellMaxStars < 0 ||
+		cfg.StarGiftResellMinTon < 0 || cfg.StarGiftResellMaxTon < 0 {
+		return fmt.Errorf("TELESRV_STARGIFT_RESELL_MIN/MAX_* must be non-negative (0 disables the bound)")
+	}
+	if cfg.StarGiftResellMinStars > 0 && cfg.StarGiftResellMaxStars > 0 && cfg.StarGiftResellMinStars > cfg.StarGiftResellMaxStars {
+		return fmt.Errorf("TELESRV_STARGIFT_RESELL_MIN_STARS must not exceed TELESRV_STARGIFT_RESELL_MAX_STARS")
+	}
+	if cfg.StarGiftResellMinTon > 0 && cfg.StarGiftResellMaxTon > 0 && cfg.StarGiftResellMinTon > cfg.StarGiftResellMaxTon {
+		return fmt.Errorf("TELESRV_STARGIFT_RESELL_MIN_TON_NANOTON must not exceed TELESRV_STARGIFT_RESELL_MAX_TON_NANOTON")
 	}
 	return nil
 }
