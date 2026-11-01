@@ -1083,7 +1083,7 @@ func lockSavedStarGiftByUniqueID(ctx context.Context, tx pgx.Tx, uniqueID int64)
 	row := tx.QueryRow(ctx, `SELECT p.id,p.owner_peer_type,p.owner_peer_id,p.from_user_id,p.gift_id,p.catalog_revision_id,
          p.msg_id,p.saved_id,p.gift_date,p.name_hidden,p.unsaved,p.converted,p.convert_stars,p.prepaid_upgrade_stars,p.prepaid_upgrade_hash,p.gift_num,
          p.lifecycle_status,p.transfer_stars,p.can_export_at,p.can_transfer_at,p.can_resell_at,p.drop_original_details_stars,p.can_craft_at,
-         p.message,COALESCE(p.unique_gift_id,0),p.upgrade_msg_id,p.pinned_order,
+         p.message,COALESCE(p.message_entities,'[]'::jsonb)::text,COALESCE(p.unique_gift_id,0),p.upgrade_msg_id,p.pinned_order,
          COALESCE((SELECT array_agg(i.collection_id ORDER BY c.sort_order,i.collection_id) FROM star_gift_collection_items i
          JOIN star_gift_collections c ON c.collection_id=i.collection_id WHERE i.saved_gift_id=p.id),ARRAY[]::integer[])
          FROM peer_star_gifts p WHERE p.unique_gift_id=$1 FOR UPDATE`, uniqueID)
@@ -1313,8 +1313,8 @@ func (s *StarGiftLifecycleStore) ResolveStarGiftOffer(ctx context.Context, req d
 				if _, err := tx.Exec(ctx, `UPDATE star_gift_offers SET status='declined',resolved_at=$2,resolution_notified=true WHERE id=$1`, locked.ID, req.Date); err != nil {
 					return err
 				}
-				// Раунд 20: исходное сервисное сообщение-оффер перестаёт показывать
-				// обратный отсчёт — обе проекции получают Declined (кнопки у
+				// Раунд 20: исходное сервисное сообщение-оффер перестает показывать
+				// обратный отсчет — обе проекции получают Declined (кнопки у
 				// продавца исчезают, покупатель видит «предложение отклонено»).
 				if err := s.editStarGiftOfferMessageStateTx(ctx, tx, req.OwnerUserID, req.OfferMsgID, false, true, req.Date); err != nil {
 					return err
@@ -1353,7 +1353,7 @@ func (s *StarGiftLifecycleStore) ResolveStarGiftOffer(ctx context.Context, req d
 				return err
 			}
 			// Раунд 20: исходное сообщение принятого оффера получает Accepted;
-			// офферы того же подарка, автоматически отменённые этой покупкой,
+			// офферы того же подарка, автоматически отмененные этой покупкой,
 			// получают Declined — их кнопки у продавца тоже пропадают.
 			if err := s.editStarGiftOfferMessageStateTx(ctx, tx, req.OwnerUserID, req.OfferMsgID, true, false, req.Date); err != nil {
 				return err
@@ -1542,7 +1542,7 @@ type starGiftCancelledOfferRef struct {
 
 func (s *StarGiftLifecycleStore) refundPendingStarGiftOffersExcept(ctx context.Context, tx pgx.Tx, uniqueID, exceptID int64, date int) ([]starGiftCancelledOfferRef, error) {
 	rows, err := tx.Query(ctx, `SELECT id,buyer_user_id,currency,amount,owner_peer_type,owner_peer_id,offer_msg_id
-	 FROM star_gift_offers WHERE unique_gift_id=$1 AND status='pending' AND id<>$2 FOR UPDATE`, uniqueID, exceptID)
+         FROM star_gift_offers WHERE unique_gift_id=$1 AND status='pending' AND id<>$2 FOR UPDATE`, uniqueID, exceptID)
 	if err != nil {
 		return nil, err
 	}
@@ -1863,7 +1863,7 @@ func savedStarGiftByUniqueID(ctx context.Context, db sqlcgen.DBTX, uniqueID int6
 	row := db.QueryRow(ctx, `SELECT p.id,p.owner_peer_type,p.owner_peer_id,p.from_user_id,p.gift_id,p.catalog_revision_id,
          p.msg_id,p.saved_id,p.gift_date,p.name_hidden,p.unsaved,p.converted,p.convert_stars,p.prepaid_upgrade_stars,p.prepaid_upgrade_hash,p.gift_num,
          p.lifecycle_status,p.transfer_stars,p.can_export_at,p.can_transfer_at,p.can_resell_at,p.drop_original_details_stars,p.can_craft_at,
-         p.message,COALESCE(p.unique_gift_id,0),p.upgrade_msg_id,p.pinned_order,
+         p.message,COALESCE(p.message_entities,'[]'::jsonb)::text,COALESCE(p.unique_gift_id,0),p.upgrade_msg_id,p.pinned_order,
          COALESCE((SELECT array_agg(i.collection_id ORDER BY c.sort_order,i.collection_id) FROM star_gift_collection_items i
          JOIN star_gift_collections c ON c.collection_id=i.collection_id WHERE i.saved_gift_id=p.id),ARRAY[]::integer[])
          FROM peer_star_gifts p WHERE p.unique_gift_id=$1`, uniqueID)
