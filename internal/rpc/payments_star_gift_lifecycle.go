@@ -283,14 +283,13 @@ func (r *Router) starGiftAuctionBidTarget(ctx context.Context, userID int64, inv
 			return domain.StarGiftAuction{}, domain.Peer{}, 0, err
 		}
 	}
-	// Раунд 20: нижняя граница ставки — максимум из min_bid_amount записи,
-	// текущей лидирующей ставки (последняя ставка становится полом, ниже
-	// которого поставить нельзя) и собственной минимальной ставки пользователя
-	// (повторная ставка строго выше своей собственной).
+	// Раунд 20 (исправление): нижняя граница ставки — MinBidAmount состояния,
+	// который теперь гарантированно равен максимуму из min_bid_amount записи и
+	// «топ-1 + 1» (см. loadStarGiftAuction): ставка, равная топ-1, отклоняется,
+	// минимально допустимая — топ-ставка, увеличенная на 1. Для пользователя с
+	// собственной активной ставкой пол дополнительно поднимается до «своя
+	// ставка + 1» (повторная ставка строго выше своей собственной).
 	minimum := state.MinBidAmount
-	if state.TopBidAmount > minimum {
-		minimum = state.TopBidAmount
-	}
 	if oldAmount > 0 && state.UserState.MinBidAmount > minimum {
 		minimum = state.UserState.MinBidAmount
 	}
