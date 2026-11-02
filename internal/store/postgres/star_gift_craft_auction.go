@@ -1103,20 +1103,19 @@ func (s *StarGiftLifecycleStore) BidStarGiftAuction(ctx context.Context, req dom
 			return err
 		}
 
-		// Раунд 20: пол ставки — максимум из min_bid_amount записи и текущей
-		// лидирующей активной ставки. Если ставок в раунде нет, действует
-		// min_bid_amount; как только появилась последняя ставка — она
-		// становится нижней границей, и так по нарастающей до завершения
-		// раундов. Пол не понижается: GREATEST при записи min_bid_amount
-		// сохраняет достигнутый уровень между раундами.
+		// Раунд 20 (исправление): пол ставки — максимум из min_bid_amount записи и
+		// лидирующей активной ставки, УВЕЛИЧЕННОЙ НА 1: если топ-1 поставил 600
+		// звёзд, следующая допустимая ставка — 601, равная топ-1 ставка отклоняется.
+		// Пока ставок в раунде нет, действует исходный min_bid_amount; каждая
+		// новая лидирующая ставка поднимает пол до топ-1+1, и так по нарастающей
+		// до завершения раундов. Пол не понижается: GREATEST при записи
+		// min_bid_amount сохраняет достигнутый уровень между раундами.
 		var topBid int64
 		if err := tx.QueryRow(ctx, `SELECT COALESCE(MAX(amount),0) FROM star_gift_auction_bids WHERE gift_id=$1 AND active`, req.GiftID).
 			Scan(&topBid); err != nil {
 			return err
 		}
-		if topBid > minimum {
-			minimum = topBid
-		}
+		minimum = auctionBidFloor(minimum, topBid)
 
 		// ИСПРАВЛЕНИЕ: Разрешаем ставки, если статус 'pending' (предстоящий) ИЛИ 'active'.
 		// Убираем жесткую проверку req.Date < startDate.
@@ -1161,9 +1160,10 @@ returned=false,active=true,version=star_gift_auction_bids.version+1`,
 VALUES($1,$2,$3,$4,$5,$6)`, req.UserID, req.FormID, req.GiftID, req.BidAmount, balance.Balance, req.Date); err != nil {
 			return err
 		}
-		// Раунд 20: min_bid_amount монотонно поднимается до новой нижней
-		// границы, чтобы следующее состояние аукциона (и клиент) показывали
-		// актуальный пол ставки.
+		// Раунд 20 (исправление): min_bid_amount монотонно поднимается до новой
+		// нижней границы «топ-1 + 1», чтобы следующее состояние аукциона (и
+		// клиент) показывали актуальный пол ставки. minimum уже вычислен как
+		// максимум из прежнего пола и топ-ставки+1.
 		_, err = tx.Exec(ctx, `UPDATE star_gift_auctions SET version=version+1,updated_at=now(),
 min_bid_amount=GREATEST(star_gift_auctions.min_bid_amount,$2) WHERE gift_id=$1`, req.GiftID, minimum)
 		return err
@@ -1268,10 +1268,14 @@ ORDER BY amount DESC,bid_date,bidder_user_id LIMIT 20`, giftID)
 		out.BidLevels = append(out.BidLevels, level)
 	}
 	rows.Close()
-	// Раунд 20: сумма лидирующей активной ставки — нижняя граница следующей
-	// ставки (используется RPC-валидацией формы ставки).
+	// Раунд 20 (исправление): сумма лидирующей активной ставки + 1 — нижняя
+	// граница следующей ставки. Минимум в состоянии поднимается до «топ-1 + 1»
+	// и здесь, а не только при записи ставки: клиент в поле «Минимальная цена»
+	// видит корректное значение сразу, в том числе для строк, записанных до
+	// исправления (min_bid_amount равнялся самой топ-ставке).
 	if len(out.BidLevels) > 0 {
 		out.TopBidAmount = out.BidLevels[0].Amount
+		out.MinBidAmount = auctionBidFloor(out.MinBidAmount, out.TopBidAmount)
 	}
 	topRows, err := s.db.Query(ctx, `SELECT bidder_user_id FROM star_gift_auction_bids WHERE gift_id=$1 AND active
 ORDER BY amount DESC,bid_date,bidder_user_id LIMIT 3`, giftID)
@@ -1326,4 +1330,16 @@ func maxInt64(a, b int64) int64 {
 		return a
 	}
 	return b
+}
+
+// auctionBidFloor — нижняя граница следующей ставки аукциона (раунд 20,
+// исправление): максимум из сохранённого min_bid_amount и «топ-1 + 1».
+// Требование поведения: если лидирующая ставка 600 звёзд, следующая допустимая
+// ставка — 601; равная топ-1 ставка отклоняется. Пока активных ставок нет
+// (topBid == 0), действует исходный min_bid_amount без надбавки.
+func auctionBidFloor(minBidAmount, topBid int64) int64 {
+	if topBid > 0 && topBid+1 > minBidAmount {
+		return topBid + 1
+	}
+	return minBidAmount
 }

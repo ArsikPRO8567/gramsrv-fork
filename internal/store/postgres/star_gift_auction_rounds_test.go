@@ -74,3 +74,29 @@ func TestAuctionRoundBoundary(t *testing.T) {
 		t.Fatalf("boundary(nil,3) = %d, want 11800", got)
 	}
 }
+
+// Раунд 20 (исправление): пол следующей ставки аукциона — «топ-1 + 1».
+func TestAuctionBidFloor(t *testing.T) {
+	cases := []struct {
+		name         string
+		minBidAmount int64
+		topBid       int64
+		want         int64
+	}{
+		// Ставок ещё нет — действует исходный min_bid_amount без надбавки.
+		{"no bids keeps base min", 500, 0, 500},
+		// Пример из запроса: топ-1 поставил 600 — минимальная ставка 601.
+		{"top bid 600 floors at 601", 500, 600, 601},
+		// Сохранённый пол выше топ-ставки+1 (переносится между раундами) — не понижается.
+		{"ratchet floor never decreases", 700, 600, 700},
+		// Старые данные до исправления: min_bid_amount равнялся самой топ-ставке —
+		// состояние всё равно показывает топ+1.
+		{"legacy row equal to top bid", 600, 600, 601},
+		{"top bid 1 floors at 2", 1, 1, 2},
+	}
+	for _, tc := range cases {
+		if got := auctionBidFloor(tc.minBidAmount, tc.topBid); got != tc.want {
+			t.Errorf("%s: auctionBidFloor(%d, %d) = %d, want %d", tc.name, tc.minBidAmount, tc.topBid, got, tc.want)
+		}
+	}
+}
