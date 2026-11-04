@@ -178,11 +178,16 @@ func applyResaleLimitsOverlay(cfg domain.AppConfig, limits resaleLimits) domain.
         if limits.maxStars > 0 {
                 set("stars_stargift_resale_amount_max", limits.maxStars)
         }
+        // Раунд 21 (исправление): ton_* ключи отдаются ЦЕЛЫМ числом НАНОТОН —
+        // ровно в тех единицах, что требует официальная документация app config
+        // ("The maximum price in nanograms ... (integer)"). Прежнее деление /1e9
+        // превращало 10000 TON в «10000 нанотон» = 0.00001 грамма: клиент
+        // показывал верхнюю границу 0.0001 TON вместо значения из .env.
         if limits.minTon > 0 {
-                set("ton_stargift_resale_amount_min", float64(limits.minTon)/1e9)
+                set("ton_stargift_resale_amount_min", limits.minTon)
         }
         if limits.maxTon > 0 {
-                set("ton_stargift_resale_amount_max", float64(limits.maxTon)/1e9)
+                set("ton_stargift_resale_amount_max", limits.maxTon)
         }
         if limits.starsCommission >= 0 && limits.starsCommission <= 1000 {
                 set("stars_stargift_resale_commission_permille", limits.starsCommission)
