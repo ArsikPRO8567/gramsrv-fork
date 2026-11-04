@@ -268,7 +268,12 @@ func (r *Router) starGiftAuctionBidTarget(ctx context.Context, userID int64, inv
                 }
                 peer = state.UserState.BidPeer
         } else {
-                if oldAmount > 0 {
+                // Раунд 21 (исправление): новую ставку блокирует только АКТИВНАЯ
+                // ставка того же пользователя. Возвращённая ставка (перебита и
+                // возвращена на границе раунда, starGiftAuctionUserState.returned)
+                // повторному участию не мешает — иначе перебитый участник не мог
+                // предложить новую сумму до конца аукциона (STARGIFT_INVALID).
+                if state.UserState.BidActive {
                         return domain.StarGiftAuction{}, domain.Peer{}, 0, starGiftInvalidErr()
                 }
                 if inputPeer, ok := inv.GetPeer(); ok {
@@ -287,16 +292,26 @@ func (r *Router) starGiftAuctionBidTarget(ctx context.Context, userID int64, inv
         // который теперь гарантированно равен максимуму из min_bid_amount записи и
         // «топ-1 + 1» (см. loadStarGiftAuction): ставка, равная топ-1, отклоняется,
         // минимально допустимая — топ-ставка, увеличенная на 1. Для пользователя с
-        // собственной активной ставкой пол дополнительно поднимается до «своя
-        // ставка + 1» (повторная ставка строго выше своей собственной).
+        // собственной АКТИВНОЙ ставкой пол дополнительно поднимается до «своя
+        // ставка + 1» (повторная ставка строго выше своей собственной); ставка,
+        // возвращённая на границе раунда, пол не поднимает — это новая ставка.
         minimum := state.MinBidAmount
-        if oldAmount > 0 && state.UserState.MinBidAmount > minimum {
+        if state.UserState.BidActive && state.UserState.MinBidAmount > minimum {
                 minimum = state.UserState.MinBidAmount
         }
-        if inv.BidAmount < minimum || inv.BidAmount <= oldAmount {
+        // Сравнение с собственной суммой — только для активной ставки: у
+        // возвращённой ставки звёзды уже вернулись, и новая ставка списывается
+        // целиком независимо от прежней суммы.
+        if inv.BidAmount < minimum || state.UserState.BidActive && inv.BidAmount <= oldAmount {
                 return domain.StarGiftAuction{}, domain.Peer{}, 0, starGiftInvalidErr()
         }
-        return state, peer, inv.BidAmount - oldAmount, nil
+        // К доплате предъявляется только зарезервированная (активная) ставка:
+        // для возвращённой ставки сумма списывается полностью.
+        reserved := int64(0)
+        if state.UserState.BidActive {
+                reserved = oldAmount
+        }
+        return state, peer, inv.BidAmount - reserved, nil
 }
 
 func (r *Router) starGiftPrepaidUpgradePaymentForm(ctx context.Context, userID int64, inv *tg.InputInvoiceStarGiftPrepaidUpgrade) (tg.PaymentsPaymentFormClass, error) {
@@ -1055,7 +1070,13 @@ func tgStarGiftAuctionUserState(state domain.StarGiftAuctionUserState) tg.StarGi
         if state.BidAmount > 0 {
                 out.SetBidAmount(state.BidAmount)
                 out.SetBidDate(state.BidDate)
-                out.SetMinBidAmount(state.MinBidAmount)
+                // Персональный пол отдаётся только для АКТИВНОЙ ставки («своя
+                // ставка + 1»). У возвращённой ставки персонального пола нет:
+                // min_bid_amount со значением 0 официальный клиент трактует как
+                // «минимум 0», ломая валидацию новой ставки.
+                if state.MinBidAmount > 0 {
+                        out.SetMinBidAmount(state.MinBidAmount)
+                }
                 out.SetBidPeer(tgPeer(state.BidPeer))
         }
         return out

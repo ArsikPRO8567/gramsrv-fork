@@ -2013,6 +2013,14 @@ func tgSavedStarGifts(viewerUserID int64, gifts []domain.SavedStarGift, catalog 
 				item.SetUpgradeStars(g.PrepaidUpgradeStars)
 				item.CanUpgrade = true
 			}
+			// Раунд 21: savedStarGift.refunded — платёж за подарок
+			// возвращён, улучшение откачено до исходного состояния; клиент
+			// показывает надпись «Улучшение подарка отменено, поскольку
+			// поступил запрос на возврат средств…». Флаг относится к
+			// неулучшенным подаркам; механика возврата будет добавлена позже.
+			if g.Refunded {
+				item.SetRefunded(true)
+			}
 			// This hash starts the separate "prepay someone else's upgrade"
 			// invoice. The owner must use InputSavedStarGift instead; otherwise
 			// DrKLO prefers the hash path and substitutes the private dialog peer.
