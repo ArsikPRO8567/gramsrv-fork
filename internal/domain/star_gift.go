@@ -137,7 +137,13 @@ type SavedStarGift struct {
         UpgradeMsgID             int   // 当前 owner 侧承载 messageActionStarGiftUnique 的消息 id；所有权转移时随新消息更新
         PinnedOrder              int   // >0 表示资料页置顶顺序
         CollectionIDs            []int // 当前所属集合；按集合顺序稳定返回
-        Unique                   *UniqueStarGift
+        // Refunded — savedStarGift.refunded (flags.9): платёж за подарок (или за
+        // его улучшение) возвращён, улучшение откачено до исходного состояния.
+        // Клиент показывает к такому подарку надпись «Улучшение подарка отменено,
+        // поскольку поступил запрос на возврат средств…». Механика возврата пока
+        // не реализована — флаг подготовлен к будущему использованию.
+        Refunded bool
+        Unique   *UniqueStarGift
 }
 
 type StarGiftLifecycleStatus string
@@ -860,7 +866,13 @@ type StarGiftAuctionBidLevel struct {
 }
 
 type StarGiftAuctionUserState struct {
-        Returned      bool
+        Returned bool
+        // BidActive — у пользователя есть АКТИВНАЯ ставка в текущем розыгрыше.
+        // Returned-ставка (перебита и возвращена на границе раунда) активной не
+        // является: клиент показывает её как «ставка возвращена», а повторное
+        // участие — это НОВАЯ ставка (update_bid=false). Без этого различия
+        // сервер отклонял повторную ставку STARGIFT_INVALID (раунд 21).
+        BidActive     bool
         BidAmount     int64
         BidDate       int
         MinBidAmount  int64
@@ -1048,11 +1060,18 @@ type SavedStarGiftPage struct {
 }
 
 // SavedStarGiftListCursor is the composite keyset cursor for the profile gift
-// order: pinned gifts first by PinnedOrder, then unpinned gifts by ID DESC.
-// PinnedOrder == 0 identifies the unpinned segment.
+// order: pinned gifts first by PinnedOrder, then unpinned gifts by
+// (GiftDate DESC, ID DESC) — как в официальном Telegram. PinnedOrder == 0
+// identifies the unpinned segment.
 type SavedStarGiftListCursor struct {
         PinnedOrder int
-        ID          int64
+        // GiftDate — ключ сортировки профильного списка (раунд 21, исправление:
+        // список упорядочен по gift_date DESC, id DESC, как и официальный
+        // Telegram — только что полученный/переданный подарок оказывается
+        // вверху). Для v1-курсоров (без даты) значение 0 — работает прежняя
+        // сортировка только по id.
+        GiftDate int
+        ID       int64
 }
 
 // SavedStarGiftFilter describes the client-visible filters supported by
@@ -1433,17 +1452,31 @@ func StarGiftCollectionHash(title string, giftIDs []int64) int64 {
 
 // EncodeSavedStarGiftListCursor encodes the exact profile-order key of the last
 // visible gift. The version prefix keeps this cursor distinct from other star
-// gift lists that are ordered only by instance ID.
+// gift lists that are ordered only by instance ID. Раунд 21: v2 добавляет
+// gift_date (профильный порядок — gift_date DESC, id DESC); v1-курсоры
+// (только id) продолжают приниматься.
 func EncodeSavedStarGiftListCursor(pinnedOrder int, id int64) string {
-        if pinnedOrder < 0 || id <= 0 {
+        return encodeSavedStarGiftListCursorV2(pinnedOrder, 0, id)
+}
+
+// EncodeSavedStarGiftListCursorV2 — курсор профильного списка с датой
+// получения (pinned, gift_date, id).
+func EncodeSavedStarGiftListCursorV2(pinnedOrder int, giftDate int, id int64) string {
+        return encodeSavedStarGiftListCursorV2(pinnedOrder, giftDate, id)
+}
+
+func encodeSavedStarGiftListCursorV2(pinnedOrder, giftDate int, id int64) string {
+        if pinnedOrder < 0 || giftDate < 0 || id <= 0 {
                 return ""
         }
-        raw := "v1:" + strconv.Itoa(pinnedOrder) + ":" + strconv.FormatInt(id, 10)
+        raw := "v2:" + strconv.Itoa(pinnedOrder) + ":" + strconv.Itoa(giftDate) + ":" + strconv.FormatInt(id, 10)
         return base64.RawURLEncoding.EncodeToString([]byte(raw))
 }
 
 // DecodeSavedStarGiftListCursor decodes a profile gift list cursor. Invalid or
 // obsolete cursor shapes are rejected instead of being normalized on read.
+// Понимает обе версии: v2 (pinned, gift_date, id) и v1 (pinned, id — GiftDate
+// остаётся нулём, сортировка деградирует к прежней «по id»).
 func DecodeSavedStarGiftListCursor(s string) (SavedStarGiftListCursor, bool) {
         if s == "" {
                 return SavedStarGiftListCursor{}, false
@@ -1453,18 +1486,34 @@ func DecodeSavedStarGiftListCursor(s string) (SavedStarGiftListCursor, bool) {
                 return SavedStarGiftListCursor{}, false
         }
         parts := strings.Split(string(raw), ":")
-        if len(parts) != 3 || parts[0] != "v1" {
+        switch {
+        case len(parts) == 4 && parts[0] == "v2":
+                order, err := strconv.ParseInt(parts[1], 10, 32)
+                if err != nil || order < 0 {
+                        return SavedStarGiftListCursor{}, false
+                }
+                giftDate, err := strconv.ParseInt(parts[2], 10, 32)
+                if err != nil || giftDate < 0 {
+                        return SavedStarGiftListCursor{}, false
+                }
+                id, err := strconv.ParseInt(parts[3], 10, 64)
+                if err != nil || id <= 0 {
+                        return SavedStarGiftListCursor{}, false
+                }
+                return SavedStarGiftListCursor{PinnedOrder: int(order), GiftDate: int(giftDate), ID: id}, true
+        case len(parts) == 3 && parts[0] == "v1":
+                order, err := strconv.ParseInt(parts[1], 10, 32)
+                if err != nil || order < 0 {
+                        return SavedStarGiftListCursor{}, false
+                }
+                id, err := strconv.ParseInt(parts[2], 10, 64)
+                if err != nil || id <= 0 {
+                        return SavedStarGiftListCursor{}, false
+                }
+                return SavedStarGiftListCursor{PinnedOrder: int(order), ID: id}, true
+        default:
                 return SavedStarGiftListCursor{}, false
         }
-        order, err := strconv.ParseInt(parts[1], 10, 32)
-        if err != nil || order < 0 {
-                return SavedStarGiftListCursor{}, false
-        }
-        id, err := strconv.ParseInt(parts[2], 10, 64)
-        if err != nil || id <= 0 {
-                return SavedStarGiftListCursor{}, false
-        }
-        return SavedStarGiftListCursor{PinnedOrder: int(order), ID: id}, true
 }
 
 // EncodeStarGiftCursor / DecodeStarGiftCursor are simple instance-ID cursors
