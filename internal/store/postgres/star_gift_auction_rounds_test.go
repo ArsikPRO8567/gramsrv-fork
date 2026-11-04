@@ -56,21 +56,21 @@ func TestAuctionRoundDurationForFallsBackToCommon(t *testing.T) {
 func TestAuctionRoundBoundary(t *testing.T) {
 	durations := map[int]int{1: 120, 2: 300}
 	// Раунд ещё не начался — граница равна start.
-	if got := auctionRoundBoundary(1000, durations, 0, 3600); got != 1000 {
+	if got := auctionRoundBoundary(1000, durations, 0, 3600, 0); got != 1000 {
 		t.Fatalf("boundary(0) = %d, want 1000", got)
 	}
-	if got := auctionRoundBoundary(1000, durations, 1, 3600); got != 1120 {
+	if got := auctionRoundBoundary(1000, durations, 1, 3600, 0); got != 1120 {
 		t.Fatalf("boundary(1) = %d, want 1120", got)
 	}
-	if got := auctionRoundBoundary(1000, durations, 2, 3600); got != 1420 {
+	if got := auctionRoundBoundary(1000, durations, 2, 3600, 0); got != 1420 {
 		t.Fatalf("boundary(2) = %d, want 1420", got)
 	}
 	// Раунд 3 без индивидуальной длительности: 1420 + 3600.
-	if got := auctionRoundBoundary(1000, durations, 3, 3600); got != 5020 {
+	if got := auctionRoundBoundary(1000, durations, 3, 3600, 0); got != 5020 {
 		t.Fatalf("boundary(3) = %d, want 5020", got)
 	}
 	// Без jsonb — эквивалент прежнего пошагового next_round_at += common.
-	if got := auctionRoundBoundary(1000, nil, 3, 3600); got != 11800 {
+	if got := auctionRoundBoundary(1000, nil, 3, 3600, 0); got != 11800 {
 		t.Fatalf("boundary(nil,3) = %d, want 11800", got)
 	}
 }
