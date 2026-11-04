@@ -1,18 +1,18 @@
 package help
 
 import (
-	"context"
-	"encoding/json"
-	"fmt"
-	"hash/crc32"
-	"strconv"
-	"strings"
-	"sync"
+        "context"
+        "encoding/json"
+        "fmt"
+        "hash/crc32"
+        "strconv"
+        "strings"
+        "sync"
 
-	compatandroid "telesrv/internal/compat/android"
-	"telesrv/internal/domain"
-	"telesrv/internal/seed/catalog"
-	"telesrv/internal/store"
+        compatandroid "telesrv/internal/compat/android"
+        "telesrv/internal/domain"
+        "telesrv/internal/seed/catalog"
+        "telesrv/internal/store"
 )
 
 const tdesktopClient = "tdesktop"
@@ -60,7 +60,7 @@ const tdesktopClient = "tdesktop"
 const tdesktopDefaultAppConfigBase = `{"chat_read_mark_expire_period":604800,"chat_read_mark_size_threshold":50,"pm_read_date_expire_period":604800,"quote_length_max":1024,"telegram_antispam_group_size_min":200,"telegram_antispam_user_id":"5434988373","fragment_prefixes":["888"],"forum_upgrade_participants_min":2,"reactions_default":{"_":"reactionEmoji","emoticon":"👍"},"reactions_uniq_max":11,"reactions_user_max_default":1,"reactions_user_max_premium":3,"reactions_in_chat_max":3,"boosts_channel_level_max":100,"rich_message_posting":"enabled","upload_markup_video":true,"emojies_send_dice":["🎲","🎯","🏀","⚽","⚽️","🎳","🎰"],"premium_purchase_blocked":false,"premium_gift_attach_menu_icon":true,"premium_gift_text_field_icon":true,"gift_text_length_max":128,"stars_purchase_blocked":false,"stargifts_blocked":false,"stargifts_pinned_to_top_limit":6,"giveaway_gifts_purchase_available":true,"giveaway_boosts_per_premium":4,"giveaway_countries_max":10,"giveaway_add_peers_max":10,"giveaway_period_max":604800,"stories_stealth_future_period":1500,"stories_stealth_past_period":300,"stories_stealth_cooldown_period":10800,"quick_replies_limit":100,"quick_reply_messages_limit":20,"business_chat_links_limit":100,"dialog_filters_enabled":true,"chatlist_update_period":3600,"chatlist_invites_limit_default":3,"chatlist_invites_limit_premium":20,"chatlists_joined_limit_default":2,"chatlists_joined_limit_premium":20,"about_length_limit_default":70,"about_length_limit_premium":140,"bot_verification_description_length_limit":70,"caption_length_limit_default":1024,"caption_length_limit_premium":4096,"channels_limit_default":500,"channels_limit_premium":1000,"channels_public_limit_default":10,"channels_public_limit_premium":20,"dialog_filters_limit_default":10,"dialog_filters_limit_premium":20,"dialog_filters_chats_limit_default":100,"dialog_filters_chats_limit_premium":200,"dialogs_pinned_limit_default":5,"dialogs_pinned_limit_premium":10,"dialogs_folder_pinned_limit_default":100,"dialogs_folder_pinned_limit_premium":200,"saved_dialogs_pinned_limit_default":5,"saved_dialogs_pinned_limit_premium":100,"saved_gifs_limit_default":200,"saved_gifs_limit_premium":400,"stickers_faved_limit_default":5,"stickers_faved_limit_premium":10,"recommended_channels_limit_default":10,"recommended_channels_limit_premium":100,"aicompose_tone_examples_num":3,"aicompose_tone_title_length_max":12,"aicompose_tone_prompt_length_max":1024,"aicompose_tone_saved_limit_default":5,"aicompose_tone_saved_limit_premium":20,"upload_max_fileparts_default":4000,"upload_max_fileparts_premium":8000`
 const tdesktopNoForwardsAppConfig = `,"no_forwards_request_expire_period":86400`
 
-const defaultAppConfigHash = 28 // 默认 app config 内容变更时必须递增，否则缓存端只会收到 notModified。
+const defaultAppConfigHash = 29 // 默认 app config 内容变更时必须递增，否则缓存端只会收到 notModified。
 
 // Service 提供客户端启动配置与国家区号目录。
 //
@@ -69,16 +69,32 @@ const defaultAppConfigHash = 28 // 默认 app config 内容变更时必须递增
 // (登录页/启动配置是高频握手路径)。运维改库需重启生效。timezones/emoji 等其余目录走
 // internal/seed/catalog(go:embed 一次解析),本就在内存。
 type Service struct {
-	appConfigs    store.AppConfigStore
-	countries     store.CountryStore
-	accountFreeze AccountFreezeProvider
-	mapboxToken   string
-	premiumBot    string
+        appConfigs    store.AppConfigStore
+        countries     store.CountryStore
+        accountFreeze AccountFreezeProvider
+        mapboxToken   string
+        premiumBot    string
 
-	appConfigOnce  sync.Once
-	appConfigCache domain.AppConfig
-	countriesOnce  sync.Once
-	countriesCache domain.CountriesList
+        // starGiftResale — серверные лимиты рынка (раунд 21): минимальные/максимальные
+        // цены листинга и офферов (звёзды; TON в нанотонах) и комиссии в промилле.
+        // Официальные клиенты показывают в диалоге продажи/оффера конфигурационные
+        // ключи stars_stargift_resale_amount_min/max, ton_stargift_resale_amount_min/max,
+        // stars_stargift_resale_commission_permille, ton_stargift_resale_commission_permille;
+        // без этих ключей клиент рисует собственные константы (125..35000 звёзд,
+        // 0.01..10000 TON), поэтому границы из .env до этого раунда у клиента не
+        // отображались.
+        resaleLimitsSet          bool
+        resaleMinStars           int64
+        resaleMaxStars           int64
+        resaleMinTonNanoton      int64
+        resaleMaxTonNanoton      int64
+        resaleStarsCommission    int
+        resaleTonCommissionPermille int
+
+        appConfigOnce  sync.Once
+        appConfigCache domain.AppConfig
+        countriesOnce  sync.Once
+        countriesCache domain.CountriesList
 }
 
 // Option 配置 help 服务运行期默认目录。
@@ -87,98 +103,181 @@ type Option func(*Service)
 // AccountFreezeProvider supplies account-specific read-only state without
 // exposing protocol types to the help application service.
 type AccountFreezeProvider interface {
-	AccountFreeze(ctx context.Context, userID int64) (domain.AccountFreeze, bool, error)
+        AccountFreeze(ctx context.Context, userID int64) (domain.AccountFreeze, bool, error)
 }
 
 func WithAccountFreezeProvider(provider AccountFreezeProvider) Option {
-	return func(s *Service) {
-		s.accountFreeze = provider
-	}
+        return func(s *Service) {
+                s.accountFreeze = provider
+        }
 }
 
 // WithMapboxToken 设置 TDesktop appConfig 与地图缩略图代理共用的 Mapbox token。
 func WithMapboxToken(token string) Option {
-	return func(s *Service) {
-		s.mapboxToken = token
-	}
+        return func(s *Service) {
+                s.mapboxToken = token
+        }
+}
+
+// WithStarGiftResaleLimits задаёт серверные лимиты рынка (раунд 21) для
+// app config: min/max звёзд, min/max TON в нанотонах и комиссии в промилле.
+// Границы со значением 0 не выдаются — клиент оставляет собственный дефолт,
+// сервер такую границу тоже не проверяет (согласованная семантика).
+func WithStarGiftResaleLimits(minStars, maxStars, minTonNanoton, maxTonNanoton int64,
+        starsCommissionPermille, tonCommissionPermille int) Option {
+        return func(s *Service) {
+                s.resaleLimitsSet = true
+                s.resaleMinStars = minStars
+                s.resaleMaxStars = maxStars
+                s.resaleMinTonNanoton = minTonNanoton
+                s.resaleMaxTonNanoton = maxTonNanoton
+                s.resaleStarsCommission = starsCommissionPermille
+                s.resaleTonCommissionPermille = tonCommissionPermille
+        }
+}
+
+// resaleLimits — снимок серверных лимитов рынка для overlay app config.
+type resaleLimits struct {
+        set            bool
+        minStars       int64
+        maxStars       int64
+        minTon         int64
+        maxTon         int64
+        starsCommission int
+        tonCommission   int
+}
+
+func (s *Service) resaleLimitsSnapshot() resaleLimits {
+        if s == nil || !s.resaleLimitsSet {
+                return resaleLimits{}
+        }
+        return resaleLimits{set: true, minStars: s.resaleMinStars, maxStars: s.resaleMaxStars,
+                minTon: s.resaleMinTonNanoton, maxTon: s.resaleMaxTonNanoton,
+                starsCommission: s.resaleStarsCommission, tonCommission: s.resaleTonCommissionPermille}
+}
+
+// applyResaleLimitsOverlay вливает серверные лимиты рынка в базовый app config
+// и пересчитывает hash (по образцу accountAppConfig): клиенты с другим hash
+// получат обновлённый конфиг, с равным — notModified.
+func applyResaleLimitsOverlay(cfg domain.AppConfig, limits resaleLimits) domain.AppConfig {
+        if !limits.set {
+                return cfg
+        }
+        values := make(map[string]json.RawMessage)
+        if err := json.Unmarshal(cfg.JSON, &values); err != nil {
+                return cfg
+        }
+        set := func(key string, value any) {
+                if raw, err := json.Marshal(value); err == nil {
+                        values[key] = raw
+                }
+        }
+        if limits.minStars > 0 {
+                set("stars_stargift_resale_amount_min", limits.minStars)
+        }
+        if limits.maxStars > 0 {
+                set("stars_stargift_resale_amount_max", limits.maxStars)
+        }
+        if limits.minTon > 0 {
+                set("ton_stargift_resale_amount_min", float64(limits.minTon)/1e9)
+        }
+        if limits.maxTon > 0 {
+                set("ton_stargift_resale_amount_max", float64(limits.maxTon)/1e9)
+        }
+        if limits.starsCommission >= 0 && limits.starsCommission <= 1000 {
+                set("stars_stargift_resale_commission_permille", limits.starsCommission)
+        }
+        if limits.tonCommission >= 0 && limits.tonCommission <= 1000 {
+                set("ton_stargift_resale_commission_permille", limits.tonCommission)
+        }
+        body, err := json.Marshal(values)
+        if err != nil {
+                return cfg
+        }
+        hashInput := append([]byte(strconv.Itoa(cfg.Hash)+"\x00"), body...)
+        overlayHash := int(crc32.ChecksumIEEE(hashInput) & 0x7fffffff)
+        if overlayHash == 0 || overlayHash == cfg.Hash {
+                overlayHash = cfg.Hash + 1
+        }
+        return domain.AppConfig{Client: cfg.Client, Hash: overlayHash, JSON: body}
 }
 
 // WithPremiumBotUsername publishes the local Premium storefront to clients.
 func WithPremiumBotUsername(username string) Option {
-	return func(s *Service) {
-		username = strings.TrimPrefix(strings.TrimSpace(username), "@")
-		if domain.ValidBotUsername(username) {
-			s.premiumBot = username
-		}
-	}
+        return func(s *Service) {
+                username = strings.TrimPrefix(strings.TrimSpace(username), "@")
+                if domain.ValidBotUsername(username) {
+                        s.premiumBot = username
+                }
+        }
 }
 
 // NewService 创建 help 服务。
 func NewService(appConfigs store.AppConfigStore, countries store.CountryStore, opts ...Option) *Service {
-	s := &Service{
-		appConfigs: appConfigs,
-		countries:  countries,
-		premiumBot: domain.PremiumBotUser().Username,
-	}
-	for _, opt := range opts {
-		if opt != nil {
-			opt(s)
-		}
-	}
-	return s
+        s := &Service{
+                appConfigs: appConfigs,
+                countries:  countries,
+                premiumBot: domain.PremiumBotUser().Username,
+        }
+        for _, opt := range opts {
+                if opt != nil {
+                        opt(s)
+                }
+        }
+        return s
 }
 
 func defaultAppConfig(mapboxToken string) domain.AppConfig {
-	return defaultAppConfigWithPremiumBot(mapboxToken, domain.PremiumBotUser().Username)
+        return defaultAppConfigWithPremiumBot(mapboxToken, domain.PremiumBotUser().Username)
 }
 
 func defaultAppConfigJSON(mapboxToken string) []byte {
-	return defaultAppConfigJSONWithPremiumBot(mapboxToken, domain.PremiumBotUser().Username)
+        return defaultAppConfigJSONWithPremiumBot(mapboxToken, domain.PremiumBotUser().Username)
 }
 
 func defaultAppConfigWithPremiumBot(mapboxToken, premiumBotUsername string) domain.AppConfig {
-	jsonBytes := defaultAppConfigJSONWithPremiumBot(mapboxToken, premiumBotUsername)
-	return domain.AppConfig{
-		Client: tdesktopClient,
-		Hash:   defaultAppConfigHashForPremiumBot(mapboxToken, premiumBotUsername),
-		JSON:   jsonBytes,
-	}
+        jsonBytes := defaultAppConfigJSONWithPremiumBot(mapboxToken, premiumBotUsername)
+        return domain.AppConfig{
+                Client: tdesktopClient,
+                Hash:   defaultAppConfigHashForPremiumBot(mapboxToken, premiumBotUsername),
+                JSON:   jsonBytes,
+        }
 }
 
 func defaultAppConfigJSONWithPremiumBot(mapboxToken, premiumBotUsername string) []byte {
-	if !domain.ValidBotUsername(premiumBotUsername) {
-		premiumBotUsername = domain.PremiumBotUser().Username
-	}
-	username, _ := json.Marshal(premiumBotUsername)
-	premiumFragment := `,"premium_bot_username":` + string(username)
-	androidInvoiceBilling := `,"premium_playmarket_direct_currency_list":` + compatandroid.DirectInvoiceCurrenciesJSON()
-	if mapboxToken == "" {
-		return []byte(tdesktopDefaultAppConfigBase + tdesktopNoForwardsAppConfig + premiumFragment + androidInvoiceBilling + `}`)
-	}
-	token, err := json.Marshal(mapboxToken)
-	if err != nil {
-		return []byte(tdesktopDefaultAppConfigBase + tdesktopNoForwardsAppConfig + premiumFragment + androidInvoiceBilling + `}`)
-	}
-	tokenJSON := string(token)
-	return []byte(tdesktopDefaultAppConfigBase + tdesktopNoForwardsAppConfig + premiumFragment + androidInvoiceBilling + `,"tdesktop_config_map":{"maps":` + tokenJSON + `,"geo":` + tokenJSON + `,"bmaps":` + tokenJSON + `,"bgeo":` + tokenJSON + `}}`)
+        if !domain.ValidBotUsername(premiumBotUsername) {
+                premiumBotUsername = domain.PremiumBotUser().Username
+        }
+        username, _ := json.Marshal(premiumBotUsername)
+        premiumFragment := `,"premium_bot_username":` + string(username)
+        androidInvoiceBilling := `,"premium_playmarket_direct_currency_list":` + compatandroid.DirectInvoiceCurrenciesJSON()
+        if mapboxToken == "" {
+                return []byte(tdesktopDefaultAppConfigBase + tdesktopNoForwardsAppConfig + premiumFragment + androidInvoiceBilling + `}`)
+        }
+        token, err := json.Marshal(mapboxToken)
+        if err != nil {
+                return []byte(tdesktopDefaultAppConfigBase + tdesktopNoForwardsAppConfig + premiumFragment + androidInvoiceBilling + `}`)
+        }
+        tokenJSON := string(token)
+        return []byte(tdesktopDefaultAppConfigBase + tdesktopNoForwardsAppConfig + premiumFragment + androidInvoiceBilling + `,"tdesktop_config_map":{"maps":` + tokenJSON + `,"geo":` + tokenJSON + `,"bmaps":` + tokenJSON + `,"bgeo":` + tokenJSON + `}}`)
 }
 
 func defaultAppConfigHashFor(mapboxToken string) int {
-	return defaultAppConfigHashForPremiumBot(mapboxToken, domain.PremiumBotUser().Username)
+        return defaultAppConfigHashForPremiumBot(mapboxToken, domain.PremiumBotUser().Username)
 }
 
 func defaultAppConfigHashForPremiumBot(mapboxToken, premiumBotUsername string) int {
-	if !domain.ValidBotUsername(premiumBotUsername) {
-		premiumBotUsername = domain.PremiumBotUser().Username
-	}
-	hash := defaultAppConfigHash
-	if premiumBotUsername != domain.PremiumBotUser().Username {
-		hash += 1 + int(crc32.ChecksumIEEE([]byte(premiumBotUsername))&0x1fffffff)
-	}
-	if mapboxToken == "" {
-		return hash
-	}
-	return hash + 1 + int(crc32.ChecksumIEEE([]byte(mapboxToken))&0x1fffffff)
+        if !domain.ValidBotUsername(premiumBotUsername) {
+                premiumBotUsername = domain.PremiumBotUser().Username
+        }
+        hash := defaultAppConfigHash
+        if premiumBotUsername != domain.PremiumBotUser().Username {
+                hash += 1 + int(crc32.ChecksumIEEE([]byte(premiumBotUsername))&0x1fffffff)
+        }
+        if mapboxToken == "" {
+                return hash
+        }
+        return hash + 1 + int(crc32.ChecksumIEEE([]byte(mapboxToken))&0x1fffffff)
 }
 
 // GetAppConfig returns the cached global app config plus an authenticated,
@@ -187,122 +286,129 @@ func defaultAppConfigHashForPremiumBot(mapboxToken, premiumBotUsername string) i
 // own deterministic hash so a FROZEN_METHOD_INVALID-triggered refresh and a
 // later unfreeze can never be answered notModified against the other state.
 func (s *Service) GetAppConfig(ctx context.Context, userID int64, hash int) (domain.AppConfig, bool, error) {
-	cfg := s.loadAppConfig(ctx)
-	var err error
-	cfg, err = s.accountAppConfig(ctx, userID, cfg)
-	if err != nil {
-		return domain.AppConfig{}, false, err
-	}
-	return cfg, hash != 0 && hash == cfg.Hash, nil
+        cfg := s.loadAppConfig(ctx)
+        var err error
+        cfg, err = s.accountAppConfig(ctx, userID, cfg)
+        if err != nil {
+                return domain.AppConfig{}, false, err
+        }
+        return cfg, hash != 0 && hash == cfg.Hash, nil
 }
 
 func (s *Service) accountAppConfig(ctx context.Context, userID int64, base domain.AppConfig) (domain.AppConfig, error) {
-	values := make(map[string]json.RawMessage)
-	if err := json.Unmarshal(base.JSON, &values); err != nil {
-		return domain.AppConfig{}, fmt.Errorf("decode base app config: %w", err)
-	}
-	changed := false
-	for _, key := range []string{"freeze_since_date", "freeze_until_date", "freeze_appeal_url"} {
-		if _, exists := values[key]; exists {
-			delete(values, key)
-			changed = true
-		}
-	}
-	if userID > 0 {
-		if s != nil && s.accountFreeze != nil {
-			freeze, found, err := s.accountFreeze.AccountFreeze(ctx, userID)
-			if err != nil {
-				return domain.AppConfig{}, fmt.Errorf("load account freeze: %w", err)
-			}
-			if found && freeze.Frozen {
-				values["freeze_since_date"] = json.RawMessage(strconv.FormatInt(freeze.Since.Unix(), 10))
-				values["freeze_until_date"] = json.RawMessage(strconv.FormatInt(freeze.Until.Unix(), 10))
-				appeal, _ := json.Marshal(freeze.AppealURL)
-				values["freeze_appeal_url"] = appeal
-				changed = true
-			}
-		}
-	}
-	if !changed {
-		return base, nil
-	}
-	body, err := json.Marshal(values)
-	if err != nil {
-		return domain.AppConfig{}, fmt.Errorf("encode account app config: %w", err)
-	}
-	hashInput := append([]byte(strconv.Itoa(base.Hash)+"\x00"), body...)
-	overlayHash := int(crc32.ChecksumIEEE(hashInput) & 0x7fffffff)
-	if overlayHash == 0 || overlayHash == base.Hash {
-		overlayHash = base.Hash + 1
-	}
-	return domain.AppConfig{Client: base.Client, Hash: overlayHash, JSON: body}, nil
+        values := make(map[string]json.RawMessage)
+        if err := json.Unmarshal(base.JSON, &values); err != nil {
+                return domain.AppConfig{}, fmt.Errorf("decode base app config: %w", err)
+        }
+        changed := false
+        for _, key := range []string{"freeze_since_date", "freeze_until_date", "freeze_appeal_url"} {
+                if _, exists := values[key]; exists {
+                        delete(values, key)
+                        changed = true
+                }
+        }
+        if userID > 0 {
+                if s != nil && s.accountFreeze != nil {
+                        freeze, found, err := s.accountFreeze.AccountFreeze(ctx, userID)
+                        if err != nil {
+                                return domain.AppConfig{}, fmt.Errorf("load account freeze: %w", err)
+                        }
+                        if found && freeze.Frozen {
+                                values["freeze_since_date"] = json.RawMessage(strconv.FormatInt(freeze.Since.Unix(), 10))
+                                values["freeze_until_date"] = json.RawMessage(strconv.FormatInt(freeze.Until.Unix(), 10))
+                                appeal, _ := json.Marshal(freeze.AppealURL)
+                                values["freeze_appeal_url"] = appeal
+                                changed = true
+                        }
+                }
+        }
+        if !changed {
+                return base, nil
+        }
+        body, err := json.Marshal(values)
+        if err != nil {
+                return domain.AppConfig{}, fmt.Errorf("encode account app config: %w", err)
+        }
+        hashInput := append([]byte(strconv.Itoa(base.Hash)+"\x00"), body...)
+        overlayHash := int(crc32.ChecksumIEEE(hashInput) & 0x7fffffff)
+        if overlayHash == 0 || overlayHash == base.Hash {
+                overlayHash = base.Hash + 1
+        }
+        return domain.AppConfig{Client: base.Client, Hash: overlayHash, JSON: body}, nil
 }
 
 func (s *Service) loadAppConfig(ctx context.Context) domain.AppConfig {
-	if s == nil {
-		return defaultAppConfig("")
-	}
-	defaultCfg := defaultAppConfigWithPremiumBot(s.mapboxToken, s.premiumBot)
-	s.appConfigOnce.Do(func() {
-		if s.appConfigs == nil {
-			s.appConfigCache = defaultCfg
-			return
-		}
-		cfg, found, err := s.appConfigs.GetAppConfig(ctx, tdesktopClient)
-		// DB 行允许运维覆盖，但 hash 落后于代码默认值时视为陈旧（历史 seed 残留），
-		// 以默认值为准——否则新增配置 key 永远被旧行遮蔽（曾导致 emojies_send_dice 未下发）。
-		// 读失败也回退默认值(默认值恒有效),不让一次瞬时 DB 抖动污染整个进程生命周期的缓存。
-		if err != nil || !found || cfg.Hash < defaultAppConfigHash {
-			cfg = defaultCfg
-		}
-		s.appConfigCache = cfg
-	})
-	return s.appConfigCache
+        if s == nil {
+                return defaultAppConfig("")
+        }
+        defaultCfg := defaultAppConfigWithPremiumBot(s.mapboxToken, s.premiumBot)
+        // Раунд 21: серверные лимиты рынка вливаются в базовый конфиг один раз
+        // (до кэширования) — официальные клиенты показывают их в диалогах
+        // продажи/оффера вместо собственных констант.
+        defaultCfg = applyResaleLimitsOverlay(defaultCfg, s.resaleLimitsSnapshot())
+        s.appConfigOnce.Do(func() {
+                if s.appConfigs == nil {
+                        s.appConfigCache = defaultCfg
+                        return
+                }
+                cfg, found, err := s.appConfigs.GetAppConfig(ctx, tdesktopClient)
+                // DB 行允许运维覆盖，但 hash 落后于代码默认值时视为陈旧（历史 seed 残留），
+                // 以默认值为准——否则新增配置 key 永远被旧行遮蔽（曾导致 emojies_send_dice 未下发）。
+                // 读失败也回退默认值(默认值恒有效),不让一次瞬时 DB 抖动污染整个进程生命周期的缓存。
+                if err != nil || !found || cfg.Hash < defaultAppConfigHash {
+                        cfg = defaultCfg
+                }
+                // Оверлей применяется и к DB-конфигу: ключи лимитов всегда отражают
+                // текущие настройки процесса, а не историческую строку seed.
+                cfg = applyResaleLimitsOverlay(cfg, s.resaleLimitsSnapshot())
+                s.appConfigCache = cfg
+        })
+        return s.appConfigCache
 }
 
 // GetCountries 返回国家区号目录，hash 命中时返回 notModified。首次调用加载一次后缓存。
 func (s *Service) GetCountries(ctx context.Context, langCode string, hash int) (domain.CountriesList, bool, error) {
-	list := s.loadCountries(ctx)
-	return list, hash != 0 && hash == list.Hash, nil
+        list := s.loadCountries(ctx)
+        return list, hash != 0 && hash == list.Hash, nil
 }
 
 func (s *Service) loadCountries(ctx context.Context) domain.CountriesList {
-	if s == nil || s.countries == nil {
-		return defaultCountries()
-	}
-	s.countriesOnce.Do(func() {
-		list, err := s.countries.ListCountries(ctx, "")
-		if err != nil || len(list.Countries) == 0 {
-			list = defaultCountries()
-		}
-		s.countriesCache = list
-	})
-	return s.countriesCache
+        if s == nil || s.countries == nil {
+                return defaultCountries()
+        }
+        s.countriesOnce.Do(func() {
+                list, err := s.countries.ListCountries(ctx, "")
+                if err != nil || len(list.Countries) == 0 {
+                        list = defaultCountries()
+                }
+                s.countriesCache = list
+        })
+        return s.countriesCache
 }
 
 // defaultCountries 返回内置国家区号目录:优先用 catalog 固化的官方全量(~235 国),
 // 未 seed 时回退最小集(US/CN)。countries 表通常为空,故这就是生产实际下发的目录。
 func defaultCountries() domain.CountriesList {
-	if c := catalog.Countries(); len(c.Countries) > 0 {
-		return c
-	}
-	return domain.CountriesList{
-		Hash: 1,
-		Countries: []domain.Country{
-			{
-				ISO2:        "US",
-				DefaultName: "United States",
-				CountryCodes: []domain.CountryCode{
-					{CountryCode: "1", Prefixes: []string{""}, Patterns: []string{"XXX XXX XXXX"}},
-				},
-			},
-			{
-				ISO2:        "CN",
-				DefaultName: "China",
-				CountryCodes: []domain.CountryCode{
-					{CountryCode: "86", Prefixes: []string{""}, Patterns: []string{"XXX XXXX XXXX"}},
-				},
-			},
-		},
-	}
+        if c := catalog.Countries(); len(c.Countries) > 0 {
+                return c
+        }
+        return domain.CountriesList{
+                Hash: 1,
+                Countries: []domain.Country{
+                        {
+                                ISO2:        "US",
+                                DefaultName: "United States",
+                                CountryCodes: []domain.CountryCode{
+                                        {CountryCode: "1", Prefixes: []string{""}, Patterns: []string{"XXX XXX XXXX"}},
+                                },
+                        },
+                        {
+                                ISO2:        "CN",
+                                DefaultName: "China",
+                                CountryCodes: []domain.CountryCode{
+                                        {CountryCode: "86", Prefixes: []string{""}, Patterns: []string{"XXX XXXX XXXX"}},
+                                },
+                        },
+                },
+        }
 }
