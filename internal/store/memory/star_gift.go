@@ -502,6 +502,11 @@ func (s *StarGiftStore) ListByOwnerFiltered(_ context.Context, filter domain.Sav
                         if iPinned && matched[i].PinnedOrder != matched[j].PinnedOrder {
                                 return matched[i].PinnedOrder < matched[j].PinnedOrder
                         }
+                        // Раунд 21 (исправление): профильный порядок — по дате
+                        // получения (новые сверху), синхронно с postgres-стором.
+                        if matched[i].Date != matched[j].Date {
+                                return matched[i].Date > matched[j].Date
+                        }
                 }
                 return matched[i].ID > matched[j].ID
         })
@@ -511,12 +516,20 @@ func (s *StarGiftStore) ListByOwnerFiltered(_ context.Context, filter domain.Sav
         for _, g := range matched {
                 if hasCursor {
                         if profileOrder {
+                                // Порядок сегментов и ключей: pinned ASC, затем
+                                // (Date DESC, ID DESC). Ключ курсора — последний
+                                // отданный подарок; «после него» значит дата меньше,
+                                // при равной дате — id меньше (см. postgres-версию).
                                 if cursor.PinnedOrder > 0 {
                                         if g.PinnedOrder > 0 && (g.PinnedOrder < cursor.PinnedOrder ||
-                                                g.PinnedOrder == cursor.PinnedOrder && g.ID >= cursor.ID) {
+                                                g.PinnedOrder == cursor.PinnedOrder && (cursor.GiftDate == 0 && g.ID >= cursor.ID ||
+                                                        cursor.GiftDate > 0 && (g.Date > cursor.GiftDate ||
+                                                                g.Date == cursor.GiftDate && g.ID >= cursor.ID))) {
                                                 continue
                                         }
-                                } else if g.PinnedOrder > 0 || g.ID >= cursor.ID {
+                                } else if cursor.GiftDate > 0 && (g.PinnedOrder > 0 || g.Date > cursor.GiftDate ||
+                                        g.Date == cursor.GiftDate && g.ID >= cursor.ID) ||
+                                        cursor.GiftDate == 0 && (g.PinnedOrder > 0 || g.ID >= cursor.ID) {
                                         continue
                                 }
                         } else if g.ID >= cursor.ID {
@@ -535,7 +548,7 @@ func (s *StarGiftStore) ListByOwnerFiltered(_ context.Context, filter domain.Sav
                 if profileOrder {
                         pinnedOrder = last.PinnedOrder
                 }
-                page.NextOffset = domain.EncodeSavedStarGiftListCursor(pinnedOrder, last.ID)
+                page.NextOffset = domain.EncodeSavedStarGiftListCursorV2(pinnedOrder, last.Date, last.ID)
         }
         page.Gifts = out
         return page, nil
