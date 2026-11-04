@@ -22,7 +22,7 @@ p.msg_id,p.saved_id,p.gift_date,p.name_hidden,p.unsaved,p.converted,p.convert_st
 p.lifecycle_status,p.transfer_stars,p.can_export_at,p.can_transfer_at,p.can_resell_at,p.drop_original_details_stars,p.can_craft_at,
 p.message,COALESCE(p.message_entities,'[]'::jsonb)::text,COALESCE(p.unique_gift_id,0),p.upgrade_msg_id,p.pinned_order,
 COALESCE((SELECT array_agg(i.collection_id ORDER BY c.sort_order,i.collection_id) FROM star_gift_collection_items i
-JOIN star_gift_collections c ON c.collection_id=i.collection_id WHERE i.saved_gift_id=p.id),ARRAY[]::integer[])
+JOIN star_gift_collections c ON c.collection_id=i.collection_id WHERE i.saved_gift_id=p.id),ARRAY[]::integer[]),COALESCE(p.refunded, false)
 FROM peer_star_gifts p WHERE p.owner_peer_type=$1 AND p.owner_peer_id=$2 AND p.prepaid_upgrade_hash=$3`,
 		string(owner.Type), owner.ID, hash)
 	saved, err := scanSavedStarGift(row)
@@ -189,7 +189,7 @@ p.msg_id,p.saved_id,p.gift_date,p.name_hidden,p.unsaved,p.converted,p.convert_st
 p.lifecycle_status,p.transfer_stars,p.can_export_at,p.can_transfer_at,p.can_resell_at,p.drop_original_details_stars,p.can_craft_at,
 p.message,COALESCE(p.message_entities,'[]'::jsonb)::text,COALESCE(p.unique_gift_id,0),p.upgrade_msg_id,p.pinned_order,
 COALESCE((SELECT array_agg(i.collection_id ORDER BY c.sort_order,i.collection_id) FROM star_gift_collection_items i
-JOIN star_gift_collections c ON c.collection_id=i.collection_id WHERE i.saved_gift_id=p.id),ARRAY[]::integer[])
+JOIN star_gift_collections c ON c.collection_id=i.collection_id WHERE i.saved_gift_id=p.id),ARRAY[]::integer[]),COALESCE(p.refunded, false)
 FROM peer_star_gifts p WHERE p.owner_peer_type=$1 AND p.owner_peer_id=$2 AND p.prepaid_upgrade_hash=$3 FOR UPDATE`,
 		string(owner.Type), owner.ID, hash)
 	saved, err := scanSavedStarGift(row)
@@ -296,7 +296,7 @@ p.msg_id,p.saved_id,p.gift_date,p.name_hidden,p.unsaved,p.converted,p.convert_st
 p.lifecycle_status,p.transfer_stars,p.can_export_at,p.can_transfer_at,p.can_resell_at,p.drop_original_details_stars,p.can_craft_at,
 p.message,COALESCE(p.message_entities,'[]'::jsonb)::text,COALESCE(p.unique_gift_id,0),p.upgrade_msg_id,p.pinned_order,
 COALESCE((SELECT array_agg(i.collection_id ORDER BY c.sort_order,i.collection_id) FROM star_gift_collection_items i
-JOIN star_gift_collections c ON c.collection_id=i.collection_id WHERE i.saved_gift_id=p.id),ARRAY[]::integer[])
+JOIN star_gift_collections c ON c.collection_id=i.collection_id WHERE i.saved_gift_id=p.id),ARRAY[]::integer[]),COALESCE(p.refunded, false)
 FROM peer_star_gifts p WHERE p.id=$1`, savedID)
 	saved, err := scanSavedStarGift(row)
 	if errors.Is(err, pgx.ErrNoRows) {

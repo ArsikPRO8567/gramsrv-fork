@@ -98,6 +98,21 @@ func auctionRoundBoundary(startDate int, durations map[int]int, round, common, e
         return boundary + extendSeconds
 }
 
+// derivedAuctionEnd — минимально возможное время окончания аукциона (раунд 21,
+// исправление): граница конца текущего раунда (nextRoundAt, уже включающая
+// продления текущего раунда) плюс суммарная длительность оставшихся раундов
+// currentRound+1..totalRounds. Продление любого раунда отодвигает конец
+// аукциона, поэтому аукцион не может завершиться по старому end_date раньше,
+// чем пройдут все раунды. Для последнего раунда (currentRound >= totalRounds)
+// возвращает nextRoundAt.
+func derivedAuctionEnd(durations map[int]int, currentRound, totalRounds, common, nextRoundAt int) int {
+        end := nextRoundAt
+        for r := currentRound + 1; r <= totalRounds; r++ {
+                end += auctionRoundDurationFor(durations, r, common)
+        }
+        return end
+}
+
 // parseAuctionRoundExtends разбирает star_gift_auctions.round_extends
 // (раунд 21). Основная форма — объект
 // {"round_2":{"window":30,"top":3,"threshold":120}}; также принимается форма
@@ -385,7 +400,7 @@ p.msg_id,p.saved_id,p.gift_date,p.name_hidden,p.unsaved,p.converted,p.convert_st
 p.lifecycle_status,p.transfer_stars,p.can_export_at,p.can_transfer_at,p.can_resell_at,p.drop_original_details_stars,p.can_craft_at,
 p.message,COALESCE(p.message_entities,'[]'::jsonb)::text,COALESCE(p.unique_gift_id,0),p.upgrade_msg_id,p.pinned_order,
 COALESCE((SELECT array_agg(i.collection_id ORDER BY c.sort_order,i.collection_id) FROM star_gift_collection_items i
-JOIN star_gift_collections c ON c.collection_id=i.collection_id WHERE i.saved_gift_id=p.id),ARRAY[]::integer[])
+JOIN star_gift_collections c ON c.collection_id=i.collection_id WHERE i.saved_gift_id=p.id),ARRAY[]::integer[]),COALESCE(p.refunded, false)
 FROM peer_star_gifts p JOIN unique_star_gifts u ON u.id=p.unique_gift_id WHERE `+where+`
 ORDER BY p.id DESC LIMIT $`+fmt.Sprint(len(args)), args...)
         if err != nil {
@@ -809,7 +824,25 @@ next_round_at,last_gift_num,gifts_left,status,round_durations,min_bid_amount,rai
                 }
 
                 totalBurnedInThisExecution := 0
+                // Раунд 21 (исправление): продления раундов сдвигают все последующие
+                // границы, поэтому время окончания аукциона должно пересчитываться
+                // вместе с ними — иначе аукцион завершается по старому end_date раньше,
+                // чем пройдут все раунды. derivedAuctionEnd возвращает минимум конца
+                // аукциона: граница текущего раунда плюс длительности оставшихся.
+                extendEndDate := func() {
+                        derived := derivedAuctionEnd(roundDurations, currentRound, totalRounds, roundDuration, nextRoundAt)
+                        if derived > endDate {
+                                endDate = derived
+                                changed = true
+                        }
+                }
+                extendEndDate()
 
+                // roundsAdvanced — из текущего вызова прошёл хотя бы один раунд.
+                // Возвраты ставок выполняются только на границах раундов и при
+                // завершении: посреди раунда перебитый участник обязан иметь
+                // возможность поднять ставку до конца раунда (раунд 21, исправление).
+                roundsAdvanced := false
                 for status == "active" && currentRound <= totalRounds && nextRoundAt <= now {
                         // awardLimit — это сколько подарков БЫЛО ВЫСТАВЛЕНО на текущий раунд
                         awardLimit := giftsPerRound
@@ -893,26 +926,37 @@ JOIN star_gift_catalog_revisions r ON r.id=c.active_revision_id WHERE c.gift_id=
                                 minBidAmount = revisionStars
                         }
                         changed = true
-                        if currentRound > totalRounds || giftsLeft <= 0 || nextRoundAt > endDate {
+                        roundsAdvanced = true
+                        // Раунд 21 (исправление): по окончании раунда определяется новое
+                        // время окончания аукциона — продленный раунд отодвигает конец
+                        // аукциона, чтобы все оставшиеся раунды успели пройти.
+                        extendEndDate()
+                        if currentRound > totalRounds || giftsLeft <= 0 {
                                 status = "completed"
                         }
                 }
 
-                if status == "active" && now >= endDate {
-                        status = "completed"
-                        changed = true
+                if status == "active" {
+                        extendEndDate()
+                        if now >= endDate {
+                                status = "completed"
+                                changed = true
+                        }
                 }
 
-                if err := s.refundUnreachableAuctionBids(ctx, tx, giftID, giftsLeft, status == "completed", now); err != nil {
-                        return err
+                if roundsAdvanced || status == "completed" {
+                        if err := s.refundUnreachableAuctionBids(ctx, tx, giftID, giftsLeft, status == "completed", now); err != nil {
+                                return err
+                        }
                 }
 
                 if changed {
-                        // Обновляем состояние аукциона (last_gift_num теперь включает сгоревшие номера)
+                        // Обновляем состояние аукциона (last_gift_num теперь включает сгоревшие номера);
+                        // end_date фиксирует пересчитанное время окончания (см. extendEndDate).
                         if _, err := tx.Exec(ctx, `UPDATE star_gift_auctions SET status=$2,current_round=$3,next_round_at=$4,
-last_gift_num=$5,gifts_left=$6,round_extend_seconds=$7,min_bid_amount=$8,version=version+1,updated_at=now() WHERE gift_id=$1`, giftID, status,
+last_gift_num=$5,gifts_left=$6,round_extend_seconds=$7,min_bid_amount=$8,end_date=$9,version=version+1,updated_at=now() WHERE gift_id=$1`, giftID, status,
                                 minAuctionInt(currentRound, totalRounds), minAuctionInt(nextRoundAt, endDate), lastGiftNum, giftsLeft,
-                                roundExtendSeconds, minBidAmount); err != nil {
+                                roundExtendSeconds, minBidAmount, endDate); err != nil {
                                 return err
                         }
                         // ОБЯЗАТЕЛЬНО: Синхронизируем availability_remains в каталоге, вычитая из него ВСЕ
@@ -1039,9 +1083,7 @@ WHERE gift_id=$1 AND saved_gift_id IS NULL ORDER BY id LIMIT 100`, giftID)
                 for _, item := range items {
                         owner := domain.Peer{Type: domain.PeerType(item.recipientType), ID: item.recipientID}
                         // Раунд 21: ревизия улучшений с нулевой ценой — полученные в аукционе
-                        // подарки улучшаются бесплатно. Клиенту отдаётся prepaid_upgrade
-                        // (похоже на предоплаченный апгрейд) вместе с can_upgrade, чтобы
-                        // кнопка улучшения была бесплатной.
+                        // подарки улучшаются бесплатно.
                         freeUpgrade := false
                         if revision, foundRev, errRev := NewStarGiftStore(s.db).ActiveCollectibleProjection(ctx, gift.ID, 0); errRev == nil && foundRev {
                                 freeUpgrade = revision.UpgradeStars == 0
@@ -1059,10 +1101,15 @@ WHERE gift_id=$1 AND saved_gift_id IS NULL ORDER BY id LIMIT 100`, giftID)
                                         // to_id нужен только копии победителя, когда подарок назначен другому peer.
                                         To:              bidAwardToPeer(item.bidder, owner),
                                         AuctionAcquired: true, GiftNum: item.giftNum}, gift)
+                                // Раунд 21 (исправление): сообщение о выигрыше должно
+                                // показывать «Вы выиграли в аукционе…» (флаг auction_acquired).
+                                // Флаг prepaid_upgrade на исходящем сообщении клиент рендерит
+                                // строкой «Вы отправили улучшение стоимостью 0 звёзд», поэтому
+                                // на награде аукциона он не ставится: бесплатное улучшение
+                                // (ревизия с ценой 0) обеспечивается can_upgrade и бесплатной
+                                // формой улучшения (цена 0); платное — формой с ценой ревизии.
                                 if freeUpgrade {
                                         action.CanUpgrade = true
-                                        action.PrepaidUpgrade = true
-                                        action.UpgradePriceStars = 0
                                 }
                                 sent, err := s.messages.SendPrivateText(ctx, domain.SendPrivateTextRequest{SenderUserID: item.bidder,
                                         RecipientUserID: owner.ID, RandomID: lifecycleCommandRandomID("auction-award", giftID, item.round, item.pos),
@@ -1214,17 +1261,19 @@ func (s *StarGiftLifecycleStore) BidStarGiftAuction(ctx context.Context, req dom
         }
         var balance domain.StarsBalance
         err := withTx(ctx, s.db, "bid star gift auction", func(tx pgx.Tx) error {
-                var startDate, endDate, currentRound, nextRoundAt int
+                var startDate, endDate, currentRound, nextRoundAt, totalRounds, roundDuration int
                 var minimum int64
                 var status string
                 var raiseMinBid bool
                 var roundExtendSeconds int
-                var roundExtendsRaw []byte
+                var roundExtendsRaw, roundDurationsRaw []byte
                 if err := tx.QueryRow(ctx, `SELECT start_date,end_date,min_bid_amount,status,current_round,next_round_at,
-raise_min_bid,round_extends,round_extend_seconds FROM star_gift_auctions WHERE gift_id=$1 FOR UPDATE`, req.GiftID).
-                        Scan(&startDate, &endDate, &minimum, &status, &currentRound, &nextRoundAt, &raiseMinBid, &roundExtendsRaw, &roundExtendSeconds); err != nil {
+raise_min_bid,round_extends,round_extend_seconds,total_rounds,round_duration,round_durations FROM star_gift_auctions WHERE gift_id=$1 FOR UPDATE`, req.GiftID).
+                        Scan(&startDate, &endDate, &minimum, &status, &currentRound, &nextRoundAt, &raiseMinBid, &roundExtendsRaw, &roundExtendSeconds,
+                                &totalRounds, &roundDuration, &roundDurationsRaw); err != nil {
                         return err
                 }
+                roundDurations := parseAuctionRoundDurations(roundDurationsRaw)
 
                 // Раунд 21: два режима минимальной ставки.
                 // raise_min_bid=false — несменяемый минимум: полом ставки служит сам
@@ -1267,7 +1316,13 @@ raise_min_bid,round_extends,round_extend_seconds FROM star_gift_auctions WHERE g
                 if err != nil && !errors.Is(err, pgx.ErrNoRows) {
                         return err
                 }
-                if oldActive && (!req.UpdateBid || req.BidAmount <= oldAmount) || !oldActive && req.UpdateBid {
+                if oldActive && (!req.UpdateBid || req.BidAmount <= oldAmount) || !oldActive && req.UpdateBid && oldAmount <= 0 {
+                        // Активная ставка: повторная — только update_bid и строго выше
+                        // собственной. Возвращённая (returned) ставка активной не
+                        // является: и «повысить» (update_bid=true), и новая ставка
+                        // (update_bid=false) списываются целиком (stars уже возвращены),
+                        // поэтому допускаются при любом update_bid (раунд 21,
+                        // исправление STARGIFT_INVALID у перебитых участников).
                         return domain.ErrStarGiftAuctionUnavailable
                 }
                 reserved := int64(0)
@@ -1303,16 +1358,17 @@ VALUES($1,$2,$3,$4,$5,$6)`, req.UserID, req.FormID, req.GiftID, req.BidAmount, b
                 // DESC, bid_date, bidder_user_id), поэтому сравнение списков ловит и
                 // вход нового участника в топ, и перестановку внутри него. Первая
                 // ставка раунда (топ был пуст) продления не даёт: некого перебивать.
+                // Раунд 21 (исправление): окно применяется ЦЕЛИКОМ и отодвигает
+                // время окончания аукциона (end_date) — прежняя обрезка по старому
+                // end_date не давала раунду реально продлиться, и аукцион мог
+                // завершиться раньше, чем пройдут все раунды.
                 if extend.WindowSeconds > 0 && len(topSetBefore) > 0 {
                         topSetAfter := auctionTopBidderIDs(ctx, tx, req.GiftID, extend.TopBidders)
                         if !auctionTopSetsEqual(topSetBefore, topSetAfter) && req.Date >= nextRoundAt-extend.ThresholdSeconds {
-                                add := extend.WindowSeconds
-                                if nextRoundAt+add > endDate {
-                                        add = endDate - nextRoundAt
-                                }
-                                if add > 0 {
-                                        nextRoundAt += add
-                                        roundExtendSeconds += add
+                                nextRoundAt += extend.WindowSeconds
+                                roundExtendSeconds += extend.WindowSeconds
+                                if derived := derivedAuctionEnd(roundDurations, currentRound, totalRounds, roundDuration, nextRoundAt); derived > endDate {
+                                        endDate = derived
                                 }
                         }
                 }
@@ -1320,15 +1376,15 @@ VALUES($1,$2,$3,$4,$5,$6)`, req.UserID, req.FormID, req.GiftID, req.BidAmount, b
                 // нижней границы «топ-1 + 1», чтобы следующее состояние аукциона (и
                 // клиент) показывали актуальный пол ставки. В режиме несменяемого
                 // минимума значение не меняется. Обновление также фиксирует продление
-                // раунда и поднимает version — клиенты получат новую границу раунда
-                // через updateStarGiftAuctionState.
+                // раунда, пересчитанное end_date и поднимает version — клиенты
+                // получат новые границы через updateStarGiftAuctionState.
                 if raiseMinBid {
                         _, err = tx.Exec(ctx, `UPDATE star_gift_auctions SET version=version+1,updated_at=now(),
-min_bid_amount=GREATEST(star_gift_auctions.min_bid_amount,$2),next_round_at=$3,round_extend_seconds=$4 WHERE gift_id=$1`,
-                                req.GiftID, minimum, nextRoundAt, roundExtendSeconds)
+min_bid_amount=GREATEST(star_gift_auctions.min_bid_amount,$2),next_round_at=$3,round_extend_seconds=$4,end_date=GREATEST(star_gift_auctions.end_date,$5) WHERE gift_id=$1`,
+                                req.GiftID, minimum, nextRoundAt, roundExtendSeconds, endDate)
                 } else {
                         _, err = tx.Exec(ctx, `UPDATE star_gift_auctions SET version=version+1,updated_at=now(),
-next_round_at=$2,round_extend_seconds=$3 WHERE gift_id=$1`, req.GiftID, nextRoundAt, roundExtendSeconds)
+next_round_at=$2,round_extend_seconds=$3,end_date=GREATEST(star_gift_auctions.end_date,$4) WHERE gift_id=$1`, req.GiftID, nextRoundAt, roundExtendSeconds, endDate)
                 }
                 return err
         })
@@ -1465,9 +1521,21 @@ ORDER BY amount DESC,bid_date,bidder_user_id LIMIT 3`, giftID)
 FROM star_gift_auction_bids WHERE gift_id=$1 AND bidder_user_id=$2`, giftID, userID).Scan(&out.UserState.Returned,
                 &active, &out.UserState.BidAmount, &out.UserState.BidDate, &peerType, &out.UserState.BidPeer.ID, &out.UserState.AcquiredCount)
         if err == nil {
-                if active || out.UserState.Returned {
+                out.UserState.BidActive = active
+                if active {
+                        // Активная ставка: персональный пол — «своя ставка + 1»
+                        // (повторная ставка строго выше собственной).
                         out.UserState.BidPeer.Type = domain.PeerType(peerType)
                         out.UserState.MinBidAmount = out.UserState.BidAmount + 1
+                } else if out.UserState.Returned {
+                        // Раунд 21 (исправление): возвращённая ставка (перебита и
+                        // возвращена на границе раунда) НЕ поднимает персональный
+                        // пол: повторное участие — новая ставка с общим минимумом
+                        // starGiftAuctionState.min_bid_amount. bid_amount остаётся в
+                        // состоянии (клиент показывает его вместе с returned), но
+                        // сервер не считает её препятствием для новой ставки.
+                        out.UserState.BidPeer.Type = domain.PeerType(peerType)
+                        out.UserState.MinBidAmount = 0
                 } else {
                         out.UserState.BidAmount, out.UserState.BidDate, out.UserState.BidPeer = 0, 0, domain.Peer{}
                 }

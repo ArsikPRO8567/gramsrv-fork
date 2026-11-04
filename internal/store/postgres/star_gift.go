@@ -466,15 +466,15 @@ func (s *StarGiftStore) Create(ctx context.Context, gift domain.SavedStarGift) (
 WITH next_id AS (
     SELECT nextval(pg_get_serial_sequence('public.peer_star_gifts', 'id'))::bigint AS id
 )
-INSERT INTO peer_star_gifts (id, owner_peer_type, owner_peer_id, from_user_id, gift_id, catalog_revision_id, msg_id, saved_id, gift_date, name_hidden, unsaved, converted, convert_stars, prepaid_upgrade_stars, prepaid_upgrade_hash, gift_num, message, message_entities)
+INSERT INTO peer_star_gifts (id, owner_peer_type, owner_peer_id, from_user_id, gift_id, catalog_revision_id, msg_id, saved_id, gift_date, name_hidden, unsaved, converted, convert_stars, prepaid_upgrade_stars, prepaid_upgrade_hash, gift_num, message, message_entities, refunded)
 SELECT next_id.id, $1,$2,$3,$4,$5,$6,
        CASE WHEN $1 = 'channel' AND $7::bigint = 0 THEN next_id.id ELSE $7::bigint END,
-       $8,$9,$10,false,$11,$12,$13,$14,$15,$16::jsonb
+       $8,$9,$10,false,$11,$12,$13,$14,$15,$16::jsonb,$17
 FROM next_id
 RETURNING id`,
 		string(gift.Owner.Type), gift.Owner.ID, gift.FromUserID, gift.GiftID, gift.RevisionID, gift.MsgID, gift.SavedID, gift.Date,
 		gift.NameHidden, gift.Unsaved, gift.ConvertStars, gift.PrepaidUpgradeStars, gift.PrepaidUpgradeHash, gift.GiftNum, gift.Message,
-		string(encodeStarGiftMessageEntities(gift.MessageEntities))).Scan(&id)
+		string(encodeStarGiftMessageEntities(gift.MessageEntities)), gift.Refunded).Scan(&id)
 	if err != nil {
 		return 0, fmt.Errorf("create star gift: %w", err)
 	}
@@ -582,17 +582,36 @@ WHERE ci.saved_gift_id = p.id AND ci.collection_id = $%d
 
 	profileOrder := filter.CollectionID == 0
 	if cursor, ok := domain.DecodeSavedStarGiftListCursor(offset); ok {
+		// Раунд 21 (исправление): профильный порядок — (gift_date DESC,
+		// id DESC), поэтому ключ продолжения тоже (gift_date, id).
+		// v1-курсоры (без даты) продолжают работать: GiftDate == 0
+		// оставляет прежний фильтр только по id.
 		if profileOrder && cursor.PinnedOrder > 0 {
-			args = append(args, cursor.PinnedOrder, cursor.ID)
-			where += fmt.Sprintf(` AND (
+			if cursor.GiftDate > 0 {
+				args = append(args, cursor.PinnedOrder, cursor.GiftDate, cursor.ID)
+				where += fmt.Sprintf(` AND (
+    p.pinned_order = 0
+    OR p.pinned_order > $%d
+    OR (p.pinned_order = $%d AND (p.gift_date < $%d OR (p.gift_date = $%d AND p.id < $%d)))
+)`, len(args)-2, len(args)-2, len(args)-1, len(args)-1, len(args))
+			} else {
+				args = append(args, cursor.PinnedOrder, cursor.ID)
+				where += fmt.Sprintf(` AND (
     p.pinned_order = 0
     OR p.pinned_order > $%d
     OR (p.pinned_order = $%d AND p.id < $%d)
 )`, len(args)-1, len(args)-1, len(args))
+			}
 		} else {
 			args = append(args, cursor.ID)
 			if profileOrder {
-				where += fmt.Sprintf(" AND p.pinned_order = 0 AND p.id < $%d", len(args))
+				if cursor.GiftDate > 0 {
+					args = append(args, cursor.GiftDate)
+					where += fmt.Sprintf(` AND p.pinned_order = 0 AND (p.gift_date < $%d OR (p.gift_date = $%d AND p.id < $%d))`,
+						len(args), len(args), len(args)-1)
+				} else {
+					where += fmt.Sprintf(" AND p.pinned_order = 0 AND p.id < $%d", len(args))
+				}
 			} else {
 				where += fmt.Sprintf(" AND p.id < $%d", len(args))
 			}
@@ -600,7 +619,12 @@ WHERE ci.saved_gift_id = p.id AND ci.collection_id = $%d
 	}
 	orderBy := "ORDER BY p.id DESC"
 	if profileOrder {
-		orderBy = "ORDER BY (p.pinned_order = 0), p.pinned_order, p.id DESC"
+		// Раунд 21 (исправление): подарки упорядочены по дате получения
+		// (новые сверху), как на официальных серверах — подарок, переданный
+		// по принятому офферу/переносу/покупке (gift_date = момент
+		// получения), оказывается вверху профиля получателя, а не на
+		// случайной позиции старого id.
+		orderBy = "ORDER BY (p.pinned_order = 0), p.pinned_order, p.gift_date DESC, p.id DESC"
 	}
 	args = append(args, limit+1)
 	limitPlaceholder := len(args)
@@ -613,7 +637,7 @@ SELECT p.id, p.owner_peer_type, p.owner_peer_id, p.from_user_id, p.gift_id, p.ca
        COALESCE((SELECT array_agg(i.collection_id ORDER BY c.sort_order, i.collection_id)
                  FROM star_gift_collection_items i
                  JOIN star_gift_collections c ON c.collection_id=i.collection_id
-                 WHERE i.saved_gift_id=p.id), ARRAY[]::integer[])
+                 WHERE i.saved_gift_id=p.id), ARRAY[]::integer[]), COALESCE(p.refunded, false)
 FROM peer_star_gifts p `+joins+`
 WHERE `+where+`
 `+orderBy+`
@@ -640,7 +664,7 @@ LIMIT $`+fmt.Sprint(limitPlaceholder), args...)
 		if profileOrder {
 			pinnedOrder = last.PinnedOrder
 		}
-		page.NextOffset = domain.EncodeSavedStarGiftListCursor(pinnedOrder, last.ID)
+		page.NextOffset = domain.EncodeSavedStarGiftListCursorV2(pinnedOrder, last.Date, last.ID)
 	}
 	page.Gifts = gifts
 	return page, nil
@@ -767,7 +791,7 @@ SELECT p.id, p.owner_peer_type, p.owner_peer_id, p.from_user_id, p.gift_id, p.ca
        COALESCE((SELECT array_agg(i.collection_id ORDER BY c.sort_order, i.collection_id)
                  FROM star_gift_collection_items i
                  JOIN star_gift_collections c ON c.collection_id=i.collection_id
-                 WHERE i.saved_gift_id=p.id), ARRAY[]::integer[])
+                 WHERE i.saved_gift_id=p.id), ARRAY[]::integer[]), COALESCE(p.refunded, false)
 FROM peer_star_gifts p
 WHERE `+where, args...)
 	g, err := scanSavedStarGift(row)
@@ -907,7 +931,7 @@ SELECT p.id, p.owner_peer_type, p.owner_peer_id, p.from_user_id, p.gift_id, p.ca
        COALESCE((SELECT array_agg(i.collection_id ORDER BY c.sort_order, i.collection_id)
                  FROM star_gift_collection_items i
                  JOIN star_gift_collections c ON c.collection_id=i.collection_id
-                 WHERE i.saved_gift_id=p.id), ARRAY[]::integer[])
+                 WHERE i.saved_gift_id=p.id), ARRAY[]::integer[]), COALESCE(p.refunded, false)
 FROM peer_star_gifts p
 WHERE `+where+` FOR UPDATE`, args...)
 		g, err := scanSavedStarGift(row)
@@ -950,7 +974,7 @@ func scanSavedStarGift(row rowScanner) (domain.SavedStarGift, error) {
 		&g.NameHidden, &g.Unsaved, &g.Converted, &g.ConvertStars, &g.PrepaidUpgradeStars, &g.PrepaidUpgradeHash, &g.GiftNum,
 		&g.LifecycleStatus, &g.TransferStars, &g.CanExportAt, &g.CanTransferAt, &g.CanResellAt,
 		&g.DropOriginalDetailsStars, &g.CanCraftAt, &g.Message, &messageEntitiesJSON, &g.UniqueGiftID,
-		&g.UpgradeMsgID, &g.PinnedOrder, &g.CollectionIDs); err != nil {
+		&g.UpgradeMsgID, &g.PinnedOrder, &g.CollectionIDs, &g.Refunded); err != nil {
 		return domain.SavedStarGift{}, err
 	}
 	g.Owner.Type = domain.PeerType(ownerType)

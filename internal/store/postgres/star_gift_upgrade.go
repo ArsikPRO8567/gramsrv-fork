@@ -959,7 +959,7 @@ SELECT p.id, p.owner_peer_type, p.owner_peer_id, p.from_user_id, p.gift_id, p.ca
        COALESCE((SELECT array_agg(i.collection_id ORDER BY c.sort_order, i.collection_id)
                  FROM star_gift_collection_items i
                  JOIN star_gift_collections c ON c.collection_id=i.collection_id
-                 WHERE i.saved_gift_id=p.id), ARRAY[]::integer[])
+                 WHERE i.saved_gift_id=p.id), ARRAY[]::integer[]), COALESCE(p.refunded, false)
 FROM peer_star_gifts p WHERE `+where+` FOR UPDATE`, args...)
         saved, err := scanSavedStarGift(row)
         if errors.Is(err, pgx.ErrNoRows) {
