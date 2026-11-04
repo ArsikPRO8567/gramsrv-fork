@@ -84,10 +84,12 @@ func readMarkAppConfig(mapboxToken string) *tg.JSONObject {
                 }}},
                 // Раунд 21: официальные ключи лимитов рынка (fallback-конфиг —
                 // значения по умолчанию; Help-сервис подменяет их на .env).
+                // ton_* передаются целыми нанотонами по официальной документации
+                // app config (раньше здесь ошибочно стояли 0.01 и 10000 грамма).
                 {Key: "stars_stargift_resale_amount_min", Value: &tg.JSONNumber{Value: 125}},
                 {Key: "stars_stargift_resale_amount_max", Value: &tg.JSONNumber{Value: 35000}},
-                {Key: "ton_stargift_resale_amount_min", Value: &tg.JSONNumber{Value: 0.01}},
-                {Key: "ton_stargift_resale_amount_max", Value: &tg.JSONNumber{Value: 10000}},
+                {Key: "ton_stargift_resale_amount_min", Value: &tg.JSONNumber{Value: 10000000}},
+                {Key: "ton_stargift_resale_amount_max", Value: &tg.JSONNumber{Value: 10000000000000}},
         }
         if mapboxToken != "" {
                 // TDesktop 位置选点器（WebView+Mapbox GL）与 business 位置设置的地图 token；
