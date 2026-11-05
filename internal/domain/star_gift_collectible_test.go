@@ -192,3 +192,35 @@ func TestValidateStarGiftCollectibleWriteRequiresExactDocumentRoles(t *testing.T
 		})
 	}
 }
+
+// Раунд 23: title эмодзи-статуса обязан быть «{имя} #{уникальный номер}» —
+// заголовок над эмодзи-статусом клиент рисует дословно из этого поля
+// (официальный дамп: title='Spy Agaric #5', slug='SpyAgaric-5').
+func TestCollectibleEmojiStatusTitleFormat(t *testing.T) {
+	gift := UniqueStarGift{
+		ID: 7, Title: "Spy Agaric", Slug: "SpyAgaric-5", Num: 5,
+		Model:   StarGiftCollectibleAttribute{Document: &Document{ID: 11}},
+		Pattern: StarGiftCollectibleAttribute{Document: &Document{ID: 12}},
+		Backdrop: StarGiftCollectibleAttribute{
+			CenterColor: 1, EdgeColor: 2, PatternColor: 3, TextColor: 4,
+		},
+	}
+	status, ok := CollectibleEmojiStatus(gift)
+	if !ok {
+		t.Fatal("collectible did not project")
+	}
+	if status.Title != "Spy Agaric #5" {
+		t.Fatalf("collectible title = %q, want %q", status.Title, "Spy Agaric #5")
+	}
+	if status.Slug != "SpyAgaric-5" || status.CollectibleID != 7 {
+		t.Fatalf("collectible slug/id = %q %d", status.Slug, status.CollectibleID)
+	}
+	// Аномальная запись без номера сохраняет голое имя (title обязан быть
+	// непустым для Valid()).
+	noNum := gift
+	noNum.Num = 0
+	status, ok = CollectibleEmojiStatus(noNum)
+	if !ok || status.Title != "Spy Agaric" {
+		t.Fatalf("no-number title = %q ok=%v", status.Title, ok)
+	}
+}
