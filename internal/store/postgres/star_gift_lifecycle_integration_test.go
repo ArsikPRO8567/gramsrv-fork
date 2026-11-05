@@ -1264,6 +1264,38 @@ WHERE channel_id=$1 AND message::text LIKE '%star_gift_unique%'`, created.Channe
                 resold.Unique.CraftChancePermille != upgraded.Unique.CraftChancePermille {
                 t.Fatalf("channel-to-channel local TON resale = %+v err %v", resold, err)
         }
+        // Раунд 24 (дамп 198247): покупка на маркете сразу в канал — сообщение
+        // «подарок помещён на канал» уходит от «Telegram» (777000) владельцу/
+        // админам канала, а не само-сообщением покупателя в «Избранное».
+        var resaleFavoritesCopies int
+        if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM message_boxes WHERE owner_user_id=$1 AND peer_id=$1
+AND media #>> '{service_action,kind}'='star_gift_unique'
+AND media #>> '{service_action,star_gift_unique,resale_amount,Amount}'='1000'`, actor.ID).Scan(&resaleFavoritesCopies); err != nil {
+                t.Fatalf("load resale favorites copies: %v", err)
+        }
+        if resaleFavoritesCopies != 0 {
+                t.Fatalf("resale to channel must not post a buyer self-message to favorites, got %d", resaleFavoritesCopies)
+        }
+        var resaleNotifications, resaleDelivered int
+        if err := pool.QueryRow(ctx, `SELECT COUNT(*),COUNT(*) FILTER (WHERE delivered_at>0 AND message_id>0)
+FROM star_gift_channel_notification_jobs WHERE saved_gift_id=$1 AND action_kind='star_gift_unique'`,
+                resold.Saved.SavedID).Scan(&resaleNotifications, &resaleDelivered); err != nil || resaleNotifications == 0 || resaleDelivered != resaleNotifications {
+                t.Fatalf("resale-to-channel notification jobs=%d delivered=%d err=%v", resaleNotifications, resaleDelivered, err)
+        }
+        var resaleNotificationBoxes int
+        if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM message_boxes m
+JOIN star_gift_channel_notification_jobs j ON j.target_user_id=m.owner_user_id AND j.message_id=m.box_id
+WHERE j.saved_gift_id=$1 AND j.action_kind='star_gift_unique' AND m.peer_id=$2
+AND media #>> '{service_action,kind}'='star_gift_unique'
+AND (media #>> '{service_action,star_gift_unique,from_user_id}')::bigint=$3
+AND media #>> '{service_action,star_gift_unique,peer,Type}'='channel'
+AND (media #>> '{service_action,star_gift_unique,peer,ID}')::bigint=$4
+AND (media #>> '{service_action,star_gift_unique,saved_id}')::bigint=$1
+AND media #>> '{service_action,star_gift_unique,saved}'='true'
+AND media #>> '{service_action,star_gift_unique,transferred}' IS NULL`,
+                resold.Saved.SavedID, domain.OfficialSystemUserID, actor.ID, targetChannelPeer.ID).Scan(&resaleNotificationBoxes); err != nil || resaleNotificationBoxes != 1 {
+                t.Fatalf("resale-to-channel 777000 notification boxes=%d err=%v", resaleNotificationBoxes, err)
+        }
         var channelTON, channelTONTxns, targetResaleLogs, commission int64
         if err := pool.QueryRow(ctx, `SELECT balance_nanoton FROM channel_ton_balances WHERE channel_id=$1`, created.Channel.ID).Scan(&channelTON); err != nil || channelTON != 900 {
                 t.Fatalf("channel local TON proceeds = %d err %v", channelTON, err)

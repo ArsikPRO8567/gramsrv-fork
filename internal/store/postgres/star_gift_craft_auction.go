@@ -1105,10 +1105,16 @@ WHERE gift_id=$1 AND saved_gift_id IS NULL ORDER BY id LIMIT 100`, giftID)
                         //    флаг не несёт), name_hidden=true, gift_num отсутствует,
                         //    to_id=Peer(owner) — официальный сервер ставит to_id на копии
                         //    победителя ВСЕГДА, включая self-выигрыш (в дампе
-                        //    to_id=PeerUser(2200266520) — сам победитель), can_upgrade не
-                        //    выставляется (кнопка улучшения живёт на второй копии и в
-                        //    профиле), а блок StarGift несёт gift.convert_stars=85% ставки
-                        //    при пустом action.convert_stars.
+                        //    to_id=PeerUser(2200266520) — сам победитель), а блок StarGift
+                        //    несёт gift.convert_stars=85% ставки при пустом
+                        //    action.convert_stars. В дампе can_upgrade отсутствует, потому
+                        //    что у Lime нет улучшений вовсе (upgrade_variants=null).
+                        //
+                        //    Раунд 24: при наличии улучшений (бесплатная ревизия либо
+                        //    платная с неисчерпанным пулом) копия победителя несёт
+                        //    can_upgrade — клиент рисует кнопку улучшения с описанием из
+                        //    gift.upgrade_stars (бесплатно / «за N звёзд»). released_by
+                        //    («кем выпущено») проецируется fillStarGiftSnapshot из каталога.
                         sticker := gift.Sticker
                         winAction := fillStarGiftSnapshot(&domain.MessageStarGiftAction{GiftID: gift.ID,
                                 // item.amount — выигрышная ставка победителя: цена в блоке
@@ -1120,10 +1126,12 @@ WHERE gift_id=$1 AND saved_gift_id IS NULL ORDER BY id LIMIT 100`, giftID)
                                 AuctionAcquired: true,
                                 GiftConvertStars: item.amount * starGiftAuctionConvertNumerator /
                                         starGiftAuctionConvertDenominator}, gift)
-                        // Флаг can_upgrade и prepaid_upgrade на копии победителя не
-                        // ставятся (дамп 185743): официальное сообщение о выигрыше рисуется
-                        // без кнопок улучшения, бесплатное улучшение (ревизия с ценой 0)
-                        // доступно через вторую копию и профиль, платное — тоже.
+                        // Платные улучшения ставит fillStarGiftSnapshot (gift.upgrade_stars>0
+                        // при issued<total); prepaid_upgrade не ставится никогда — клиент
+                        // рендерил бы строку «Вы отправили улучшение стоимостью 0 звёзд».
+                        if freeUpgrade {
+                                winAction.CanUpgrade = true
+                        }
                         if _, err := s.messages.SendPrivateText(ctx, domain.SendPrivateTextRequest{SenderUserID: domain.OfficialSystemUserID,
                                 RecipientUserID: item.bidder, RandomID: lifecycleCommandRandomID("auction-win", giftID, item.round, item.pos),
                                 Date: item.date, Media: &domain.MessageMedia{Kind: domain.MessageMediaKindService, ServiceAction: &domain.MessageServiceAction{

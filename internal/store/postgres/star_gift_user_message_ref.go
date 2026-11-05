@@ -69,21 +69,27 @@ func registerChannelNotificationMessageRef(
 	viewerUserID int64,
 	msgID int,
 	savedGiftID int64,
+	actionKind string,
 ) error {
 	if viewerUserID <= 0 || msgID <= 0 || savedGiftID <= 0 {
 		return fmt.Errorf("register channel notification star gift message ref: invalid identity")
 	}
+	// Раунд 24: фильтр по action_kind обязателен — один агрегат peer_star_gifts
+	// порождает несколько видов уведомлений ('star_gift' при покупке и
+	// 'star_gift_unique' при улучшении/передаче), и джойн всех видов давал в
+	// INSERT...SELECT по две строки с одним ключом конфликта («ON CONFLICT DO
+	// UPDATE command cannot affect row a second time»).
 	tag, err := tx.Exec(ctx, `
 INSERT INTO star_gift_user_message_refs(owner_user_id,msg_id,saved_gift_id)
 SELECT $1,$2,gift.id
 FROM star_gift_channel_notification_jobs job
 JOIN peer_star_gifts gift ON gift.id=job.saved_gift_id
-WHERE job.saved_gift_id=$3 AND job.target_user_id=$1
+WHERE job.saved_gift_id=$3 AND job.target_user_id=$1 AND job.action_kind=$4
   AND gift.owner_peer_type='channel' AND gift.lifecycle_status='active'
 ON CONFLICT(owner_user_id,msg_id) DO UPDATE
 SET saved_gift_id=EXCLUDED.saved_gift_id
 WHERE star_gift_user_message_refs.saved_gift_id=EXCLUDED.saved_gift_id`,
-		viewerUserID, msgID, savedGiftID)
+		viewerUserID, msgID, savedGiftID, actionKind)
 	if err != nil {
 		return fmt.Errorf("register channel notification star gift message ref: %w", err)
 	}

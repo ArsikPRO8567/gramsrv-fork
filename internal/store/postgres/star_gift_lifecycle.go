@@ -1072,6 +1072,14 @@ func (s *StarGiftLifecycleStore) PurchaseResaleStarGift(ctx context.Context, req
                         return domain.StarGiftTransferResult{}, domain.ErrStarGiftResaleNotAllowed
                 }
         }
+        // Раунд 24 (дамп 198247): покупка коллекционного подарка на маркете сразу
+        // в канал — это «помещение подарка на канал». Ранее fork отправлял
+        // покупателю само-сообщение (попадало в «Избранное»), а владелец/админы
+        // канала не получали ничего. Официальный сервер шлёт сервисное сообщение
+        // от имени «Telegram» (777000) владельцу/админам с правом постить.
+        if req.To.Type == domain.PeerTypeChannel {
+                return s.purchaseResaleStarGiftToChannel(ctx, req, seller)
+        }
         // Сообщение о покупке с маркета отправляет ПОКУПАТЕЛЬ: официальные клиенты
         // показывают «You bought this gift for X» в out-боксе отправителя и
         // «{buyer} bought you a gift for X» в копии получателя подарка. Отправка
@@ -1260,6 +1268,150 @@ func (s *StarGiftLifecycleStore) PurchaseResaleStarGift(ctx context.Context, req
                 return s.loadTransferReplay(ctx, domain.StarGiftTransferRequest{ActorUserID: req.BuyerUserID, CommandKey: req.CommandKey}, sent)
         }
         return result, nil
+}
+
+// purchaseResaleStarGiftToChannel — покупка коллекционного подарка на маркете
+// сразу в канал (раунд 24, официальный дамп 198247). Подарок помещается на
+// канал без приватного само-сообщения покупателю («Избранное»): владельцу и
+// админам с правом постить уходит сервисное сообщение от «Telegram» (777000)
+// с saved=true, from_id=покупателя (кто поместил), peer=канал, saved_id и
+// окнами capability-таймеров; флаг transferred на уведомлении не ставится.
+// Продавцу, как и в пользовательской ветке, уходит карточка продажи.
+func (s *StarGiftLifecycleStore) purchaseResaleStarGiftToChannel(ctx context.Context, req domain.StarGiftResalePurchaseRequest, seller domain.Peer) (domain.StarGiftTransferResult, error) {
+        // Идемпотентный реплей: команда пишется транзакционно, повторный запрос
+        // возвращает сохранённый результат без списания и дублей уведомлений.
+        var replayUniqueID, replayBalance int64
+        replayErr := s.db.QueryRow(ctx, `SELECT unique_gift_id,balance_after FROM star_gift_transfer_commands
+WHERE actor_user_id=$1 AND command_key=$2`, req.BuyerUserID, strings.TrimSpace(req.CommandKey)).
+                Scan(&replayUniqueID, &replayBalance)
+        if replayErr == nil {
+                return s.loadTransferReplay(ctx, domain.StarGiftTransferRequest{ActorUserID: req.BuyerUserID, CommandKey: req.CommandKey},
+                        domain.SendPrivateTextResult{})
+        } else if !errors.Is(replayErr, pgx.ErrNoRows) {
+                return domain.StarGiftTransferResult{}, replayErr
+        }
+        var result domain.StarGiftTransferResult
+        err := withTx(ctx, s.db, "resale star gift to channel", func(tx pgx.Tx) error {
+                var listingCurrency, sellerType string
+                var listingAmount, sellerID, uniqueID int64
+                if err := tx.QueryRow(ctx, `SELECT l.currency,l.amount,l.seller_peer_type,l.seller_peer_id,u.id
+                 FROM star_gift_listings l JOIN unique_star_gifts u ON u.id=l.unique_gift_id
+                 WHERE lower(u.slug)=lower($1) FOR UPDATE OF l,u`, strings.TrimSpace(req.Slug)).Scan(
+                        &listingCurrency, &listingAmount, &sellerType, &sellerID, &uniqueID); err != nil {
+                        if errors.Is(err, pgx.ErrNoRows) {
+                                return domain.ErrStarGiftResaleUnavailable
+                        }
+                        return err
+                }
+                if sellerType != string(seller.Type) || sellerID != seller.ID ||
+                        !resalePaymentMatchesListing(listingCurrency, listingAmount, req.Amount) {
+                        return domain.ErrStarGiftResaleUnavailable
+                }
+                saved, found, err := lockSavedStarGiftByUniqueID(ctx, tx, uniqueID)
+                if err != nil || !found || !saved.LifecycleStatus.Live() || saved.Owner != seller {
+                        return domain.ErrStarGiftResaleUnavailable
+                }
+                gift, found, err := NewStarGiftStore(tx).UniqueByID(ctx, uniqueID)
+                if err != nil || !found || gift.Burned || gift.Owner != saved.Owner {
+                        return domain.ErrStarGiftResaleUnavailable
+                }
+                // require_premium на коллекционных подарках — маркетинговый признак,
+                // покупка в канал разрешена независимо от подписки (как в user-ветке).
+                balance, err := s.debitLifecycleAmount(ctx, tx, req.BuyerUserID, req.Amount, domain.StarsReasonGiftResale,
+                        saved.Owner, req.Date, "Collectible gift purchase")
+                if err != nil {
+                        return err
+                }
+                var commissionAmount int64
+                proceeds := domain.StarGiftAmount{Currency: domain.StarGiftCurrency(listingCurrency), Amount: listingAmount}
+                if _, commission, err := s.creditPeerLifecycleAmount(ctx, tx, seller, req.BuyerUserID, proceeds,
+                        domain.StarsReasonGiftResale, domain.Peer{Type: domain.PeerTypeUser, ID: req.BuyerUserID},
+                        gift.ID, req.Date, "Collectible gift sale"); err != nil {
+                        return err
+                } else {
+                        commissionAmount = commission
+                }
+                if err := s.refundPendingStarGiftOffers(ctx, tx, uniqueID, req.Date, "listing purchased"); err != nil {
+                        return err
+                }
+                if _, err := tx.Exec(ctx, `DELETE FROM star_gift_listings WHERE unique_gift_id=$1`, uniqueID); err != nil {
+                        return err
+                }
+                if err := removeSavedGiftFromCollections(ctx, tx, saved.Owner, saved.ID); err != nil {
+                        return err
+                }
+                if _, err := tx.Exec(ctx, `UPDATE unique_star_gifts SET owner_peer_type=$2,owner_peer_id=$3,
+                 last_sale_date=$4,last_sale_currency=$5,last_sale_amount=$6,updated_at=now() WHERE id=$1`,
+                        uniqueID, string(req.To.Type), req.To.ID, req.Date, listingCurrency, listingAmount); err != nil {
+                        return err
+                }
+                gift.Owner = req.To
+                gift.ResellAmount = nil
+                gift.LastSaleDate = req.Date
+                gift.LastSaleAmount = &domain.StarGiftAmount{Currency: req.Amount.Currency, Amount: req.Amount.Amount}
+                sourceSaved := saved
+                saved.Owner = req.To
+                saved.MsgID, saved.SavedID = 0, saved.ID
+                if _, err := tx.Exec(ctx, `UPDATE peer_star_gifts SET owner_peer_type='channel',owner_peer_id=$2,from_user_id=$3,
+                 msg_id=0,saved_id=id,upgrade_msg_id=0,gift_date=$4,name_hidden=false,unsaved=false,pinned_order=0,can_transfer_at=0
+                 WHERE id=$1`, saved.ID, req.To.ID, req.BuyerUserID, req.Date); err != nil {
+                        return err
+                }
+                result.Saved, result.Unique, result.Balance = saved, gift, balance
+                result.Saved.MsgID, result.Saved.SavedID, result.Saved.UpgradeMsgID, result.Saved.Date = 0, saved.ID, 0, req.Date
+                result.Saved.FromUserID = req.BuyerUserID
+                resaleAmount := req.Amount
+                if _, err := tx.Exec(ctx, `INSERT INTO star_gift_sales(unique_gift_id,seller_peer_type,seller_peer_id,
+                 buyer_peer_type,buyer_peer_id,currency,amount,commission_amount,sold_at,command_key)
+                 VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+                        result.Unique.ID, string(seller.Type), seller.ID, string(req.To.Type), req.To.ID,
+                        string(req.Amount.Currency), req.Amount.Amount, commissionAmount, req.Date, strings.TrimSpace(req.CommandKey)); err != nil {
+                        return err
+                }
+                if _, err := tx.Exec(ctx, `INSERT INTO star_gift_transfer_commands(actor_user_id,command_key,unique_gift_id,
+                 from_peer_type,from_peer_id,to_peer_type,to_peer_id,charge_stars,balance_after,created_at)
+                 VALUES($1,$2,$3,$4,$5,$6,$7,0,$8,$9)`, req.BuyerUserID, strings.TrimSpace(req.CommandKey),
+                        result.Unique.ID, string(seller.Type), seller.ID, string(req.To.Type), req.To.ID, result.Balance.Balance, req.Date); err != nil {
+                        return err
+                }
+                action := domain.ChannelMessageAction{Type: domain.ChannelActionStarGiftUnique,
+                        StarGiftUnique: transferUniqueAction(result.Unique, req.BuyerUserID, req.To, result.Saved)}
+                if err := NewChannelStore(tx).appendStarGiftAdminLogTx(ctx, tx, req.To.ID, req.BuyerUserID,
+                        result.Saved.ID, req.Date, action); err != nil {
+                        return err
+                }
+                // Уведомление владельцу/админам от «Telegram» (777000) — тот же
+                // механизм, что и у прямого переноса подарка на канал (раунд 23).
+                notification := *action.StarGiftUnique
+                notification.Transferred = false
+                if err := enqueueChannelStarGiftUniqueNotifications(ctx, tx, result.Saved.ID, req.To.ID, req.Date,
+                        channelStarGiftNotificationKindUnique, &notification, 0); err != nil {
+                        return err
+                }
+                if seller.Type == domain.PeerTypeUser {
+                        saleCard := transferUniqueAction(result.Unique, req.BuyerUserID, req.To, result.Saved)
+                        saleCard.ResaleAmount = &resaleAmount
+                        // Расписка о продаже не несёт живых capability-таймеров:
+                        // подарок уже принадлежит каналу.
+                        saleCard.CanExportAt, saleCard.TransferStars = 0, 0
+                        saleCard.CanTransferAt, saleCard.CanResellAt = 0, 0
+                        saleCard.DropOriginalDetailsStars, saleCard.CanCraftAt = 0, 0
+                        if _, err := insertStarGiftSellerSaleCardTx(ctx, tx, s.messages, seller.ID, saleCard, req.Date); err != nil {
+                                return err
+                        }
+                }
+                if sourceSaved.Owner.Type == domain.PeerTypeUser {
+                        if _, err := s.retireUserStarGiftMessagesTx(ctx, tx, sourceSaved, result.Unique, req.Date); err != nil {
+                                return err
+                        }
+                }
+                return updateStarGiftResaleProjection(ctx, tx, result.Unique.GiftID)
+        })
+        if err == nil && result.Saved.ID > 0 {
+                // Рассылка после коммита — идемпотентна и переживает рестарт.
+                _, _ = s.dispatchChannelStarGiftNotifications(ctx, req.Date, maxChannelStarGiftNotificationRecipients, result.Saved.ID)
+        }
+        return result, err
 }
 
 func lockSavedStarGiftByUniqueID(ctx context.Context, tx pgx.Tx, uniqueID int64) (domain.SavedStarGift, bool, error) {

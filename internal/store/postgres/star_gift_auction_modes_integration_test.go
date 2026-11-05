@@ -32,10 +32,12 @@ func TestStarGiftAuctionBidModesPostgres(t *testing.T) {
         gifts := NewStarGiftStore(pool)
         baseDocumentID := (time.Now().UnixNano() & 0x7ffffffffffff000) + 900
         // Аукционный подарок с ревизией улучшений ценой 0 — бесплатные апгрейды.
+        // Раунд 24: released_by («кем выпущено») в каталоге — обе копии сообщения
+        // о выигрыше обязаны проецировать его в блоке StarGift.
         entry, err := gifts.CreateCatalogRevision(ctx, domain.StarGiftCatalogWrite{
                 Title: "AuctionModes " + suffix, Stars: 100, Enabled: true, Limited: true, Auction: true,
                 AvailabilityTotal: 2, AvailabilityRemains: 2, GiftsPerRound: 1, AuctionStartDate: now - 10,
-                AuctionSlug: "modes-" + suffix,
+                AuctionSlug: "modes-" + suffix, ReleasedBy: alphaPeer,
                 Document:    collectibleTestDocument(baseDocumentID, "modes.tgs"),
                 Blob:        collectibleTestBlob(baseDocumentID, "modes"), Animation: collectibleTestAnimation("modes.tgs"),
                 Actor: "integration", CommandID: "modes-catalog-" + suffix,
@@ -141,35 +143,41 @@ func TestStarGiftAuctionBidModesPostgres(t *testing.T) {
         // Раунд 22: отправляются ДВА экземпляра. Экземпляр победителя — сервисное
         // сообщение от 777000 в чат «Telegram»: auction_acquired, БЕЗ from_id
         // (иначе клиент не показывает подпись «Вы выиграли в аукционе…») и без
-        // prepaid_upgrade. Раунд 23 (дамп 185743): официальная копия не несёт
-        // can_upgrade (кнопка улучшения живёт на второй копии и в профиле),
-        // saved=false, name_hidden=true, to_id на копии победителя присутствует
-        // всегда, gift.convert_stars=85% ставки (gift_convert_stars).
-        // Экземпляр получателя — обычное сообщение о покупке: без
-        // auction_acquired, с can_upgrade.
+        // prepaid_upgrade. Раунд 23 (дамп 185743): saved=false, name_hidden=true,
+        // to_id на копии победителя присутствует всегда, gift.convert_stars=85%
+        // ставки (gift_convert_stars); can_upgrade в дампе отсутствует только
+        // потому, что у Lime улучшений нет вовсе. Раунд 24: при наличии
+        // улучшений (ревизия с нулевой ценой) копия победителя несёт
+        // can_upgrade — кнопку улучшения; обе копии проецируют released_by
+        // («кем выпущено»). Экземпляр получателя — обычное сообщение о покупке:
+        // без auction_acquired, с can_upgrade.
         var winMsg int
         if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM message_boxes WHERE owner_user_id=$1
 AND peer_id=$2
 AND media #>> '{service_action,kind}'='star_gift'
 AND media #>> '{service_action,star_gift,auction_acquired}'='true'
-AND media #>> '{service_action,star_gift,can_upgrade}' IS NULL
+AND media #>> '{service_action,star_gift,can_upgrade}'='true'
 AND media #>> '{service_action,star_gift,prepaid_upgrade}' IS NULL
 AND media #>> '{service_action,star_gift,from_user_id}' IS NULL
 AND media #>> '{service_action,star_gift,saved}' IS NULL
 AND media #>> '{service_action,star_gift,name_hidden}'='true'
 AND media #>> '{service_action,star_gift,to,Type}'='user'
 AND (media #>> '{service_action,star_gift,to,ID}')::bigint=$1
-AND (media #>> '{service_action,star_gift,gift_convert_stars}')::bigint > 0`, beta.ID, domain.OfficialSystemUserID).Scan(&winMsg); err != nil {
+AND (media #>> '{service_action,star_gift,gift_convert_stars}')::bigint > 0
+AND media #>> '{service_action,star_gift,released_by,Type}'='user'
+AND (media #>> '{service_action,star_gift,released_by,ID}')::bigint=$3`, beta.ID, domain.OfficialSystemUserID, alpha.ID).Scan(&winMsg); err != nil {
                 t.Fatalf("load win message flags: %v", err)
         }
         if winMsg == 0 {
-                t.Fatalf("winner copy lost 777000 auction-win message (auction_acquired/no can_upgrade, saved=false, name_hidden, to_id, gift_convert_stars)")
+                t.Fatalf("winner copy lost 777000 auction-win message (auction_acquired/can_upgrade, saved=false, name_hidden, to_id, gift_convert_stars, released_by)")
         }
         var purchaseMsg int
         if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM message_boxes WHERE owner_user_id=$1
 AND media #>> '{service_action,kind}'='star_gift'
 AND media #>> '{service_action,star_gift,auction_acquired}' IS NULL
-AND media #>> '{service_action,star_gift,can_upgrade}'='true'`, beta.ID).Scan(&purchaseMsg); err != nil {
+AND media #>> '{service_action,star_gift,can_upgrade}'='true'
+AND media #>> '{service_action,star_gift,released_by,Type}'='user'
+AND (media #>> '{service_action,star_gift,released_by,ID}')::bigint=$2`, beta.ID, alpha.ID).Scan(&purchaseMsg); err != nil {
                 t.Fatalf("load purchase message flags: %v", err)
         }
         if purchaseMsg == 0 {

@@ -329,7 +329,7 @@ func deliverChannelStarGiftNotification(
                                 return fmt.Errorf("channel star gift notification missing recipient box")
                         }
                         return registerChannelNotificationMessageRef(ctx, tx, job.TargetUserID,
-                                sent.RecipientMessage.ID, job.SavedGiftID)
+                                sent.RecipientMessage.ID, job.SavedGiftID, job.ActionKind)
                 },
         })
         if err != nil {
