@@ -1093,8 +1093,12 @@ func run(logger *zap.Logger) error {
         }))
         starGiftLifecycleStore := postgres.NewStarGiftLifecycleStore(pool, messageStore, cfg.StarGiftTONStartingGrant,
                 postgres.WithStarGiftMarketPolicy(domain.StarGiftMarketPolicy{
-                        StarsProceedsPermille: cfg.StarGiftStarsProceedsPermille,
-                        TONProceedsPermille:   cfg.StarGiftTONProceedsPermille,
+                        // Раунд 23: комиссия маркета настраивается в промилле
+                        // (TELESRV_STARGIFT_*_COMMISSION_PERMILLE); доля продавца =
+                        // 1000 - комиссия. Серверная выплата и клиентское отображение
+                        // теперь считаются от одного и того же значения.
+                        StarsProceedsPermille: 1000 - cfg.StarGiftStarsCommissionPermille,
+                        TONProceedsPermille:   1000 - cfg.StarGiftTONCommissionPermille,
                 }),
                 // Лимиты цены маркета (раунд 20): звёзды 125..35000, TON 0.01..10000
                 // по умолчанию; применяются к выставлению на продажу и к офферам.
@@ -1325,9 +1329,13 @@ func run(logger *zap.Logger) error {
                         help.WithPremiumBotUsername(cfg.PremiumBotUsername),
                         // Раунд 21: серверные лимиты рынка в app config — клиент показывает
                         // их вместо собственных констант (125..35000 звёзд, 0.01..10000 TON).
+                        // Раунд 23 (исправление): ключи *_commission_permille по официальной
+                        // семантике — ДОЛЯ продавца («you will get price*value/1000»),
+                        // поэтому отдаётся 1000-комиссия. Прежняя инверсия превращала
+                        // долю 1000 в ключ 0, и клиент рисовал «Продать за 0 звёзд/TON».
                         help.WithStarGiftResaleLimits(cfg.StarGiftResellMinStars, cfg.StarGiftResellMaxStars,
                                 cfg.StarGiftResellMinTon, cfg.StarGiftResellMaxTon,
-                                1000-cfg.StarGiftStarsProceedsPermille, 1000-cfg.StarGiftTONProceedsPermille),
+                                1000-cfg.StarGiftStarsCommissionPermille, 1000-cfg.StarGiftTONCommissionPermille),
                         help.WithAccountFreezeProvider(adminService)),
                 AppUpdates:              appUpdateResolver,
                 AccountFreeze:           adminService,
