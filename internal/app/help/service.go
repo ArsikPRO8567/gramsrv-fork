@@ -76,10 +76,13 @@ type Service struct {
         premiumBot    string
 
         // starGiftResale — серверные лимиты рынка (раунд 21): минимальные/максимальные
-        // цены листинга и офферов (звёзды; TON в нанотонах) и комиссии в промилле.
+        // цены листинга и офферов (звёзды; TON в нанотонах) и доли продавца в промилле.
         // Официальные клиенты показывают в диалоге продажи/оффера конфигурационные
         // ключи stars_stargift_resale_amount_min/max, ton_stargift_resale_amount_min/max,
-        // stars_stargift_resale_commission_permille, ton_stargift_resale_commission_permille;
+        // stars_stargift_resale_commission_permille, ton_stargift_resale_commission_permille.
+        // ВАЖНО (раунд 23): официальная семантика *_commission_permille — доля
+        // продавца: «you will get price*value/1000» (документация app config,
+        // официальные значения 800/900). Комиссия маркета = 1000 - значение ключа.
         // без этих ключей клиент рисует собственные константы (125..35000 звёзд,
         // 0.01..10000 TON), поэтому границы из .env до этого раунда у клиента не
         // отображались.
@@ -120,7 +123,8 @@ func WithMapboxToken(token string) Option {
 }
 
 // WithStarGiftResaleLimits задаёт серверные лимиты рынка (раунд 21) для
-// app config: min/max звёзд, min/max TON в нанотонах и комиссии в промилле.
+// app config: min/max звёзд, min/max TON в нанотонах и доли продавца в промилле
+// (комиссия маркета = 1000 - доля; см. раунд 23 — ключи клиента читают долю).
 // Границы со значением 0 не выдаются — клиент оставляет собственный дефолт,
 // сервер такую границу тоже не проверяет (согласованная семантика).
 func WithStarGiftResaleLimits(minStars, maxStars, minTonNanoton, maxTonNanoton int64,
