@@ -629,6 +629,17 @@ WHERE user_id=$1 AND command_key=$2`, req.UserID, commandKey, ownerEditPts)
                                         }); err != nil {
                                         return fmt.Errorf("append channel star gift upgrade admin log: %w", err)
                                 }
+                                // Раунд 23 (дамп 198254): владелец/админы канала получают
+                                // сервисное уведомление «Telegram» об улучшении подарка
+                                // канала (upgrade=true, from_id=кто улучшил, peer=канал,
+                                // saved_id, окно capability-таймеров). Апгрейдер исключается:
+                                // его копия — прямое сообщение выше, дубликат не нужен.
+                                notification := *action
+                                if err := enqueueChannelStarGiftUniqueNotifications(ctx, tx, result.Saved.ID,
+                                        result.Saved.Owner.ID, req.Date, channelStarGiftNotificationKindUniqueUpgrad,
+                                        &notification, req.UserID); err != nil {
+                                        return err
+                                }
                         }
                         return nil
                 },
@@ -641,6 +652,10 @@ WHERE user_id=$1 AND command_key=$2`, req.UserID, commandKey, ownerEditPts)
         result.Duplicate = sent.Duplicate
         if sent.Duplicate {
                 return s.loadUpgradeReplay(ctx, req, saved, sent)
+        }
+        if result.Saved.Owner.Type == domain.PeerTypeChannel && result.Saved.ID > 0 {
+                _, _ = dispatchChannelStarGiftNotificationsStore(ctx, s.db, s.messages, req.Date,
+                        maxChannelStarGiftNotificationRecipients, result.Saved.ID)
         }
         return result, nil
 }

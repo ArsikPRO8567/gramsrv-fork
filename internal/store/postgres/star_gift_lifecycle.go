@@ -175,6 +175,14 @@ func (s *StarGiftLifecycleStore) ConvertStarGift(ctx context.Context, req domain
                 if err := s.editConvertedStarGiftMessagesTx(ctx, tx, saved, amount, req.Date); err != nil {
                         return err
                 }
+                // Раунд 23 (дамп 168414): у канальных подарков конвертация обновляет и
+                // сервисные уведомления владельцу/админам в чате «Telegram»:
+                // converted=true, saved=false, convert_stars — как на официальном
+                // сервере (сообщение остаётся, флаги внутри messageActionStarGift
+                // переписываются).
+                if err := s.editConvertedChannelStarGiftNotificationsTx(ctx, tx, saved, amount, req.Date); err != nil {
+                        return err
+                }
                 return nil
         })
         if err != nil {
@@ -296,6 +304,141 @@ WHERE owner_user_id=$1 AND box_id=$2 AND NOT deleted`, box.OwnerUserID, box.BoxI
 UPDATE private_messages SET media=$3
 WHERE sender_user_id=$1 AND id=$2`, target.MessageSenderID, target.PrivateMessageID, privateMediaJSON); err != nil {
                 return fmt.Errorf("update converted star gift private media: %w", err)
+        }
+        return nil
+}
+
+// editConvertedChannelStarGiftNotificationsTx переписывает сервисные
+// уведомления владельцу/админам канала о подарке, конвертированном в звёзды
+// (раунд 23, дамп 168414): converted=true, saved=false, convert_stars. Каждый
+// получатель уведомления владеет собственным приватным сообщением от «Telegram»,
+// зарегистрированным в star_gift_user_message_refs при доставке.
+func (s *StarGiftLifecycleStore) editConvertedChannelStarGiftNotificationsTx(
+        ctx context.Context,
+        tx pgx.Tx,
+        saved domain.SavedStarGift,
+        convertStars int64,
+        date int,
+) error {
+        if s == nil || s.messages == nil || date <= 0 || saved.ID <= 0 ||
+                saved.Owner.Type != domain.PeerTypeChannel || saved.Owner.ID <= 0 {
+                return nil
+        }
+        refs, err := tx.Query(ctx, `
+SELECT owner_user_id,msg_id FROM star_gift_user_message_refs
+WHERE saved_gift_id=$1 AND msg_id>0`, saved.ID)
+        if err != nil {
+                return fmt.Errorf("list converted channel star gift notification refs: %w", err)
+        }
+        type notificationRef struct {
+                ownerUserID int64
+                msgID       int
+        }
+        targets := make([]notificationRef, 0)
+        for refs.Next() {
+                var ref notificationRef
+                if err := refs.Scan(&ref.ownerUserID, &ref.msgID); err != nil {
+                        refs.Close()
+                        return fmt.Errorf("scan converted channel star gift notification refs: %w", err)
+                }
+                targets = append(targets, ref)
+        }
+        if err := refs.Err(); err != nil {
+                refs.Close()
+                return fmt.Errorf("converted channel star gift notification refs: %w", err)
+        }
+        refs.Close()
+        if len(targets) == 0 {
+                return nil
+        }
+        q := sqlcgen.New(tx)
+        for _, ref := range targets {
+                var peerType string
+                var peerID int64
+                err := tx.QueryRow(ctx, `
+SELECT peer_type,peer_id FROM message_boxes
+WHERE owner_user_id=$1 AND box_id=$2 AND NOT deleted
+FOR UPDATE`, ref.ownerUserID, ref.msgID).Scan(&peerType, &peerID)
+                if errors.Is(err, pgx.ErrNoRows) {
+                        continue
+                }
+                if err != nil {
+                        return fmt.Errorf("lock converted channel star gift notification: %w", err)
+                }
+                if peerType != string(domain.PeerTypeUser) || peerID <= 0 {
+                        continue
+                }
+                target, err := q.GetMessageBoxForEdit(ctx, sqlcgen.GetMessageBoxForEditParams{
+                        OwnerUserID: ref.ownerUserID, BoxID: int32(ref.msgID), PeerType: peerType, PeerID: peerID,
+                })
+                if err != nil {
+                        return fmt.Errorf("load converted channel star gift notification: %w", err)
+                }
+                media, err := decodeMessageMedia(target.MediaJson)
+                if err != nil {
+                        return fmt.Errorf("decode converted channel star gift notification: %w", err)
+                }
+                action := privateStarGiftAction(media)
+                if action == nil || action.GiftID != saved.GiftID || action.Converted {
+                        continue
+                }
+                action.Converted = true
+                action.Saved = false
+                action.ConvertStars = convertStars
+                mediaJSON, err := encodeMessageMedia(media)
+                if err != nil {
+                        return fmt.Errorf("encode converted channel star gift notification: %w", err)
+                }
+                pts, err := s.messages.reservePts(ctx, tx, ref.ownerUserID)
+                if err != nil {
+                        return fmt.Errorf("allocate converted channel star gift pts: %w", err)
+                }
+                tag, err := tx.Exec(ctx, `
+UPDATE message_boxes SET media=$3,pts=$4
+WHERE owner_user_id=$1 AND box_id=$2 AND NOT deleted`, ref.ownerUserID, ref.msgID, mediaJSON, int32(pts))
+                if err != nil {
+                        return fmt.Errorf("update converted channel star gift notification box: %w", err)
+                }
+                if tag.RowsAffected() != 1 {
+                        return fmt.Errorf("update converted channel star gift notification box lost row")
+                }
+                if _, err := tx.Exec(ctx, `
+UPDATE private_messages SET media=$3
+WHERE sender_user_id=$1 AND id=$2`, target.MessageSenderID, target.PrivateMessageID, mediaJSON); err != nil {
+                        return fmt.Errorf("update converted channel star gift notification private media: %w", err)
+                }
+                boxes, err := q.ListVisibleMessageBoxesByPrivateMessage(ctx, sqlcgen.ListVisibleMessageBoxesByPrivateMessageParams{
+                        OwnerUserIds:    privateMessageOwnerIDs(ref.ownerUserID, peerID),
+                        MessageSenderID: target.MessageSenderID, PrivateMessageID: target.PrivateMessageID,
+                })
+                if err != nil {
+                        return fmt.Errorf("list converted channel star gift notification boxes: %w", err)
+                }
+                for _, box := range boxes {
+                        if box.OwnerUserID != ref.ownerUserID {
+                                continue
+                        }
+                        msg, err := messageFromVisibleBoxRow(box)
+                        if err != nil {
+                                return err
+                        }
+                        msg.Media = media
+                        msg.Pts = pts
+                        if err := replaceMessageBoxMediaIndexTx(ctx, tx, msg.OwnerUserID, msg.Peer.ID, msg.ID, msg.Date, msg.Media, msg.Entities); err != nil {
+                                return err
+                        }
+                        event := domain.UpdateEvent{UserID: msg.OwnerUserID, Type: domain.UpdateEventEditMessage,
+                                Pts: pts, PtsCount: 1, Date: date, Message: msg}
+                        if err := appendUserUpdateEvent(ctx, tx, q, msg.OwnerUserID, event); err != nil {
+                                return fmt.Errorf("append converted channel star gift edit event: %w", err)
+                        }
+                        if err := enqueueDispatch(ctx, q, sqlcgen.EnqueueDispatchParams{
+                                TargetUserID: msg.OwnerUserID, Pts: int32(pts), EventType: string(domain.UpdateEventEditMessage),
+                                ExcludeAuthKeyID: 0, ExcludeSessionID: 0,
+                        }); err != nil {
+                                return fmt.Errorf("enqueue converted channel star gift edit: %w", err)
+                        }
+                }
         }
         return nil
 }
@@ -948,6 +1091,7 @@ func (s *StarGiftLifecycleStore) PurchaseResaleStarGift(ctx context.Context, req
         }
         var result domain.StarGiftTransferResult
         var commissionAmount int64
+        var resaleAmountField domain.StarGiftAmount
         var sourceSaved domain.SavedStarGift
         hooks := privateSendTxHooks{
                 before: func(ctx context.Context, tx pgx.Tx, send *domain.SendPrivateTextRequest) error {
@@ -1020,6 +1164,7 @@ func (s *StarGiftLifecycleStore) PurchaseResaleStarGift(ctx context.Context, req
                         send.Media.ServiceAction.StarGiftUnique = transferUniqueAction(gift, messageSenderID, req.To, saved)
                         resaleAmount := req.Amount
                         send.Media.ServiceAction.StarGiftUnique.ResaleAmount = &resaleAmount
+                        resaleAmountField = resaleAmount
                         return nil
                 },
                 after: func(ctx context.Context, tx pgx.Tx, sent domain.SendPrivateTextResult) error {
@@ -1079,6 +1224,25 @@ func (s *StarGiftLifecycleStore) PurchaseResaleStarGift(ctx context.Context, req
                         }
                         result.Saved.MsgID, result.Saved.SavedID, result.Saved.UpgradeMsgID, result.Saved.Date = msgID, savedID, msgID, req.Date
                         result.Saved.FromUserID = messageSenderID
+                        // Раунд 23: восстановлена карточка продажи у продавца — регрессия
+                        // маршрутизации «отправляет покупатель» (само-сообщение продавца
+                        // «Вы продали этот подарок за X», официальная подпись
+                        // ActionUniqueGiftResaleSoldOutbound). Вставка идёт в той же
+                        // транзакции ДО retire старых карточек: порядок событий продавца
+                        // [user_emoji_status, new_message, edit_message] зафиксирован
+                        // интеграционным тестом.
+                        if seller.Type == domain.PeerTypeUser {
+                                saleCard := transferUniqueAction(result.Unique, messageSenderID, req.To, result.Saved)
+                                saleCard.ResaleAmount = &resaleAmountField
+                                // Расписка о продаже не несёт живых capability-таймеров:
+                                // подарок уже принадлежит покупателю.
+                                saleCard.CanExportAt, saleCard.TransferStars = 0, 0
+                                saleCard.CanTransferAt, saleCard.CanResellAt = 0, 0
+                                saleCard.DropOriginalDetailsStars, saleCard.CanCraftAt = 0, 0
+                                if _, err := insertStarGiftSellerSaleCardTx(ctx, tx, s.messages, seller.ID, saleCard, req.Date); err != nil {
+                                        return err
+                                }
+                        }
                         if sourceSaved.Owner.Type == domain.PeerTypeUser {
                                 if _, err := s.retireUserStarGiftMessagesTx(ctx, tx, sourceSaved, result.Unique, req.Date); err != nil {
                                         return err
@@ -1642,6 +1806,18 @@ func (s *StarGiftLifecycleStore) transferStarGiftWithoutPrivateMessage(ctx conte
                 if err := NewChannelStore(tx).appendStarGiftAdminLogTx(ctx, tx, req.To.ID, req.ActorUserID, saved.ID, req.Date, action); err != nil {
                         return err
                 }
+                // Раунд 23 (дамп 198247): владелец/админы канала получают сервисное
+                // уведомление «Telegram» о том, что уникальный подарок помещён на
+                // канал. Официальная копия несёт saved=true, from_id=передающего,
+                // peer=канал, saved_id и окно capability-таймеров; флаг transferred
+                // на ней НЕ выставлен (это перенос на профиль канала, а не смена
+                // владельца между пользователями).
+                notification := *action.StarGiftUnique
+                notification.Transferred = false
+                if err := enqueueChannelStarGiftUniqueNotifications(ctx, tx, saved.ID, req.To.ID, req.Date,
+                        channelStarGiftNotificationKindUnique, &notification, 0); err != nil {
+                        return err
+                }
                 if _, err := tx.Exec(ctx, `INSERT INTO star_gift_transfer_commands(actor_user_id,command_key,unique_gift_id,
                  from_peer_type,from_peer_id,to_peer_type,to_peer_id,charge_stars,balance_after,created_at)
                  VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`, req.ActorUserID, strings.TrimSpace(req.CommandKey), unique.ID,
@@ -1656,6 +1832,9 @@ func (s *StarGiftLifecycleStore) transferStarGiftWithoutPrivateMessage(ctx conte
                 }
                 return nil
         })
+        if err == nil && result.Saved.ID > 0 {
+                _, _ = s.dispatchChannelStarGiftNotifications(ctx, req.Date, maxChannelStarGiftNotificationRecipients, result.Saved.ID)
+        }
         return result, err
 }
 

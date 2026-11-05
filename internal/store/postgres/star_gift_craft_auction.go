@@ -1024,15 +1024,12 @@ func minAuctionInt(a, b int) int {
         return b
 }
 
-// bidAwardToPeer формирует to_id для сообщения о выигрыше в аукционе: по документации
-// поле присутствует только на копии победителя и только когда подарок назначен
-// другому peer (self-выигрыш поле не несёт).
-func bidAwardToPeer(bidderUserID int64, owner domain.Peer) domain.Peer {
-        if owner.Type == domain.PeerTypeUser && owner.ID == bidderUserID {
-                return domain.Peer{}
-        }
-        return owner
-}
+// Константы конверсии выигрыша аукциона: официальный дамп 185743 несёт
+// gift.convert_stars ровно 85% выигрышной ставки (4444500 → 3777825).
+const (
+        starGiftAuctionConvertNumerator   = 850
+        starGiftAuctionConvertDenominator = 1000
+)
 
 func (s *StarGiftLifecycleStore) dispatchStarGiftAuctionAwards(ctx context.Context, giftID int64) error {
         if s.messages == nil {
@@ -1101,25 +1098,32 @@ WHERE gift_id=$1 AND saved_gift_id IS NULL ORDER BY id LIMIT 100`, giftID)
                         //    показывает только в сервисном диалоге при auction_acquired и
                         //    ПУСТОМ from_id (MessageObject: UserObject.isService(dialogId) &&
                         //    action.from_id == null → ActionGiftAuctionSelf), поэтому from_id
-                        //    здесь не ставится. to_id остаётся на копии победителя, когда
-                        //    подарок назначен другому peer.
+                        //    здесь не ставится.
+                        //
+                        //    Раунд 23 (дамп 185743 — точная форма официального сообщения):
+                        //    saved=false (подарок ещё не «сохранён», официальная копия этот
+                        //    флаг не несёт), name_hidden=true, gift_num отсутствует,
+                        //    to_id=Peer(owner) — официальный сервер ставит to_id на копии
+                        //    победителя ВСЕГДА, включая self-выигрыш (в дампе
+                        //    to_id=PeerUser(2200266520) — сам победитель), can_upgrade не
+                        //    выставляется (кнопка улучшения живёт на второй копии и в
+                        //    профиле), а блок StarGift несёт gift.convert_stars=85% ставки
+                        //    при пустом action.convert_stars.
                         sticker := gift.Sticker
                         winAction := fillStarGiftSnapshot(&domain.MessageStarGiftAction{GiftID: gift.ID,
                                 // item.amount — выигрышная ставка победителя: цена в блоке
                                 // подарка показывает её, а не цену каталога.
-                                Stars: item.amount, ConvertStars: 0, Title: gift.Title, Sticker: &sticker,
-                                PeerUserID: owner.ID, Saved: true,
-                                // to_id нужен только копии победителя, когда подарок назначен другому peer.
-                                To:              bidAwardToPeer(item.bidder, owner),
-                                AuctionAcquired: true, GiftNum: item.giftNum}, gift)
-                        // Флаг prepaid_upgrade клиент рендерит строкой «Вы отправили
-                        // улучшение стоимостью 0 звёзд», поэтому на награде аукциона он не
-                        // ставится: бесплатное улучшение (ревизия с ценой 0) обеспечивается
-                        // can_upgrade и бесплатной формой улучшения (цена 0); платное —
-                        // формой с ценой ревизии.
-                        if freeUpgrade {
-                                winAction.CanUpgrade = true
-                        }
+                                Stars: item.amount, Title: gift.Title, Sticker: &sticker,
+                                PeerUserID: owner.ID, NameHidden: true,
+                                // to_id нужен только копии победителя (официально — всегда).
+                                To:              owner,
+                                AuctionAcquired: true,
+                                GiftConvertStars: item.amount * starGiftAuctionConvertNumerator /
+                                        starGiftAuctionConvertDenominator}, gift)
+                        // Флаг can_upgrade и prepaid_upgrade на копии победителя не
+                        // ставятся (дамп 185743): официальное сообщение о выигрыше рисуется
+                        // без кнопок улучшения, бесплатное улучшение (ревизия с ценой 0)
+                        // доступно через вторую копию и профиль, платное — тоже.
                         if _, err := s.messages.SendPrivateText(ctx, domain.SendPrivateTextRequest{SenderUserID: domain.OfficialSystemUserID,
                                 RecipientUserID: item.bidder, RandomID: lifecycleCommandRandomID("auction-win", giftID, item.round, item.pos),
                                 Date: item.date, Media: &domain.MessageMedia{Kind: domain.MessageMediaKindService, ServiceAction: &domain.MessageServiceAction{
@@ -1158,6 +1162,7 @@ WHERE gift_id=$1 AND saved_gift_id IS NULL ORDER BY id LIMIT 100`, giftID)
                                         msgID = sent.SenderMessage.ID
                                 }
                         }
+                        var awardedSavedID int64
                         if err := withTx(ctx, s.db, "save star gift auction award", func(tx pgx.Tx) error {
                                 var savedID *int64
                                 if err := tx.QueryRow(ctx, `SELECT saved_gift_id FROM star_gift_auction_acquired WHERE id=$1 FOR UPDATE`, item.id).Scan(&savedID); err != nil {
@@ -1184,11 +1189,24 @@ WHERE gift_id=$1 AND saved_gift_id IS NULL ORDER BY id LIMIT 100`, giftID)
                                         if err := NewChannelStore(tx).appendStarGiftAdminLogTx(ctx, tx, owner.ID, item.bidder, id, item.date, action); err != nil {
                                                 return err
                                         }
+                                        // Раунд 23: канал-получатель аукционного подарка тоже получает
+                                        // сервисное уведомление от «Telegram» владельцу/админам — та же
+                                        // подсистема, что у обычных канальных подарков.
+                                        if err := enqueueChannelStarGiftNotifications(ctx, tx, id, owner.ID, item.date, action.StarGift, 0); err != nil {
+                                                return err
+                                        }
                                 }
                                 _, err = tx.Exec(ctx, `UPDATE star_gift_auction_acquired SET saved_gift_id=$2 WHERE id=$1`, item.id, id)
+                                awardedSavedID = id
                                 return err
                         }); err != nil {
                                 return err
+                        }
+                        if owner.Type == domain.PeerTypeChannel && awardedSavedID > 0 {
+                                // Раунд 23: мгновенная доставка канального уведомления (очередь
+                                // подхватит и sweeper, но лучше не ждать интервала).
+                                _, _ = s.dispatchChannelStarGiftNotifications(ctx, item.date,
+                                        maxChannelStarGiftNotificationRecipients, awardedSavedID)
                         }
                         dispatched++
                 }

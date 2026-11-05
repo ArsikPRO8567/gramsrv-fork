@@ -139,23 +139,31 @@ func TestStarGiftAuctionBidModesPostgres(t *testing.T) {
 
         // --- Бесплатный апгрейд: цена улучшения в ревизии 0. ---
         // Раунд 22: отправляются ДВА экземпляра. Экземпляр победителя — сервисное
-        // сообщение от 777000 в чат «Telegram»: auction_acquired + can_upgrade,
-        // БЕЗ from_id (иначе клиент не показывает подпись «Вы выиграли в
-        // аукционе…») и без prepaid_upgrade (клиент рендерит его строкой
-        // «Вы отправили улучшение стоимостью 0 звёзд»). Экземпляр получателя —
-        // обычное сообщение о покупке: без auction_acquired, с can_upgrade.
+        // сообщение от 777000 в чат «Telegram»: auction_acquired, БЕЗ from_id
+        // (иначе клиент не показывает подпись «Вы выиграли в аукционе…») и без
+        // prepaid_upgrade. Раунд 23 (дамп 185743): официальная копия не несёт
+        // can_upgrade (кнопка улучшения живёт на второй копии и в профиле),
+        // saved=false, name_hidden=true, to_id на копии победителя присутствует
+        // всегда, gift.convert_stars=85% ставки (gift_convert_stars).
+        // Экземпляр получателя — обычное сообщение о покупке: без
+        // auction_acquired, с can_upgrade.
         var winMsg int
         if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM message_boxes WHERE owner_user_id=$1
 AND peer_id=$2
 AND media #>> '{service_action,kind}'='star_gift'
 AND media #>> '{service_action,star_gift,auction_acquired}'='true'
-AND media #>> '{service_action,star_gift,can_upgrade}'='true'
+AND media #>> '{service_action,star_gift,can_upgrade}' IS NULL
 AND media #>> '{service_action,star_gift,prepaid_upgrade}' IS NULL
-AND media #>> '{service_action,star_gift,from_user_id}' IS NULL`, beta.ID, domain.OfficialSystemUserID).Scan(&winMsg); err != nil {
+AND media #>> '{service_action,star_gift,from_user_id}' IS NULL
+AND media #>> '{service_action,star_gift,saved}' IS NULL
+AND media #>> '{service_action,star_gift,name_hidden}'='true'
+AND media #>> '{service_action,star_gift,to,Type}'='user'
+AND (media #>> '{service_action,star_gift,to,ID}')::bigint=$1
+AND (media #>> '{service_action,star_gift,gift_convert_stars}')::bigint > 0`, beta.ID, domain.OfficialSystemUserID).Scan(&winMsg); err != nil {
                 t.Fatalf("load win message flags: %v", err)
         }
         if winMsg == 0 {
-                t.Fatalf("winner copy lost 777000 auction-win message (auction_acquired/can_upgrade, no from_id/prepaid_upgrade)")
+                t.Fatalf("winner copy lost 777000 auction-win message (auction_acquired/no can_upgrade, saved=false, name_hidden, to_id, gift_convert_stars)")
         }
         var purchaseMsg int
         if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM message_boxes WHERE owner_user_id=$1

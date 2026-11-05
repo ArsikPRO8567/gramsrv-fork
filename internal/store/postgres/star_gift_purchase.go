@@ -1,519 +1,534 @@
 package postgres
 
 import (
-	"context"
-	"crypto/rand"
-	"crypto/sha256"
-	"encoding/base64"
-	"encoding/binary"
-	"errors"
-	"fmt"
-	"strings"
+        "context"
+        "crypto/rand"
+        "crypto/sha256"
+        "encoding/base64"
+        "encoding/binary"
+        "errors"
+        "fmt"
+        "strings"
 
-	"github.com/jackc/pgx/v5"
+        "github.com/jackc/pgx/v5"
 
-	"telesrv/internal/domain"
-	"telesrv/internal/store/postgres/sqlcgen"
+        "telesrv/internal/domain"
+        "telesrv/internal/store/postgres/sqlcgen"
 )
 
 func (s *StarGiftLifecycleStore) IssueStarGiftPurchaseForm(ctx context.Context, form domain.StarGiftPurchaseForm) (domain.StarGiftPurchaseForm, error) {
-	if s == nil || s.db == nil || form.FormID != 0 || form.BuyerUserID <= 0 || !validLifecyclePeer(form.To) ||
-		form.GiftID <= 0 || form.RevisionID <= 0 || form.ChargeStars <= 0 || form.IssuedAt <= 0 ||
-		form.ExpiresAt != form.IssuedAt+600 || len([]rune(form.Message)) > 128 {
-		return domain.StarGiftPurchaseForm{}, domain.ErrStarGiftFormPurposeInvalid
-	}
-	for attempt := 0; attempt < 8; attempt++ {
-		var raw [8]byte
-		if _, err := rand.Read(raw[:]); err != nil {
-			return domain.StarGiftPurchaseForm{}, fmt.Errorf("generate star gift form id: %w", err)
-		}
-		form.FormID = int64(binary.LittleEndian.Uint64(raw[:]) & 0x7fffffffffffffff)
-		if form.FormID == 0 {
-			form.FormID = 1
-		}
-		_, err := s.db.Exec(ctx, `INSERT INTO star_gift_purchase_forms(buyer_user_id,form_id,gift_id,revision_id,
+        if s == nil || s.db == nil || form.FormID != 0 || form.BuyerUserID <= 0 || !validLifecyclePeer(form.To) ||
+                form.GiftID <= 0 || form.RevisionID <= 0 || form.ChargeStars <= 0 || form.IssuedAt <= 0 ||
+                form.ExpiresAt != form.IssuedAt+600 || len([]rune(form.Message)) > 128 {
+                return domain.StarGiftPurchaseForm{}, domain.ErrStarGiftFormPurposeInvalid
+        }
+        for attempt := 0; attempt < 8; attempt++ {
+                var raw [8]byte
+                if _, err := rand.Read(raw[:]); err != nil {
+                        return domain.StarGiftPurchaseForm{}, fmt.Errorf("generate star gift form id: %w", err)
+                }
+                form.FormID = int64(binary.LittleEndian.Uint64(raw[:]) & 0x7fffffffffffffff)
+                if form.FormID == 0 {
+                        form.FormID = 1
+                }
+                _, err := s.db.Exec(ctx, `INSERT INTO star_gift_purchase_forms(buyer_user_id,form_id,gift_id,revision_id,
 recipient_peer_type,recipient_peer_id,include_upgrade,hide_name,message,charge_stars,issued_at,expires_at)
 VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`, form.BuyerUserID, form.FormID, form.GiftID, form.RevisionID,
-			string(form.To.Type), form.To.ID, form.IncludeUpgrade, form.HideName, form.Message, form.ChargeStars, form.IssuedAt, form.ExpiresAt)
-		if err == nil {
-			return form, nil
-		}
-		if !isUniqueViolation(err) {
-			return domain.StarGiftPurchaseForm{}, err
-		}
-	}
-	return domain.StarGiftPurchaseForm{}, domain.ErrStarGiftUnavailable
+                        string(form.To.Type), form.To.ID, form.IncludeUpgrade, form.HideName, form.Message, form.ChargeStars, form.IssuedAt, form.ExpiresAt)
+                if err == nil {
+                        return form, nil
+                }
+                if !isUniqueViolation(err) {
+                        return domain.StarGiftPurchaseForm{}, err
+                }
+        }
+        return domain.StarGiftPurchaseForm{}, domain.ErrStarGiftUnavailable
 }
 
 func (s *StarGiftLifecycleStore) ValidateStarGiftPurchaseForm(ctx context.Context, req domain.StarGiftPurchaseRequest) error {
-	if s == nil || s.db == nil {
-		return domain.ErrStarGiftUnavailable
-	}
-	return validateStarGiftPurchaseForm(ctx, s.db, req, false)
+        if s == nil || s.db == nil {
+                return domain.ErrStarGiftUnavailable
+        }
+        return validateStarGiftPurchaseForm(ctx, s.db, req, false)
 }
 
 func validateStarGiftPurchaseForm(ctx context.Context, db sqlcgen.DBTX, req domain.StarGiftPurchaseRequest, lock bool) error {
-	if req.BuyerUserID <= 0 || req.FormID == 0 || req.Date <= 0 {
-		return domain.ErrStarGiftFormExpired
-	}
-	query := `SELECT gift_id,revision_id,recipient_peer_type,recipient_peer_id,include_upgrade,hide_name,message,
+        if req.BuyerUserID <= 0 || req.FormID == 0 || req.Date <= 0 {
+                return domain.ErrStarGiftFormExpired
+        }
+        query := `SELECT gift_id,revision_id,recipient_peer_type,recipient_peer_id,include_upgrade,hide_name,message,
 charge_stars,issued_at,expires_at FROM star_gift_purchase_forms WHERE buyer_user_id=$1 AND form_id=$2`
-	if lock {
-		query += ` FOR UPDATE`
-	}
-	var form domain.StarGiftPurchaseForm
-	var peerType string
-	err := db.QueryRow(ctx, query, req.BuyerUserID, req.FormID).Scan(&form.GiftID, &form.RevisionID, &peerType, &form.To.ID,
-		&form.IncludeUpgrade, &form.HideName, &form.Message, &form.ChargeStars, &form.IssuedAt, &form.ExpiresAt)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return domain.ErrStarGiftFormExpired
-	}
-	if err != nil {
-		return err
-	}
-	form.FormID, form.BuyerUserID, form.To.Type = req.FormID, req.BuyerUserID, domain.PeerType(peerType)
-	if form.ExpiresAt < req.Date {
-		return domain.ErrStarGiftFormExpired
-	}
-	if form.To != req.To || form.GiftID != req.GiftID || form.IncludeUpgrade != req.IncludeUpgrade ||
-		form.HideName != req.HideName || form.Message != req.Message {
-		return domain.ErrStarGiftFormPurposeInvalid
-	}
-	if form.RevisionID != req.RevisionID || form.ChargeStars != req.ChargeStars {
-		return domain.ErrStarGiftFormAmountMismatch
-	}
-	return nil
+        if lock {
+                query += ` FOR UPDATE`
+        }
+        var form domain.StarGiftPurchaseForm
+        var peerType string
+        err := db.QueryRow(ctx, query, req.BuyerUserID, req.FormID).Scan(&form.GiftID, &form.RevisionID, &peerType, &form.To.ID,
+                &form.IncludeUpgrade, &form.HideName, &form.Message, &form.ChargeStars, &form.IssuedAt, &form.ExpiresAt)
+        if errors.Is(err, pgx.ErrNoRows) {
+                return domain.ErrStarGiftFormExpired
+        }
+        if err != nil {
+                return err
+        }
+        form.FormID, form.BuyerUserID, form.To.Type = req.FormID, req.BuyerUserID, domain.PeerType(peerType)
+        if form.ExpiresAt < req.Date {
+                return domain.ErrStarGiftFormExpired
+        }
+        if form.To != req.To || form.GiftID != req.GiftID || form.IncludeUpgrade != req.IncludeUpgrade ||
+                form.HideName != req.HideName || form.Message != req.Message {
+                return domain.ErrStarGiftFormPurposeInvalid
+        }
+        if form.RevisionID != req.RevisionID || form.ChargeStars != req.ChargeStars {
+                return domain.ErrStarGiftFormAmountMismatch
+        }
+        return nil
 }
 
 // fillStarGiftSnapshot дополняет payload действия полным снимком каталога на момент
 // отправки: без availability/released_by у клиентов пропадает бейдж «N из M»,
 // номер выпуска и строка «выпущено {peer}» в блоке подарка.
 func fillStarGiftSnapshot(action *domain.MessageStarGiftAction, gift domain.StarGift) *domain.MessageStarGiftAction {
-	if action == nil {
-		return nil
-	}
-	if action.Stars == 0 {
-		action.Stars = gift.Stars
-	}
-	if action.Title == "" {
-		action.Title = gift.Title
-	}
-	if action.Sticker == nil && gift.Sticker.ID != 0 {
-		sticker := gift.Sticker
-		action.Sticker = &sticker
-	}
-	if gift.UpgradeStars > 0 {
-		action.CanUpgrade = action.CanUpgrade || gift.UpgradeIssued < gift.UpgradeTotal
-		action.UpgradePriceStars = gift.UpgradeStars
-	}
-	if gift.Limited || gift.AvailabilityTotal > 0 {
-		action.AvailabilityTotal = gift.AvailabilityTotal
-		action.AvailabilityRemains = gift.AvailabilityRemains
-	}
-	// Полный снимок каталога (официальные дампы 81530/57253/100802): limited,
-	// sold_out, даты продаж (только у sold-out) и peer_color_available —
-	// зеркально catalog-проекции tgStarGift.
-	action.Limited = gift.Limited
-	if gift.SoldOut || (gift.Limited && gift.AvailabilityRemains <= 0) {
-		action.SoldOut = true
-		action.FirstSaleDate = gift.FirstSaleDate
-		action.LastSaleDate = gift.LastSaleDate
-	}
-	if gift.PeerColorAvailable {
-		action.PeerColorAvailable = true
-	}
-	if releasedBy := gift.ReleasedBy; releasedBy.Type == domain.PeerTypeUser || releasedBy.Type == domain.PeerTypeChannel {
-		released := releasedBy
-		action.ReleasedBy = &released
-	}
-	if gift.UpgradeVariants > 0 {
-		action.UpgradeVariants = gift.UpgradeVariants
-	}
-	if gift.ResellMinStars > 0 {
-		action.ResellMinStars = gift.ResellMinStars
-	}
-	if gift.LockedUntilDate > 0 {
-		action.LockedUntilDate = gift.LockedUntilDate
-	}
-	return action
+        if action == nil {
+                return nil
+        }
+        if action.Stars == 0 {
+                action.Stars = gift.Stars
+        }
+        if action.Title == "" {
+                action.Title = gift.Title
+        }
+        if action.Sticker == nil && gift.Sticker.ID != 0 {
+                sticker := gift.Sticker
+                action.Sticker = &sticker
+        }
+        if gift.UpgradeStars > 0 {
+                action.CanUpgrade = action.CanUpgrade || gift.UpgradeIssued < gift.UpgradeTotal
+                action.UpgradePriceStars = gift.UpgradeStars
+        }
+        if gift.Limited || gift.AvailabilityTotal > 0 {
+                action.AvailabilityTotal = gift.AvailabilityTotal
+                action.AvailabilityRemains = gift.AvailabilityRemains
+        }
+        // Полный снимок каталога (официальные дампы 81530/57253/100802): limited,
+        // sold_out, даты продаж (только у sold-out) и peer_color_available —
+        // зеркально catalog-проекции tgStarGift.
+        action.Limited = gift.Limited
+        if gift.SoldOut || (gift.Limited && gift.AvailabilityRemains <= 0) {
+                action.SoldOut = true
+                action.FirstSaleDate = gift.FirstSaleDate
+                action.LastSaleDate = gift.LastSaleDate
+        }
+        if gift.PeerColorAvailable {
+                action.PeerColorAvailable = true
+        }
+        if releasedBy := gift.ReleasedBy; releasedBy.Type == domain.PeerTypeUser || releasedBy.Type == domain.PeerTypeChannel {
+                released := releasedBy
+                action.ReleasedBy = &released
+        }
+        if gift.UpgradeVariants > 0 {
+                action.UpgradeVariants = gift.UpgradeVariants
+        }
+        if gift.ResellMinStars > 0 {
+                action.ResellMinStars = gift.ResellMinStars
+        }
+        if gift.LockedUntilDate > 0 {
+                action.LockedUntilDate = gift.LockedUntilDate
+        }
+        // Раунд 23 (дамп 185743): аукционные подарки несут в блоке StarGift
+        // полный аукционный контекст — флаг auction, слаг, размер раунда,
+        // дату старта и палитру фона.
+        if gift.Auction {
+                action.Auction = true
+                action.AuctionSlug = gift.AuctionSlug
+                action.GiftsPerRound = gift.GiftsPerRound
+                action.AuctionStartDate = gift.AuctionStartDate
+                if gift.Background != nil {
+                        background := *gift.Background
+                        action.Background = &background
+                }
+        }
+        return action
 }
 
 func (s *StarGiftLifecycleStore) PurchaseStarGift(ctx context.Context, req domain.StarGiftPurchaseRequest) (domain.StarGiftPurchaseResult, error) {
-	req.CommandKey = strings.TrimSpace(req.CommandKey)
-	if s == nil || s.db == nil || req.BuyerUserID <= 0 || !validLifecyclePeer(req.To) || req.GiftID <= 0 ||
-		req.FormID == 0 || req.CommandKey == "" || len(req.CommandKey) > 256 || req.Date <= 0 || len([]rune(req.Message)) > 128 {
-		return domain.StarGiftPurchaseResult{}, domain.ErrStarGiftInvalid
-	}
-	if replay, found, err := s.loadStarGiftPurchaseReplay(ctx, req, domain.SendPrivateTextResult{}); err != nil || found {
-		return replay, err
-	}
-	if err := s.ValidateStarGiftPurchaseForm(ctx, req); err != nil {
-		return domain.StarGiftPurchaseResult{}, err
-	}
-	if req.To.Type == domain.PeerTypeChannel {
-		return s.purchaseStarGiftToChannel(ctx, req)
-	}
-	if s.messages == nil {
-		return domain.StarGiftPurchaseResult{}, domain.ErrStarGiftUnavailable
-	}
-	fingerprint := starGiftPurchaseFingerprint(req)
-	messageReq := domain.SendPrivateTextRequest{SenderUserID: req.BuyerUserID, RecipientUserID: req.To.ID,
-		RandomID: lifecycleCommandRandomID("purchase", req.BuyerUserID, req.CommandKey), Date: req.Date,
-		OriginAuthKeyID: req.OriginAuthKeyID, OriginSessionID: req.OriginSessionID, OriginUserID: req.BuyerUserID,
-		RecipientBlocked: req.RecipientBlocked, IdempotencyFingerprint: fingerprint[:],
-		Media: &domain.MessageMedia{Kind: domain.MessageMediaKindService, ServiceAction: &domain.MessageServiceAction{
-			Kind: domain.MessageServiceActionStarGift, StarGift: &domain.MessageStarGiftAction{}}}}
-	var result domain.StarGiftPurchaseResult
-	var savedGift domain.SavedStarGift
-	var resultGift domain.StarGift
-	hooks := privateSendTxHooks{
-		before: func(ctx context.Context, tx pgx.Tx, send *domain.SendPrivateTextRequest) error {
-			if err := validateStarGiftPurchaseForm(ctx, tx, req, true); err != nil {
-				return err
-			}
-			gift, saved, balance, err := s.prepareStarGiftPurchase(ctx, tx, req)
-			if err != nil {
-				return err
-			}
-			resultGift = gift
-			savedGift = saved
-			sticker := gift.Sticker
-			// Матрица подписей сервисного сообщения (см. domain.StarGiftMessageFlags,
-			// калибровка по официальным дампам 81530/57253/183490):
-			// convert_stars живёт на action всегда, когда конвертация разрешена
-			// (в том числе одновременно с can_upgrade), и убирается только
-			// у предоплаченных подарков — конвертация для них запрещена.
-			canUpgrade, actionConvertStars := domain.StarGiftMessageFlags(gift, saved.ConvertStars, saved.PrepaidUpgradeStars)
-			send.Media = &domain.MessageMedia{Kind: domain.MessageMediaKindService, ServiceAction: &domain.MessageServiceAction{
-				Kind: domain.MessageServiceActionStarGift, StarGift: fillStarGiftSnapshot(&domain.MessageStarGiftAction{
-					GiftID: gift.ID,
-					// Покупка — всегда обычное сообщение о дарении редкого подарка.
-					// Включённое улучшение не делает сообщение «апгрейдом» (флаг
-					// prepaid_upgrade не выставляется, иначе клиенты рисуют подпись
-					// «отправил улучшение»). Официальный wire-формат предоплаты:
-					// внутренний gift.stars несёт чистую цену подарка, а стоимость
-					// предоплаченного улучшения выносится во внешний action
-					// upgrade_stars. Клиенты сами складывают gift.stars +
-					// upgrade_stars и показывают суммарную цену, а внешний
-					// upgrade_stars > 0 включает у получателя кнопку бесплатного
-					// «Распаковать» (payments.upgradeStarGift без списания звёзд:
-					// entitlement уже лежит в saved gift prepaid_upgrade_stars).
-					Stars:           gift.Stars,
-					ConvertStars:    actionConvertStars,
-					Title:           gift.Title,
-					Sticker:         &sticker,
-					Message:         req.Message,
-					MessageEntities: req.MessageEntities,
-					FromUserID:      req.BuyerUserID,
-					PeerUserID:      req.To.ID,
-					To:              req.To,
-					NameHidden:      req.HideName,
-					// Свежий подарок ещё не отображается в профиле получателя:
-					// Saved=false — иначе клиент получателя показывает «сейчас
-					// подарок виден в вашем профиле» вместо подсказки об
-					// улучшении до уникального коллекционного.
-					Saved:              false,
-					CanUpgrade:         canUpgrade,
-					PrepaidUpgradeHash: saved.PrepaidUpgradeHash,
-					UpgradePriceStars:  gift.UpgradeStars,
-					UpgradeStars:       saved.PrepaidUpgradeStars,
-					GiftNum:            saved.GiftNum,
-					GiftMsgID:          saved.MsgID,
-				}, gift),
-			}}
-			result.Gift, result.Saved, result.Balance = gift, saved, balance
-			return nil
-		},
-		projectMedia: projectPrivateStarGiftPurchase,
-		after: func(ctx context.Context, tx pgx.Tx, sent domain.SendPrivateTextResult) error {
-			msgID := sent.RecipientMessage.ID
-			if msgID <= 0 {
-				msgID = sent.SenderMessage.ID
-			}
-			savedGift.MsgID = msgID
-			id, err := NewStarGiftStore(tx).Create(ctx, savedGift)
-			if err != nil {
-				return err
-			}
-			savedGift.ID = id
-			savedGift.Unique = nil
-			savedGift.SavedID = id
+        req.CommandKey = strings.TrimSpace(req.CommandKey)
+        if s == nil || s.db == nil || req.BuyerUserID <= 0 || !validLifecyclePeer(req.To) || req.GiftID <= 0 ||
+                req.FormID == 0 || req.CommandKey == "" || len(req.CommandKey) > 256 || req.Date <= 0 || len([]rune(req.Message)) > 128 {
+                return domain.StarGiftPurchaseResult{}, domain.ErrStarGiftInvalid
+        }
+        if replay, found, err := s.loadStarGiftPurchaseReplay(ctx, req, domain.SendPrivateTextResult{}); err != nil || found {
+                return replay, err
+        }
+        if err := s.ValidateStarGiftPurchaseForm(ctx, req); err != nil {
+                return domain.StarGiftPurchaseResult{}, err
+        }
+        if req.To.Type == domain.PeerTypeChannel {
+                return s.purchaseStarGiftToChannel(ctx, req)
+        }
+        if s.messages == nil {
+                return domain.StarGiftPurchaseResult{}, domain.ErrStarGiftUnavailable
+        }
+        fingerprint := starGiftPurchaseFingerprint(req)
+        messageReq := domain.SendPrivateTextRequest{SenderUserID: req.BuyerUserID, RecipientUserID: req.To.ID,
+                RandomID: lifecycleCommandRandomID("purchase", req.BuyerUserID, req.CommandKey), Date: req.Date,
+                OriginAuthKeyID: req.OriginAuthKeyID, OriginSessionID: req.OriginSessionID, OriginUserID: req.BuyerUserID,
+                RecipientBlocked: req.RecipientBlocked, IdempotencyFingerprint: fingerprint[:],
+                Media: &domain.MessageMedia{Kind: domain.MessageMediaKindService, ServiceAction: &domain.MessageServiceAction{
+                        Kind: domain.MessageServiceActionStarGift, StarGift: &domain.MessageStarGiftAction{}}}}
+        var result domain.StarGiftPurchaseResult
+        var savedGift domain.SavedStarGift
+        var resultGift domain.StarGift
+        hooks := privateSendTxHooks{
+                before: func(ctx context.Context, tx pgx.Tx, send *domain.SendPrivateTextRequest) error {
+                        if err := validateStarGiftPurchaseForm(ctx, tx, req, true); err != nil {
+                                return err
+                        }
+                        gift, saved, balance, err := s.prepareStarGiftPurchase(ctx, tx, req)
+                        if err != nil {
+                                return err
+                        }
+                        resultGift = gift
+                        savedGift = saved
+                        sticker := gift.Sticker
+                        // Матрица подписей сервисного сообщения (см. domain.StarGiftMessageFlags,
+                        // калибровка по официальным дампам 81530/57253/183490):
+                        // convert_stars живёт на action всегда, когда конвертация разрешена
+                        // (в том числе одновременно с can_upgrade), и убирается только
+                        // у предоплаченных подарков — конвертация для них запрещена.
+                        canUpgrade, actionConvertStars := domain.StarGiftMessageFlags(gift, saved.ConvertStars, saved.PrepaidUpgradeStars)
+                        send.Media = &domain.MessageMedia{Kind: domain.MessageMediaKindService, ServiceAction: &domain.MessageServiceAction{
+                                Kind: domain.MessageServiceActionStarGift, StarGift: fillStarGiftSnapshot(&domain.MessageStarGiftAction{
+                                        GiftID: gift.ID,
+                                        // Покупка — всегда обычное сообщение о дарении редкого подарка.
+                                        // Включённое улучшение не делает сообщение «апгрейдом» (флаг
+                                        // prepaid_upgrade не выставляется, иначе клиенты рисуют подпись
+                                        // «отправил улучшение»). Официальный wire-формат предоплаты:
+                                        // внутренний gift.stars несёт чистую цену подарка, а стоимость
+                                        // предоплаченного улучшения выносится во внешний action
+                                        // upgrade_stars. Клиенты сами складывают gift.stars +
+                                        // upgrade_stars и показывают суммарную цену, а внешний
+                                        // upgrade_stars > 0 включает у получателя кнопку бесплатного
+                                        // «Распаковать» (payments.upgradeStarGift без списания звёзд:
+                                        // entitlement уже лежит в saved gift prepaid_upgrade_stars).
+                                        Stars:           gift.Stars,
+                                        ConvertStars:    actionConvertStars,
+                                        Title:           gift.Title,
+                                        Sticker:         &sticker,
+                                        Message:         req.Message,
+                                        MessageEntities: req.MessageEntities,
+                                        FromUserID:      req.BuyerUserID,
+                                        PeerUserID:      req.To.ID,
+                                        To:              req.To,
+                                        NameHidden:      req.HideName,
+                                        // Свежий подарок ещё не отображается в профиле получателя:
+                                        // Saved=false — иначе клиент получателя показывает «сейчас
+                                        // подарок виден в вашем профиле» вместо подсказки об
+                                        // улучшении до уникального коллекционного.
+                                        Saved:              false,
+                                        CanUpgrade:         canUpgrade,
+                                        PrepaidUpgradeHash: saved.PrepaidUpgradeHash,
+                                        UpgradePriceStars:  gift.UpgradeStars,
+                                        UpgradeStars:       saved.PrepaidUpgradeStars,
+                                        GiftNum:            saved.GiftNum,
+                                        GiftMsgID:          saved.MsgID,
+                                }, gift),
+                        }}
+                        result.Gift, result.Saved, result.Balance = gift, saved, balance
+                        return nil
+                },
+                projectMedia: projectPrivateStarGiftPurchase,
+                after: func(ctx context.Context, tx pgx.Tx, sent domain.SendPrivateTextResult) error {
+                        msgID := sent.RecipientMessage.ID
+                        if msgID <= 0 {
+                                msgID = sent.SenderMessage.ID
+                        }
+                        savedGift.MsgID = msgID
+                        id, err := NewStarGiftStore(tx).Create(ctx, savedGift)
+                        if err != nil {
+                                return err
+                        }
+                        savedGift.ID = id
+                        savedGift.Unique = nil
+                        savedGift.SavedID = id
 
-			result.Saved = savedGift
-			result.Gift = resultGift
-			return s.insertStarGiftPurchaseCommand(ctx, tx, req, result.Saved.ID, result.Gift.Stars+result.Saved.PrepaidUpgradeStars, result.Balance.Balance)
-		},
-	}
-	sent, err := s.messages.sendPrivateTextWithHooks(ctx, messageReq, hooks)
-	if err != nil {
-		if isUniqueViolation(err) {
-			if replay, found, replayErr := s.loadStarGiftPurchaseReplay(ctx, req, sent); replayErr != nil || found {
-				return replay, replayErr
-			}
-		}
-		return domain.StarGiftPurchaseResult{}, err
-	}
-	result.Send, result.Duplicate = sent, sent.Duplicate
-	if sent.Duplicate {
-		replay, _, replayErr := s.loadStarGiftPurchaseReplay(ctx, req, sent)
-		return replay, replayErr
-	}
-	return result, nil
+                        result.Saved = savedGift
+                        result.Gift = resultGift
+                        return s.insertStarGiftPurchaseCommand(ctx, tx, req, result.Saved.ID, result.Gift.Stars+result.Saved.PrepaidUpgradeStars, result.Balance.Balance)
+                },
+        }
+        sent, err := s.messages.sendPrivateTextWithHooks(ctx, messageReq, hooks)
+        if err != nil {
+                if isUniqueViolation(err) {
+                        if replay, found, replayErr := s.loadStarGiftPurchaseReplay(ctx, req, sent); replayErr != nil || found {
+                                return replay, replayErr
+                        }
+                }
+                return domain.StarGiftPurchaseResult{}, err
+        }
+        result.Send, result.Duplicate = sent, sent.Duplicate
+        if sent.Duplicate {
+                replay, _, replayErr := s.loadStarGiftPurchaseReplay(ctx, req, sent)
+                return replay, replayErr
+        }
+        return result, nil
 }
 
 func (s *StarGiftLifecycleStore) purchaseStarGiftToChannel(ctx context.Context, req domain.StarGiftPurchaseRequest) (domain.StarGiftPurchaseResult, error) {
-	var result domain.StarGiftPurchaseResult
-	err := withTx(ctx, s.db, "purchase star gift for channel", func(tx pgx.Tx) error {
-		if err := validateStarGiftPurchaseForm(ctx, tx, req, true); err != nil {
-			return err
-		}
-		gift, saved, balance, err := s.prepareStarGiftPurchase(ctx, tx, req)
-		if err != nil {
-			return err
-		}
-		id, err := NewStarGiftStore(tx).Create(ctx, saved)
-		if err != nil {
-			return err
-		}
-		saved.ID, saved.SavedID = id, id
-		sticker := gift.Sticker
-		// Матрица подписей сервисного сообщения (см. domain.StarGiftMessageFlags):
-		// как и в приватной покупке — convert_stars при разрешённой конвертации,
-		// ноль только у предоплаченных улучшений.
-		canUpgrade, actionConvertStars := domain.StarGiftMessageFlags(gift, saved.ConvertStars, saved.PrepaidUpgradeStars)
-		action := domain.ChannelMessageAction{
-			Type: domain.ChannelActionStarGift,
-			StarGift: fillStarGiftSnapshot(&domain.MessageStarGiftAction{
-				GiftID: gift.ID,
-				// Канальная покупка — тоже обычное сообщение о дарении: цена в
-				// объекте равна сумме цены подарка и апгрейда, флаги prepaid_upgrade
-				// не выставляются.
-				Stars:           gift.Stars + saved.PrepaidUpgradeStars,
-				ConvertStars:    actionConvertStars,
-				Title:           gift.Title,
-				Sticker:         &sticker,
-				Message:         saved.Message,
-				MessageEntities: saved.MessageEntities,
-				FromUserID:      req.BuyerUserID,
-				PeerChannelID:   req.To.ID,
-				SavedID:         id,
-				NameHidden:      saved.NameHidden,
-				Saved:           true,
-				CanUpgrade:      canUpgrade,
-				// PrepaidUpgradeHash сознательно не включается: hash — это инвойс
-				// «оплатить улучшение чужого подарка», он привязан к приватному диалогу
-				// плательщика. В канальном действии он заставляет клиентов отправлять
-				// prepay invoice с peer = сервисный аккаунт/канал (STARGIFT_INVALID
-				// либо нежелательную предоплату вместо обычного улучшения).
-				UpgradePriceStars: gift.UpgradeStars,
-				GiftNum:           saved.GiftNum,
-				GiftMsgID:         int(id),
-			}, gift),
-		}
-		if err := NewChannelStore(tx).appendStarGiftAdminLogTx(ctx, tx, req.To.ID, req.BuyerUserID, id, req.Date, action); err != nil {
-			return err
-		}
-		if err := enqueueChannelStarGiftNotifications(ctx, tx, id, req.To.ID, req.Date, action.StarGift); err != nil {
-			return err
-		}
-		if err := s.insertStarGiftPurchaseCommand(ctx, tx, req, id, gift.Stars+saved.PrepaidUpgradeStars, balance.Balance); err != nil {
-			return err
-		}
-		result = domain.StarGiftPurchaseResult{Gift: gift, Saved: saved, Balance: balance}
-		return nil
-	})
-	if err != nil {
-		if isUniqueViolation(err) {
-			if replay, found, replayErr := s.loadStarGiftPurchaseReplay(ctx, req, domain.SendPrivateTextResult{}); replayErr != nil || found {
-				return replay, replayErr
-			}
-		}
-		return domain.StarGiftPurchaseResult{}, err
-	}
-	_, _ = s.dispatchChannelStarGiftNotifications(ctx, req.Date, maxChannelStarGiftNotificationRecipients, result.Saved.ID)
-	return result, nil
+        var result domain.StarGiftPurchaseResult
+        err := withTx(ctx, s.db, "purchase star gift for channel", func(tx pgx.Tx) error {
+                if err := validateStarGiftPurchaseForm(ctx, tx, req, true); err != nil {
+                        return err
+                }
+                gift, saved, balance, err := s.prepareStarGiftPurchase(ctx, tx, req)
+                if err != nil {
+                        return err
+                }
+                id, err := NewStarGiftStore(tx).Create(ctx, saved)
+                if err != nil {
+                        return err
+                }
+                saved.ID, saved.SavedID = id, id
+                sticker := gift.Sticker
+                // Матрица подписей сервисного сообщения (см. domain.StarGiftMessageFlags):
+                // как и в приватной покупке — convert_stars при разрешённой конвертации,
+                // ноль только у предоплаченных улучшений.
+                canUpgrade, actionConvertStars := domain.StarGiftMessageFlags(gift, saved.ConvertStars, saved.PrepaidUpgradeStars)
+                action := domain.ChannelMessageAction{
+                        Type: domain.ChannelActionStarGift,
+                        StarGift: fillStarGiftSnapshot(&domain.MessageStarGiftAction{
+                                GiftID: gift.ID,
+                                // Канальная покупка — тоже обычное сообщение о дарении: цена в
+                                // объекте равна сумме цены подарка и апгрейда, флаги prepaid_upgrade
+                                // не выставляются.
+                                Stars:           gift.Stars + saved.PrepaidUpgradeStars,
+                                ConvertStars:    actionConvertStars,
+                                Title:           gift.Title,
+                                Sticker:         &sticker,
+                                Message:         saved.Message,
+                                MessageEntities: saved.MessageEntities,
+                                FromUserID:      req.BuyerUserID,
+                                PeerChannelID:   req.To.ID,
+                                SavedID:         id,
+                                NameHidden:      saved.NameHidden,
+                                Saved:           true,
+                                CanUpgrade:      canUpgrade,
+                                // PrepaidUpgradeHash сознательно не включается: hash — это инвойс
+                                // «оплатить улучшение чужого подарка», он привязан к приватному диалогу
+                                // плательщика. В канальном действии он заставляет клиентов отправлять
+                                // prepay invoice с peer = сервисный аккаунт/канал (STARGIFT_INVALID
+                                // либо нежелательную предоплату вместо обычного улучшения).
+                                UpgradePriceStars: gift.UpgradeStars,
+                                GiftNum:           saved.GiftNum,
+                                // Раунд 23 (дамп 88848): канальные копии не несут
+                                // gift_msg_id — операции владельца идут через связку
+                                // peer+saved_id (inputSavedStarGiftChat).
+                        }, gift),
+                }
+                if err := NewChannelStore(tx).appendStarGiftAdminLogTx(ctx, tx, req.To.ID, req.BuyerUserID, id, req.Date, action); err != nil {
+                        return err
+                }
+                if err := enqueueChannelStarGiftNotifications(ctx, tx, id, req.To.ID, req.Date, action.StarGift, 0); err != nil {
+                        return err
+                }
+                if err := s.insertStarGiftPurchaseCommand(ctx, tx, req, id, gift.Stars+saved.PrepaidUpgradeStars, balance.Balance); err != nil {
+                        return err
+                }
+                result = domain.StarGiftPurchaseResult{Gift: gift, Saved: saved, Balance: balance}
+                return nil
+        })
+        if err != nil {
+                if isUniqueViolation(err) {
+                        if replay, found, replayErr := s.loadStarGiftPurchaseReplay(ctx, req, domain.SendPrivateTextResult{}); replayErr != nil || found {
+                                return replay, replayErr
+                        }
+                }
+                return domain.StarGiftPurchaseResult{}, err
+        }
+        _, _ = s.dispatchChannelStarGiftNotifications(ctx, req.Date, maxChannelStarGiftNotificationRecipients, result.Saved.ID)
+        return result, nil
 }
 
 func (s *StarGiftLifecycleStore) prepareStarGiftPurchase(ctx context.Context, tx pgx.Tx, req domain.StarGiftPurchaseRequest) (domain.StarGift, domain.SavedStarGift, domain.StarsBalance, error) {
-	var revisionID int64
-	var enabled bool
-	var remains int
-	if err := tx.QueryRow(ctx, `SELECT active_revision_id,enabled,availability_remains FROM star_gift_catalog WHERE gift_id=$1 FOR UPDATE`, req.GiftID).
-		Scan(&revisionID, &enabled, &remains); err != nil {
-		return domain.StarGift{}, domain.SavedStarGift{}, domain.StarsBalance{}, domain.ErrStarGiftInvalid
-	}
-	gift, found, err := NewStarGiftStore(tx).CatalogRevision(ctx, revisionID)
-	if err != nil || !found || !enabled || gift.ID != req.GiftID || gift.SoldOut || gift.Auction ||
-		gift.Limited && remains <= 0 {
-		return domain.StarGift{}, domain.SavedStarGift{}, domain.StarsBalance{}, domain.ErrStarGiftInvalid
-	}
-	whitelist, err := NewStarGiftStore(tx).GetWhitelistInfo(ctx, gift.ID, req.BuyerUserID)
-	if err != nil {
-		return domain.StarGift{}, domain.SavedStarGift{}, domain.StarsBalance{}, err
-	}
-	allowed, numbered, hasWhitelist := whitelist.Allowed, whitelist.Numbered, whitelist.HasWhitelist
-	if gift.LockedUntilDate > req.Date {
-		isWhitelisted := hasWhitelist && allowed
-		if !gift.Auction && !isWhitelisted {
-			return domain.StarGift{}, domain.SavedStarGift{}, domain.StarsBalance{}, domain.ErrStarGiftInvalid
-		}
-	}
-	if gift.RevisionID != req.RevisionID {
-		return domain.StarGift{}, domain.SavedStarGift{}, domain.StarsBalance{}, domain.ErrStarGiftFormAmountMismatch
-	}
-	if gift.RequirePremium && !req.BuyerPremium {
-		return domain.StarGift{}, domain.SavedStarGift{}, domain.StarsBalance{}, domain.ErrPremiumRequired
-	}
-	gift.AvailabilityRemains = remains
-	upgradePrice := int64(0)
-	prepayHash := ""
-	if gift.UpgradeStars > 0 || req.IncludeUpgrade {
-		revision, err := lockActiveCollectibleRevision(ctx, tx, gift.ID)
-		if err != nil || revision.Issued >= revision.SupplyTotal {
-			if req.IncludeUpgrade {
-				return domain.StarGift{}, domain.SavedStarGift{}, domain.StarsBalance{}, domain.ErrStarGiftCollectibleUnavailable
-			}
-		} else if req.IncludeUpgrade {
-			upgradePrice = revision.UpgradeStars
-		} else {
-			var token [32]byte
-			if _, err := rand.Read(token[:]); err != nil {
-				return domain.StarGift{}, domain.SavedStarGift{}, domain.StarsBalance{}, err
-			}
-			prepayHash = base64.RawURLEncoding.EncodeToString(token[:])
-		}
-	}
-	if req.IncludeUpgrade && upgradePrice <= 0 {
-		return domain.StarGift{}, domain.SavedStarGift{}, domain.StarsBalance{}, domain.ErrStarGiftCollectibleUnavailable
-	}
-	if gift.Stars+upgradePrice != req.ChargeStars {
-		return domain.StarGift{}, domain.SavedStarGift{}, domain.StarsBalance{}, domain.ErrStarGiftFormAmountMismatch
-	}
-	var purchased int
-	if err := tx.QueryRow(ctx, `INSERT INTO star_gift_user_purchases(user_id,gift_id,purchased_count) VALUES($1,$2,1)
+        var revisionID int64
+        var enabled bool
+        var remains int
+        if err := tx.QueryRow(ctx, `SELECT active_revision_id,enabled,availability_remains FROM star_gift_catalog WHERE gift_id=$1 FOR UPDATE`, req.GiftID).
+                Scan(&revisionID, &enabled, &remains); err != nil {
+                return domain.StarGift{}, domain.SavedStarGift{}, domain.StarsBalance{}, domain.ErrStarGiftInvalid
+        }
+        gift, found, err := NewStarGiftStore(tx).CatalogRevision(ctx, revisionID)
+        if err != nil || !found || !enabled || gift.ID != req.GiftID || gift.SoldOut || gift.Auction ||
+                gift.Limited && remains <= 0 {
+                return domain.StarGift{}, domain.SavedStarGift{}, domain.StarsBalance{}, domain.ErrStarGiftInvalid
+        }
+        whitelist, err := NewStarGiftStore(tx).GetWhitelistInfo(ctx, gift.ID, req.BuyerUserID)
+        if err != nil {
+                return domain.StarGift{}, domain.SavedStarGift{}, domain.StarsBalance{}, err
+        }
+        allowed, numbered, hasWhitelist := whitelist.Allowed, whitelist.Numbered, whitelist.HasWhitelist
+        if gift.LockedUntilDate > req.Date {
+                isWhitelisted := hasWhitelist && allowed
+                if !gift.Auction && !isWhitelisted {
+                        return domain.StarGift{}, domain.SavedStarGift{}, domain.StarsBalance{}, domain.ErrStarGiftInvalid
+                }
+        }
+        if gift.RevisionID != req.RevisionID {
+                return domain.StarGift{}, domain.SavedStarGift{}, domain.StarsBalance{}, domain.ErrStarGiftFormAmountMismatch
+        }
+        if gift.RequirePremium && !req.BuyerPremium {
+                return domain.StarGift{}, domain.SavedStarGift{}, domain.StarsBalance{}, domain.ErrPremiumRequired
+        }
+        gift.AvailabilityRemains = remains
+        upgradePrice := int64(0)
+        prepayHash := ""
+        if gift.UpgradeStars > 0 || req.IncludeUpgrade {
+                revision, err := lockActiveCollectibleRevision(ctx, tx, gift.ID)
+                if err != nil || revision.Issued >= revision.SupplyTotal {
+                        if req.IncludeUpgrade {
+                                return domain.StarGift{}, domain.SavedStarGift{}, domain.StarsBalance{}, domain.ErrStarGiftCollectibleUnavailable
+                        }
+                } else if req.IncludeUpgrade {
+                        upgradePrice = revision.UpgradeStars
+                } else {
+                        var token [32]byte
+                        if _, err := rand.Read(token[:]); err != nil {
+                                return domain.StarGift{}, domain.SavedStarGift{}, domain.StarsBalance{}, err
+                        }
+                        prepayHash = base64.RawURLEncoding.EncodeToString(token[:])
+                }
+        }
+        if req.IncludeUpgrade && upgradePrice <= 0 {
+                return domain.StarGift{}, domain.SavedStarGift{}, domain.StarsBalance{}, domain.ErrStarGiftCollectibleUnavailable
+        }
+        if gift.Stars+upgradePrice != req.ChargeStars {
+                return domain.StarGift{}, domain.SavedStarGift{}, domain.StarsBalance{}, domain.ErrStarGiftFormAmountMismatch
+        }
+        var purchased int
+        if err := tx.QueryRow(ctx, `INSERT INTO star_gift_user_purchases(user_id,gift_id,purchased_count) VALUES($1,$2,1)
 ON CONFLICT(user_id,gift_id) DO UPDATE SET purchased_count=star_gift_user_purchases.purchased_count+1,updated_at=now()
 WHERE NOT $3 OR star_gift_user_purchases.purchased_count<$4 RETURNING purchased_count`, req.BuyerUserID, gift.ID,
-		gift.LimitedPerUser, gift.PerUserTotal).Scan(&purchased); err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			// Документация payments.sendStarsForm: исчерпанный персональный
-			// лимит starGift.limited_per_user — это STARGIFT_USER_USAGE_LIMITED,
-			// а не общий STARGIFT_INVALID: клиент показывает «Вы отправили
-			// уже {число} таких подарков, это максимальное количество».
-			if gift.LimitedPerUser {
-				return domain.StarGift{}, domain.SavedStarGift{}, domain.StarsBalance{}, domain.ErrStarGiftUserLimit
-			}
-			return domain.StarGift{}, domain.SavedStarGift{}, domain.StarsBalance{}, domain.ErrStarGiftUnavailable
-		}
-		return domain.StarGift{}, domain.SavedStarGift{}, domain.StarsBalance{}, err
-	}
-	if gift.Limited {
-		if tag, err := tx.Exec(ctx, `UPDATE star_gift_catalog SET availability_remains=availability_remains-1,
+                gift.LimitedPerUser, gift.PerUserTotal).Scan(&purchased); err != nil {
+                if errors.Is(err, pgx.ErrNoRows) {
+                        // Документация payments.sendStarsForm: исчерпанный персональный
+                        // лимит starGift.limited_per_user — это STARGIFT_USER_USAGE_LIMITED,
+                        // а не общий STARGIFT_INVALID: клиент показывает «Вы отправили
+                        // уже {число} таких подарков, это максимальное количество».
+                        if gift.LimitedPerUser {
+                                return domain.StarGift{}, domain.SavedStarGift{}, domain.StarsBalance{}, domain.ErrStarGiftUserLimit
+                        }
+                        return domain.StarGift{}, domain.SavedStarGift{}, domain.StarsBalance{}, domain.ErrStarGiftUnavailable
+                }
+                return domain.StarGift{}, domain.SavedStarGift{}, domain.StarsBalance{}, err
+        }
+        if gift.Limited {
+                if tag, err := tx.Exec(ctx, `UPDATE star_gift_catalog SET availability_remains=availability_remains-1,
 first_sale_date=CASE WHEN first_sale_date=0 THEN $2 ELSE first_sale_date END,last_sale_date=$2,updated_at=now()
 WHERE gift_id=$1 AND availability_remains>0`, gift.ID, req.Date); err != nil || tag.RowsAffected() != 1 {
-			return domain.StarGift{}, domain.SavedStarGift{}, domain.StarsBalance{}, domain.ErrStarGiftUnavailable
-		}
-		// Лимит редкого подарка исчерпан (или уже был исчерпан) — фиксируем
-		// sold_out=true на активной ревизии каталога в той же транзакции.
-		if err := markCatalogSoldOutIfExhausted(ctx, tx, gift.ID); err != nil {
-			return domain.StarGift{}, domain.SavedStarGift{}, domain.StarsBalance{}, err
-		}
-	} else if _, err := tx.Exec(ctx, `UPDATE star_gift_catalog SET first_sale_date=CASE WHEN first_sale_date=0 THEN $2 ELSE first_sale_date END,
+                        return domain.StarGift{}, domain.SavedStarGift{}, domain.StarsBalance{}, domain.ErrStarGiftUnavailable
+                }
+                // Лимит редкого подарка исчерпан (или уже был исчерпан) — фиксируем
+                // sold_out=true на активной ревизии каталога в той же транзакции.
+                if err := markCatalogSoldOutIfExhausted(ctx, tx, gift.ID); err != nil {
+                        return domain.StarGift{}, domain.SavedStarGift{}, domain.StarsBalance{}, err
+                }
+        } else if _, err := tx.Exec(ctx, `UPDATE star_gift_catalog SET first_sale_date=CASE WHEN first_sale_date=0 THEN $2 ELSE first_sale_date END,
 last_sale_date=$2,updated_at=now() WHERE gift_id=$1`, gift.ID, req.Date); err != nil {
-		return domain.StarGift{}, domain.SavedStarGift{}, domain.StarsBalance{}, err
-	}
-	// Снимок каталога для сервисного сообщения отражает состояние ПОСЛЕ этой
-	// покупки (официальный дамп 81530: у получателя последнего экземпляра
-	// remains=0, sold_out=true, last_sale_date = дата сообщения). До этого
-	// места gift.AvailabilityRemains хранил остаток до декремента.
-	if gift.Limited {
-		gift.AvailabilityRemains = remains - 1
-		if gift.AvailabilityRemains < 0 {
-			gift.AvailabilityRemains = 0
-		}
-		if gift.AvailabilityRemains <= 0 {
-			gift.SoldOut = true
-		}
-	}
-	if gift.FirstSaleDate == 0 {
-		gift.FirstSaleDate = req.Date
-	}
-	gift.LastSaleDate = req.Date
-	charge := gift.Stars + upgradePrice
-	balance, err := s.debitLifecycleAmount(ctx, tx, req.BuyerUserID,
-		domain.StarGiftAmount{Currency: domain.StarGiftCurrencyStars, Amount: charge}, domain.StarsReasonGift,
-		req.To, req.Date, "Star gift")
-	if err != nil {
-		return domain.StarGift{}, domain.SavedStarGift{}, domain.StarsBalance{}, err
-	}
+                return domain.StarGift{}, domain.SavedStarGift{}, domain.StarsBalance{}, err
+        }
+        // Снимок каталога для сервисного сообщения отражает состояние ПОСЛЕ этой
+        // покупки (официальный дамп 81530: у получателя последнего экземпляра
+        // remains=0, sold_out=true, last_sale_date = дата сообщения). До этого
+        // места gift.AvailabilityRemains хранил остаток до декремента.
+        if gift.Limited {
+                gift.AvailabilityRemains = remains - 1
+                if gift.AvailabilityRemains < 0 {
+                        gift.AvailabilityRemains = 0
+                }
+                if gift.AvailabilityRemains <= 0 {
+                        gift.SoldOut = true
+                }
+        }
+        if gift.FirstSaleDate == 0 {
+                gift.FirstSaleDate = req.Date
+        }
+        gift.LastSaleDate = req.Date
+        charge := gift.Stars + upgradePrice
+        balance, err := s.debitLifecycleAmount(ctx, tx, req.BuyerUserID,
+                domain.StarGiftAmount{Currency: domain.StarGiftCurrencyStars, Amount: charge}, domain.StarsReasonGift,
+                req.To, req.Date, "Star gift")
+        if err != nil {
+                return domain.StarGift{}, domain.SavedStarGift{}, domain.StarsBalance{}, err
+        }
 
-	giftNum := 0
-	if (gift.Auction || numbered) && gift.Limited {
-		giftNum = gift.AvailabilityTotal - remains + 1
-	}
-	saved := domain.SavedStarGift{Owner: req.To, FromUserID: req.BuyerUserID, GiftID: gift.ID, RevisionID: gift.RevisionID,
-		Date: req.Date, NameHidden: req.HideName, ConvertStars: gift.ConvertStars, PrepaidUpgradeStars: upgradePrice,
-		PrepaidUpgradeHash: prepayHash, Message: req.Message, MessageEntities: req.MessageEntities,
-		Unsaved: req.RecipientUnsaved, GiftNum: giftNum}
-	return gift, saved, balance, nil
+        giftNum := 0
+        if (gift.Auction || numbered) && gift.Limited {
+                giftNum = gift.AvailabilityTotal - remains + 1
+        }
+        saved := domain.SavedStarGift{Owner: req.To, FromUserID: req.BuyerUserID, GiftID: gift.ID, RevisionID: gift.RevisionID,
+                Date: req.Date, NameHidden: req.HideName, ConvertStars: gift.ConvertStars, PrepaidUpgradeStars: upgradePrice,
+                PrepaidUpgradeHash: prepayHash, Message: req.Message, MessageEntities: req.MessageEntities,
+                Unsaved: req.RecipientUnsaved, GiftNum: giftNum}
+        return gift, saved, balance, nil
 }
 
 func (s *StarGiftLifecycleStore) insertStarGiftPurchaseCommand(ctx context.Context, tx pgx.Tx, req domain.StarGiftPurchaseRequest, savedID, charge, balance int64) error {
-	_, err := tx.Exec(ctx, `INSERT INTO star_gift_purchase_commands(buyer_user_id,command_key,gift_id,recipient_peer_type,
+        _, err := tx.Exec(ctx, `INSERT INTO star_gift_purchase_commands(buyer_user_id,command_key,gift_id,recipient_peer_type,
 recipient_peer_id,saved_gift_id,form_id,charge_stars,balance_after,created_at)
 VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`, req.BuyerUserID, req.CommandKey, req.GiftID, string(req.To.Type), req.To.ID,
-		savedID, req.FormID, charge, balance, req.Date)
-	return err
+                savedID, req.FormID, charge, balance, req.Date)
+        return err
 }
 
 func (s *StarGiftLifecycleStore) loadStarGiftPurchaseReplay(ctx context.Context, req domain.StarGiftPurchaseRequest, sent domain.SendPrivateTextResult) (domain.StarGiftPurchaseResult, bool, error) {
-	var giftID, recipientID, savedID, formID, charge, balance int64
-	var recipientType string
-	err := s.db.QueryRow(ctx, `SELECT gift_id,recipient_peer_type,recipient_peer_id,saved_gift_id,form_id,charge_stars,balance_after
+        var giftID, recipientID, savedID, formID, charge, balance int64
+        var recipientType string
+        err := s.db.QueryRow(ctx, `SELECT gift_id,recipient_peer_type,recipient_peer_id,saved_gift_id,form_id,charge_stars,balance_after
 FROM star_gift_purchase_commands WHERE buyer_user_id=$1 AND command_key=$2`, req.BuyerUserID, req.CommandKey).
-		Scan(&giftID, &recipientType, &recipientID, &savedID, &formID, &charge, &balance)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return domain.StarGiftPurchaseResult{}, false, nil
-	}
-	if err != nil {
-		return domain.StarGiftPurchaseResult{}, false, err
-	}
-	if giftID != req.GiftID || recipientType != string(req.To.Type) || recipientID != req.To.ID || formID != req.FormID || charge <= 0 {
-		return domain.StarGiftPurchaseResult{}, false, domain.ErrStarGiftInvalid
-	}
-	saved, found, err := savedStarGiftByID(ctx, s.db, savedID)
-	if err != nil || !found {
-		return domain.StarGiftPurchaseResult{}, false, domain.ErrStarGiftInvalid
-	}
-	if saved.Owner != req.To || saved.GiftID != req.GiftID || saved.NameHidden != req.HideName || saved.Message != req.Message ||
-		(saved.PrepaidUpgradeStars > 0) != req.IncludeUpgrade {
-		return domain.StarGiftPurchaseResult{}, false, domain.ErrStarGiftInvalid
-	}
-	gift, found, err := NewStarGiftStore(s.db).CatalogRevision(ctx, saved.RevisionID)
-	if err != nil || !found {
-		return domain.StarGiftPurchaseResult{}, false, domain.ErrStarGiftInvalid
-	}
-	if req.To.Type == domain.PeerTypeUser && sent.SenderMessage.ID == 0 {
-		if s.messages == nil {
-			return domain.StarGiftPurchaseResult{}, false, domain.ErrStarGiftUnavailable
-		}
-		fingerprint := starGiftPurchaseFingerprint(req)
-		replay, replayFound, replayErr := s.messages.LookupPrivateSendReplay(ctx, domain.PrivateSendReplayRequest{
-			SenderUserID: req.BuyerUserID, RecipientUserID: req.To.ID,
-			RandomID: lifecycleCommandRandomID("purchase", req.BuyerUserID, req.CommandKey), IdempotencyFingerprint: fingerprint[:],
-		})
-		if replayErr != nil || !replayFound {
-			if replayErr != nil {
-				return domain.StarGiftPurchaseResult{}, false, replayErr
-			}
-			return domain.StarGiftPurchaseResult{}, false, domain.ErrStarGiftInvalid
-		}
-		sent = replay
-	}
-	return domain.StarGiftPurchaseResult{Gift: gift, Saved: saved, Balance: domain.StarsBalance{UserID: req.BuyerUserID, Balance: balance},
-		Send: sent, Duplicate: true}, true, nil
+                Scan(&giftID, &recipientType, &recipientID, &savedID, &formID, &charge, &balance)
+        if errors.Is(err, pgx.ErrNoRows) {
+                return domain.StarGiftPurchaseResult{}, false, nil
+        }
+        if err != nil {
+                return domain.StarGiftPurchaseResult{}, false, err
+        }
+        if giftID != req.GiftID || recipientType != string(req.To.Type) || recipientID != req.To.ID || formID != req.FormID || charge <= 0 {
+                return domain.StarGiftPurchaseResult{}, false, domain.ErrStarGiftInvalid
+        }
+        saved, found, err := savedStarGiftByID(ctx, s.db, savedID)
+        if err != nil || !found {
+                return domain.StarGiftPurchaseResult{}, false, domain.ErrStarGiftInvalid
+        }
+        if saved.Owner != req.To || saved.GiftID != req.GiftID || saved.NameHidden != req.HideName || saved.Message != req.Message ||
+                (saved.PrepaidUpgradeStars > 0) != req.IncludeUpgrade {
+                return domain.StarGiftPurchaseResult{}, false, domain.ErrStarGiftInvalid
+        }
+        gift, found, err := NewStarGiftStore(s.db).CatalogRevision(ctx, saved.RevisionID)
+        if err != nil || !found {
+                return domain.StarGiftPurchaseResult{}, false, domain.ErrStarGiftInvalid
+        }
+        if req.To.Type == domain.PeerTypeUser && sent.SenderMessage.ID == 0 {
+                if s.messages == nil {
+                        return domain.StarGiftPurchaseResult{}, false, domain.ErrStarGiftUnavailable
+                }
+                fingerprint := starGiftPurchaseFingerprint(req)
+                replay, replayFound, replayErr := s.messages.LookupPrivateSendReplay(ctx, domain.PrivateSendReplayRequest{
+                        SenderUserID: req.BuyerUserID, RecipientUserID: req.To.ID,
+                        RandomID: lifecycleCommandRandomID("purchase", req.BuyerUserID, req.CommandKey), IdempotencyFingerprint: fingerprint[:],
+                })
+                if replayErr != nil || !replayFound {
+                        if replayErr != nil {
+                                return domain.StarGiftPurchaseResult{}, false, replayErr
+                        }
+                        return domain.StarGiftPurchaseResult{}, false, domain.ErrStarGiftInvalid
+                }
+                sent = replay
+        }
+        return domain.StarGiftPurchaseResult{Gift: gift, Saved: saved, Balance: domain.StarsBalance{UserID: req.BuyerUserID, Balance: balance},
+                Send: sent, Duplicate: true}, true, nil
 }
 
 func starGiftPurchaseFingerprint(req domain.StarGiftPurchaseRequest) [32]byte {
-	return sha256.Sum256([]byte(fmt.Sprintf("telesrv:star-gift-purchase:v1:%d:%s:%d:%d:%t:%t:%s",
-		req.BuyerUserID, req.To.Type, req.To.ID, req.GiftID, req.IncludeUpgrade, req.HideName, req.Message)))
+        return sha256.Sum256([]byte(fmt.Sprintf("telesrv:star-gift-purchase:v1:%d:%s:%d:%d:%t:%t:%s",
+                req.BuyerUserID, req.To.Type, req.To.ID, req.GiftID, req.IncludeUpgrade, req.HideName, req.Message)))
 }
