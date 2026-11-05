@@ -55,19 +55,25 @@ type userBaseValue struct {
 	EmojiStatusDocumentID  int64                         `json:"emoji_status_document_id,omitempty"`
 	EmojiStatusUntil       int                           `json:"emoji_status_until,omitempty"`
 	EmojiStatusCollectible domain.EmojiStatusCollectible `json:"emoji_status_collectible,omitempty"`
+	// color_collectible 同理必须随缓存往返（раунд 22）：снапшот коллекционной
+	// палитры ссылок/цитат хранится только в Postgres; кэш, потерявший его,
+	// после любой перезаписи (например снятия статуса-оформления профиля)
+	// выдаёт user.color без peerColorCollectible — и клиент видит сброшенный
+	// цвет ссылок, хотя настройка не менялась.
 	// birthday / personal channel 同理必须随缓存往返：缓存命中路径丢失会让刚保存的
 	// 生日 / 个人频道在重新打开资料时归零（与 bot/premium 列同一坑位）。
-	BirthdayDay                   int   `json:"birthday_day,omitempty"`
-	BirthdayMonth                 int   `json:"birthday_month,omitempty"`
-	BirthdayYear                  int   `json:"birthday_year,omitempty"`
-	PersonalChannelID             int64 `json:"personal_channel_id,omitempty"`
-	ColorSet                      bool  `json:"color_set,omitempty"`
-	Color                         int   `json:"color,omitempty"`
-	ColorBackgroundEmojiID        int64 `json:"color_background_emoji_id,omitempty"`
-	ProfileColorSet               bool  `json:"profile_color_set,omitempty"`
-	ProfileColor                  int   `json:"profile_color,omitempty"`
-	ProfileColorBackgroundEmojiID int64 `json:"profile_color_background_emoji_id,omitempty"`
-	LastSeenAt                    int   `json:"last_seen_at"`
+	BirthdayDay                   int                         `json:"birthday_day,omitempty"`
+	BirthdayMonth                 int                         `json:"birthday_month,omitempty"`
+	BirthdayYear                  int                         `json:"birthday_year,omitempty"`
+	PersonalChannelID             int64                       `json:"personal_channel_id,omitempty"`
+	ColorSet                      bool                        `json:"color_set,omitempty"`
+	Color                         int                         `json:"color,omitempty"`
+	ColorBackgroundEmojiID        int64                       `json:"color_background_emoji_id,omitempty"`
+	ColorCollectible              domain.PeerColorCollectible `json:"color_collectible"`
+	ProfileColorSet               bool                        `json:"profile_color_set,omitempty"`
+	ProfileColor                  int                         `json:"profile_color,omitempty"`
+	ProfileColorBackgroundEmojiID int64                       `json:"profile_color_background_emoji_id,omitempty"`
+	LastSeenAt                    int                         `json:"last_seen_at"`
 }
 
 func baseValueFromUser(u domain.User) userBaseValue {
@@ -97,6 +103,7 @@ func baseValueFromUser(u domain.User) userBaseValue {
 		ColorSet:                      u.Color.HasColor,
 		Color:                         u.Color.Color,
 		ColorBackgroundEmojiID:        u.Color.BackgroundEmojiID,
+		ColorCollectible:              u.Color.Collectible,
 		ProfileColorSet:               u.ProfileColor.HasColor,
 		ProfileColor:                  u.ProfileColor.Color,
 		ProfileColorBackgroundEmojiID: u.ProfileColor.BackgroundEmojiID,
@@ -130,6 +137,7 @@ func (v userBaseValue) user() domain.User {
 			HasColor:          v.ColorSet,
 			Color:             v.Color,
 			BackgroundEmojiID: v.ColorBackgroundEmojiID,
+			Collectible:       v.ColorCollectible,
 		},
 		ProfileColor: domain.PeerColor{
 			HasColor:          v.ProfileColorSet,

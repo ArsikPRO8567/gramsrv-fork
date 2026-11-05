@@ -3,6 +3,7 @@ package redisstore
 import (
 	"context"
 	"os"
+	"reflect"
 	"testing"
 	"time"
 
@@ -114,5 +115,58 @@ func TestUserCacheRoundTrip(t *testing.T) {
 	}
 	if len(got) != 0 {
 		t.Fatalf("cache hit after delete: %+v", got)
+	}
+}
+
+// Раунд 22: снапшот коллекционной палитры ссылок/цитат (user.color с
+// peerColorCollectible) обязан переживать кэш-раундрип. Раньше userBaseValue
+// терял его, и после любой перезаписи кэша (например снятия статуса-оформления
+// профиля) клиент видел сброшенный цвет ссылок, хотя настройка не менялась —
+// в оригинальном сервере оформление профиля и цвет ссылок независимы.
+func TestUserCacheRoundTripKeepsCollectibleMessageColor(t *testing.T) {
+	addr := os.Getenv("TELESRV_TEST_REDIS_ADDR")
+	if addr == "" {
+		t.Skip("set TELESRV_TEST_REDIS_ADDR to run redis integration test")
+	}
+	ctx := context.Background()
+	c, err := Open(ctx, addr, "", 0)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() { _ = c.Close() })
+
+	const userID int64 = 77000101
+	cache := NewUserCache(c, time.Minute)
+	t.Cleanup(func() { _ = c.Del(ctx, userBaseKey(userID)).Err() })
+
+	want := domain.User{
+		ID:         userID,
+		AccessHash: 4242,
+		FirstName:  "Palette",
+		Color: domain.PeerColor{
+			Collectible: domain.PeerColorCollectible{
+				CollectibleID:     321,
+				GiftEmojiID:       111,
+				BackgroundEmojiID: 222,
+				AccentColor:       0x2f9e44,
+				Colors:            []int{0x8ce99a, 0x69db7c, 0x2f9e44},
+				DarkAccentColor:   0x087f5b,
+			},
+		},
+	}
+	if err := cache.PutMany(ctx, []domain.User{want}); err != nil {
+		t.Fatalf("put: %v", err)
+	}
+	got, err := cache.GetByIDs(ctx, []int64{userID})
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	u, ok := got[userID]
+	if !ok {
+		t.Fatalf("cached user %d not found", userID)
+	}
+	if !reflect.DeepEqual(u.Color.Collectible, want.Color.Collectible) {
+		t.Fatalf("collectible message color lost in cache round-trip: got %+v want %+v",
+			u.Color.Collectible, want.Color.Collectible)
 	}
 }
