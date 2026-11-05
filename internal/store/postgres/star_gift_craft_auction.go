@@ -1042,6 +1042,11 @@ func (s *StarGiftLifecycleStore) dispatchStarGiftAuctionAwards(ctx context.Conte
         if err != nil || !found {
                 return domain.ErrStarGiftAuctionUnavailable
         }
+        // Экземпляр победителя уходит от имени 777000: строка системного аккаунта
+        // должна существовать до вставки бокса сообщения (идемпотентно).
+        if err := ensureOfficialSystemUserWithDB(ctx, s.db, domain.Message{Peer: domain.Peer{Type: domain.PeerTypeUser, ID: domain.OfficialSystemUserID}}); err != nil {
+                return err
+        }
         dispatched := 0
         for dispatched < maxStarGiftAuctionAcquired {
                 rows, err := s.db.Query(ctx, `SELECT id,bidder_user_id,recipient_peer_type,recipient_peer_id,bid_amount,
@@ -1088,26 +1093,56 @@ WHERE gift_id=$1 AND saved_gift_id IS NULL ORDER BY id LIMIT 100`, giftID)
                         if revision, foundRev, errRev := NewStarGiftStore(s.db).ActiveCollectibleProjection(ctx, gift.ID, 0); errRev == nil && foundRev {
                                 freeUpgrade = revision.UpgradeStars == 0
                         }
+                        // Раунд 22 (механика оригинального сервера): при выигрыше аукциона
+                        // отправляются ДВА экземпляра сообщения.
+                        //
+                        // 1) Экземпляр победителя: сервисное сообщение от имени 777000 в чат
+                        //    «Telegram». Подпись «Вы выиграли в аукционе со ставкой…» клиент
+                        //    показывает только в сервисном диалоге при auction_acquired и
+                        //    ПУСТОМ from_id (MessageObject: UserObject.isService(dialogId) &&
+                        //    action.from_id == null → ActionGiftAuctionSelf), поэтому from_id
+                        //    здесь не ставится. to_id остаётся на копии победителя, когда
+                        //    подарок назначен другому peer.
+                        sticker := gift.Sticker
+                        winAction := fillStarGiftSnapshot(&domain.MessageStarGiftAction{GiftID: gift.ID,
+                                // item.amount — выигрышная ставка победителя: цена в блоке
+                                // подарка показывает её, а не цену каталога.
+                                Stars: item.amount, ConvertStars: 0, Title: gift.Title, Sticker: &sticker,
+                                PeerUserID: owner.ID, Saved: true,
+                                // to_id нужен только копии победителя, когда подарок назначен другому peer.
+                                To:              bidAwardToPeer(item.bidder, owner),
+                                AuctionAcquired: true, GiftNum: item.giftNum}, gift)
+                        // Флаг prepaid_upgrade клиент рендерит строкой «Вы отправили
+                        // улучшение стоимостью 0 звёзд», поэтому на награде аукциона он не
+                        // ставится: бесплатное улучшение (ревизия с ценой 0) обеспечивается
+                        // can_upgrade и бесплатной формой улучшения (цена 0); платное —
+                        // формой с ценой ревизии.
+                        if freeUpgrade {
+                                winAction.CanUpgrade = true
+                        }
+                        if _, err := s.messages.SendPrivateText(ctx, domain.SendPrivateTextRequest{SenderUserID: domain.OfficialSystemUserID,
+                                RecipientUserID: item.bidder, RandomID: lifecycleCommandRandomID("auction-win", giftID, item.round, item.pos),
+                                Date: item.date, Media: &domain.MessageMedia{Kind: domain.MessageMediaKindService, ServiceAction: &domain.MessageServiceAction{
+                                        Kind: domain.MessageServiceActionStarGift, StarGift: winAction}}}); err != nil {
+                                return err
+                        }
+                        // 2) Экземпляр получателя: обычное сервисное сообщение о покупке
+                        //    (себе или кому-то) — выглядит как обычная покупка подарка, но
+                        //    цена наследуется из выигрышной ставки. Без auction_acquired и
+                        //    to_id: клиент рисует стандартные подписи («Вы приобрели подарок»
+                        //    / «Вы отправили подарок …»). Его msgID становится якорем
+                        //    сохранённого подарка.
                         var msgID int
                         if owner.Type == domain.PeerTypeUser {
                                 sticker := gift.Sticker
                                 action := fillStarGiftSnapshot(&domain.MessageStarGiftAction{GiftID: gift.ID,
-                                        // item.amount — последняя выигрышная ставка победителя:
-                                        // цена в объекте подарка и в сервисном сообщении должна
-                                        // показывать её, а не общую цену каталога (как и в
-                                        // канальной ветке ниже).
                                         Stars: item.amount, ConvertStars: 0, Title: gift.Title, Sticker: &sticker, Message: item.message,
-                                        FromUserID: item.bidder, PeerUserID: owner.ID, NameHidden: item.hide, Saved: true,
-                                        // to_id нужен только копии победителя, когда подарок назначен другому peer.
-                                        To:              bidAwardToPeer(item.bidder, owner),
-                                        AuctionAcquired: true, GiftNum: item.giftNum}, gift)
-                                // Раунд 21 (исправление): сообщение о выигрыше должно
-                                // показывать «Вы выиграли в аукционе…» (флаг auction_acquired).
-                                // Флаг prepaid_upgrade на исходящем сообщении клиент рендерит
-                                // строкой «Вы отправили улучшение стоимостью 0 звёзд», поэтому
-                                // на награде аукциона он не ставится: бесплатное улучшение
-                                // (ревизия с ценой 0) обеспечивается can_upgrade и бесплатной
-                                // формой улучшения (цена 0); платное — формой с ценой ревизии.
+                                        FromUserID: item.bidder, PeerUserID: owner.ID, NameHidden: item.hide,
+                                        To: domain.Peer{Type: domain.PeerTypeUser, ID: owner.ID},
+                                        // Свежий подарок, как и при обычной покупке: Saved=false —
+                                        // иначе клиент показывает «подарок виден в вашем профиле»
+                                        // вместо подсказки об улучшении.
+                                        Saved: false}, gift)
                                 if freeUpgrade {
                                         action.CanUpgrade = true
                                 }

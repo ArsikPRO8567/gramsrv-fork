@@ -138,18 +138,34 @@ func TestStarGiftAuctionBidModesPostgres(t *testing.T) {
         }
 
         // --- Бесплатный апгрейд: цена улучшения в ревизии 0. ---
-        // Наградное сообщение несёт prepaid_upgrade + can_upgrade (клиент
-        // показывает бесплатное улучшение).
-        var prepaidFlags int
+        // Раунд 22: отправляются ДВА экземпляра. Экземпляр победителя — сервисное
+        // сообщение от 777000 в чат «Telegram»: auction_acquired + can_upgrade,
+        // БЕЗ from_id (иначе клиент не показывает подпись «Вы выиграли в
+        // аукционе…») и без prepaid_upgrade (клиент рендерит его строкой
+        // «Вы отправили улучшение стоимостью 0 звёзд»). Экземпляр получателя —
+        // обычное сообщение о покупке: без auction_acquired, с can_upgrade.
+        var winMsg int
         if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM message_boxes WHERE owner_user_id=$1
+AND peer_id=$2
 AND media #>> '{service_action,kind}'='star_gift'
 AND media #>> '{service_action,star_gift,auction_acquired}'='true'
-AND media #>> '{service_action,star_gift,prepaid_upgrade}'='true'
-AND media #>> '{service_action,star_gift,can_upgrade}'='true'`, beta.ID).Scan(&prepaidFlags); err != nil {
-                t.Fatalf("load award flags: %v", err)
+AND media #>> '{service_action,star_gift,can_upgrade}'='true'
+AND media #>> '{service_action,star_gift,prepaid_upgrade}' IS NULL
+AND media #>> '{service_action,star_gift,from_user_id}' IS NULL`, beta.ID, domain.OfficialSystemUserID).Scan(&winMsg); err != nil {
+                t.Fatalf("load win message flags: %v", err)
         }
-        if prepaidFlags == 0 {
-                t.Fatalf("award message lost prepaid_upgrade/can_upgrade flags")
+        if winMsg == 0 {
+                t.Fatalf("winner copy lost 777000 auction-win message (auction_acquired/can_upgrade, no from_id/prepaid_upgrade)")
+        }
+        var purchaseMsg int
+        if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM message_boxes WHERE owner_user_id=$1
+AND media #>> '{service_action,kind}'='star_gift'
+AND media #>> '{service_action,star_gift,auction_acquired}' IS NULL
+AND media #>> '{service_action,star_gift,can_upgrade}'='true'`, beta.ID).Scan(&purchaseMsg); err != nil {
+                t.Fatalf("load purchase message flags: %v", err)
+        }
+        if purchaseMsg == 0 {
+                t.Fatalf("recipient copy lost regular purchase message (no auction_acquired, can_upgrade)")
         }
         var winnerMsgID int
         if err := pool.QueryRow(ctx, `SELECT msg_id FROM peer_star_gifts WHERE gift_id=$1 AND owner_peer_id=$2 AND lifecycle_status='active'`,
