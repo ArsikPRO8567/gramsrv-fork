@@ -2005,7 +2005,15 @@ func tgSavedStarGifts(viewerUserID int64, gifts []domain.SavedStarGift, catalog 
 		}
 		if g.UniqueGiftID == 0 {
 			current, available := availability[g.GiftID]
-			canIssue := available && current.UpgradeStars > 0 && current.Issued < current.SupplyTotal
+			// Раунд 22: аукционные подарки с бесплатным улучшением (опубликованная
+			// ревизия коллекции с ценой 0) должны получать кнопку улучшения и в
+			// профиле — как в сервисном сообщении (см.
+			// dispatchStarGiftAuctionAwards), иначе при утере сервисного
+			// сообщения подарок невозможно улучшить. Платные улучшения, как и
+			// раньше, требуют открытого пула (issued < supply_total);
+			// нулевая цена оплаты не требует и от счётчиков пула не зависит.
+			canIssue := available && (current.UpgradeStars > 0 && current.Issued < current.SupplyTotal ||
+				current.UpgradeStars == 0)
 			if canIssue {
 				item.CanUpgrade = true
 			}

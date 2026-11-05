@@ -665,6 +665,50 @@ func TestSavedStarGiftProjectionCombinesHistoricalCatalogWithCurrentCollectibleA
 	}
 }
 
+// Раунд 22: аукционные подарки с бесплатным улучшением (опубликованная ревизия
+// коллекции с ценой 0) получают кнопку улучшения и в профиле — как в
+// сервисном сообщении, чтобы подарок оставалось улучшить при утере сообщения.
+func TestSavedStarGiftProjectionAdvertisesFreeCollectibleUpgrade(t *testing.T) {
+	auctionGift := domain.StarGift{
+		ID: 8101, RevisionID: 9101, Stars: 100, Title: "Auction Cake",
+		Sticker: domain.Document{ID: 701, AccessHash: 7, DCID: 2, MimeType: "application/x-tgsticker"},
+	}
+	saved := domain.SavedStarGift{GiftID: auctionGift.ID, RevisionID: auctionGift.RevisionID, MsgID: 45, Date: 100}
+
+	// Открытый пул с нулевой ценой: can_upgrade в профиле обязателен.
+	freePool := map[int64]domain.StarGiftCollectibleAvailability{
+		auctionGift.ID: {UpgradeStars: 0, SupplyTotal: 5, Issued: 2},
+	}
+	projected := tgSavedStarGifts(0, []domain.SavedStarGift{saved}, map[int64]domain.StarGift{auctionGift.RevisionID: auctionGift}, freePool)
+	if len(projected) != 1 || !projected[0].CanUpgrade {
+		t.Fatalf("free-upgrade saved gift = %#v, want can_upgrade in profile", projected)
+	}
+	if gift, ok := projected[0].Gift.(*tg.StarGift); !ok {
+		t.Fatalf("free-upgrade inner = %T, want *tg.StarGift", projected[0].Gift)
+	} else if _, ok := gift.GetUpgradeStars(); ok {
+		t.Fatal("free-upgrade projection must not expose a zero upgrade_stars price")
+	}
+
+	// Исчерпанный пул: проекция остаётся консистентной с сервисным сообщением
+	// (кнопка на месте; сам апгрейд отвечает STARGIFT_COLLECTIBLE_SOLD_OUT).
+	exhausted := map[int64]domain.StarGiftCollectibleAvailability{
+		auctionGift.ID: {UpgradeStars: 0, SupplyTotal: 5, Issued: 5},
+	}
+	projected = tgSavedStarGifts(0, []domain.SavedStarGift{saved}, map[int64]domain.StarGift{auctionGift.RevisionID: auctionGift}, exhausted)
+	if len(projected) != 1 || !projected[0].CanUpgrade {
+		t.Fatalf("exhausted free-upgrade saved gift = %#v, want can_upgrade consistent with service message", projected)
+	}
+
+	// Платные улучшения ведут себя как раньше: пул закрыт — кнопки нет.
+	paidClosed := map[int64]domain.StarGiftCollectibleAvailability{
+		auctionGift.ID: {UpgradeStars: 75, SupplyTotal: 5, Issued: 5},
+	}
+	projected = tgSavedStarGifts(0, []domain.SavedStarGift{saved}, map[int64]domain.StarGift{auctionGift.RevisionID: auctionGift}, paidClosed)
+	if len(projected) != 1 || projected[0].CanUpgrade {
+		t.Fatalf("closed paid pool = %#v, want no can_upgrade", projected)
+	}
+}
+
 func TestSavedStarGiftProjectionPreservesCollectibleLifecycle(t *testing.T) {
 	const (
 		giftID     = int64(8001)
