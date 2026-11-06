@@ -38,7 +38,7 @@ jobs:
 
       - name: Build Giftfetch Tool
         run: |
-          CGO_ENABLED=1 go build -v -ldflags="-s -w" -o giftfetch ./cmd/giftfetch
+          go build -o giftfetch ./cmd/giftfetch
 
       - name: Upload Artifacts
         uses: actions/upload-artifact@v4
