@@ -627,6 +627,15 @@ func (s *StarGiftStore) SetUnsaved(_ context.Context, ref domain.SavedStarGiftRe
         for i := range s.gifts {
                 if s.savedStarGiftMatchesRef(s.gifts[i], ref) && s.gifts[i].LifecycleStatus.Live() {
                         s.gifts[i].Unsaved = unsaved
+                        // Раунд 25: страница коллекционного подарка по ссылке читает
+                        // unsaved из агрегата unique_star_gifts (postgres выводит его
+                        // JOIN'ом peer_star_gifts); синхронизируем копию в памяти.
+                        if s.gifts[i].UniqueGiftID != 0 {
+                                if unique, ok := s.uniqueByID[s.gifts[i].UniqueGiftID]; ok {
+                                        unique.Unsaved = unsaved
+                                        s.uniqueByID[s.gifts[i].UniqueGiftID] = unique
+                                }
+                        }
                         if unsaved && s.gifts[i].PinnedOrder > 0 {
                                 removedOrder := s.gifts[i].PinnedOrder
                                 s.gifts[i].PinnedOrder = 0
