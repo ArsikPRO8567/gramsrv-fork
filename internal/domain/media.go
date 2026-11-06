@@ -761,6 +761,22 @@ type MessageStarGiftAction struct {
 	UpgradeVariants    int   `json:"upgrade_variants,omitempty"`
 	ResellMinStars     int64 `json:"resell_min_stars,omitempty"`
 	LockedUntilDate    int   `json:"locked_until_date,omitempty"`
+	// Auction-блок StarGift (раунд 23, официальный дамп выигрыша аукциона
+	// 185743): блок подарка в сервисном сообщении несёт auction=true,
+	// auction_slug, gifts_per_round, auction_start_date и background —
+	// без них клиент рисует карточку аукционного подарка без фирменного
+	// градиента и аукционных бейджей.
+	Auction          bool                `json:"auction,omitempty"`
+	AuctionSlug      string              `json:"auction_slug,omitempty"`
+	GiftsPerRound    int                 `json:"gifts_per_round,omitempty"`
+	AuctionStartDate int                 `json:"auction_start_date,omitempty"`
+	Background       *StarGiftBackground `json:"background,omitempty"`
+	// GiftConvertStars — convert_stars ВНУТРИ блока StarGift, когда он
+	// отличается от action-уровня. На копии о выигрыше аукциона официальный
+	// сервер ставит gift.convert_stars=85% ставки, но НЕ ставит
+	// convert_stars на самом action (дамп 185743); обычные покупки несут
+	// одно и то же значение на обоих уровнях (дамп 88848).
+	GiftConvertStars int64 `json:"gift_convert_stars,omitempty"`
 }
 
 type MessageStarGiftUniqueAction struct {
