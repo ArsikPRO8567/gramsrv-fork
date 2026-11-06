@@ -96,6 +96,10 @@ func (s *ChannelStore) SearchPublicChannels(_ context.Context, viewerUserID int6
 		channel domain.Channel
 		rank    int
 	}
+	// Собственные (в том числе приватные) каналы идут в my_results — как на
+	// официальном contacts.search. Пикер получателя передачи подарка ищет
+	// канал именно здесь.
+	myItems := make([]item, 0, limit)
 	items := make([]item, 0, limit)
 	for channelID, channel := range s.channels {
 		rank, ok := publicChannelSearchRank(channel, query)
@@ -110,6 +114,10 @@ func (s *ChannelStore) SearchPublicChannels(_ context.Context, viewerUserID int6
 		member, joined := s.members[channelID][viewerUserID]
 		joined = joined && member.Status == domain.ChannelMemberActive
 		if joined {
+			myItems = append(myItems, item{
+				channel: cloneChannel(channel),
+				rank:    rank,
+			})
 			continue
 		}
 		items = append(items, item{
@@ -117,20 +125,31 @@ func (s *ChannelStore) SearchPublicChannels(_ context.Context, viewerUserID int6
 			rank:    rank,
 		})
 	}
-	sort.SliceStable(items, func(i, j int) bool {
-		if items[i].rank != items[j].rank {
-			return items[i].rank < items[j].rank
+	rankLess := func(a, b item) bool {
+		if a.rank != b.rank {
+			return a.rank < b.rank
 		}
-		if items[i].channel.ParticipantsCount != items[j].channel.ParticipantsCount {
-			return items[i].channel.ParticipantsCount > items[j].channel.ParticipantsCount
+		if a.channel.ParticipantsCount != b.channel.ParticipantsCount {
+			return a.channel.ParticipantsCount > b.channel.ParticipantsCount
 		}
-		if items[i].channel.Date != items[j].channel.Date {
-			return items[i].channel.Date > items[j].channel.Date
+		if a.channel.Date != b.channel.Date {
+			return a.channel.Date > b.channel.Date
 		}
-		return items[i].channel.ID > items[j].channel.ID
-	})
+		return a.channel.ID > b.channel.ID
+	}
+	sort.SliceStable(myItems, func(i, j int) bool { return rankLess(myItems[i], myItems[j]) })
+	sort.SliceStable(items, func(i, j int) bool { return rankLess(items[i], items[j]) })
 
-	out := domain.PublicChannelSearchResult{}
+	out := domain.PublicChannelSearchResult{
+		MyResults: make([]domain.Channel, 0, len(myItems)),
+		Results:   make([]domain.Channel, 0, limit),
+	}
+	for _, item := range myItems {
+		if len(out.MyResults) >= limit {
+			break
+		}
+		out.MyResults = append(out.MyResults, item.channel)
+	}
 	for _, item := range items {
 		if len(out.Results) >= limit {
 			break
