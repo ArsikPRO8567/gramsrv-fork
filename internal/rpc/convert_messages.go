@@ -349,7 +349,13 @@ func tgMessageActionStarGiftUnique(action *domain.MessageStarGiftUniqueAction, v
         if action.Gift.Owner.Type == domain.PeerTypeUser && action.CanCraftAt > 0 {
                 out.SetCanCraftAt(action.CanCraftAt)
         }
-        if action.FromUserID != 0 {
+        // Раунд 25: FromPeer (передача с канала — from_id = канал-владелец)
+        // имеет приоритет над пользовательским FromUserID.
+        if action.FromPeer != nil {
+                if fromPeer := tgPeer(*action.FromPeer); fromPeer != nil {
+                        out.SetFromID(fromPeer)
+                }
+        } else if action.FromUserID != 0 {
                 out.SetFromID(&tg.PeerUser{UserID: action.FromUserID})
         }
         if peer := tgPeer(action.Peer); peer != nil {

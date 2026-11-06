@@ -2142,3 +2142,223 @@ func TestSavedStarGiftAnonymousDetailsVisibleOnlyToReceiver(t *testing.T) {
 		t.Fatalf("anonymous sender user leaked to profile viewer: %v", ids)
 	}
 }
+
+// Раунд 25: приватность оригинальных деталей профиля — подпись отправителя
+// («{отправитель} отправил(а) Вам этот подарок {дата}») и附言 видит только
+// тот, кто управляет профилем: владелец (личный профиль) или администрация
+// канала (профиль канала).
+func TestSavedStarGiftOriginalDetailsAreManageScoped(t *testing.T) {
+	const (
+		senderID = int64(7301)
+		ownerID  = int64(7302)
+		stranger = int64(7303)
+	)
+	userGift := domain.SavedStarGift{
+		Owner: domain.Peer{Type: domain.PeerTypeUser, ID: ownerID}, FromUserID: senderID,
+		GiftID: 7101, RevisionID: 8101, MsgID: 31, Date: 100, Message: "private note",
+	}
+	channelGift := domain.SavedStarGift{
+		Owner: domain.Peer{Type: domain.PeerTypeChannel, ID: 8302}, FromUserID: senderID,
+		GiftID: 7101, RevisionID: 8101, SavedID: 52, Date: 100, Message: "channel note",
+	}
+
+	// Личный профиль: подпись видит только владелец.
+	if !savedStarGiftOriginalDetailsVisible(ownerID, userGift) {
+		t.Fatal("owner must see original details of own gift")
+	}
+	if savedStarGiftOriginalDetailsVisible(stranger, userGift) {
+		t.Fatal("stranger must not see original details of a user gift")
+	}
+	// Профиль канала: право управления проставляется RPC-хендлером.
+	if savedStarGiftOriginalDetailsVisible(stranger, channelGift) {
+		t.Fatal("non-admin must not see original details of a channel gift")
+	}
+	adminGift := channelGift
+	adminGift.ViewerCanManage = true
+	if !savedStarGiftOriginalDetailsVisible(stranger, adminGift) {
+		t.Fatal("channel admin must see original details of a channel gift")
+	}
+	// Анонимные подарки: прежнее поведение — отправителя знает только
+	// получатель-пользователь (iOS строит по peer InputSavedStarGiftUser).
+	anonymous := userGift
+	anonymous.NameHidden = true
+	if !savedStarGiftOriginalDetailsVisible(ownerID, anonymous) {
+		t.Fatal("receiver must keep hidden original details for msg_id reference")
+	}
+	if savedStarGiftOriginalDetailsVisible(stranger, anonymous) {
+		t.Fatal("hidden original details leaked to stranger")
+	}
+
+	catalog := map[int64]domain.StarGift{8101: {ID: 7101, RevisionID: 8101}}
+	ownerProjection := tgSavedStarGifts(ownerID, []domain.SavedStarGift{userGift}, catalog, nil)[0]
+	if _, ok := ownerProjection.GetFromID(); !ok {
+		t.Fatal("owner projection lost from_id")
+	}
+	if _, ok := ownerProjection.GetMessage(); !ok {
+		t.Fatal("owner projection lost gift note")
+	}
+	strangerProjection := tgSavedStarGifts(stranger, []domain.SavedStarGift{userGift}, catalog, nil)[0]
+	if _, ok := strangerProjection.GetFromID(); ok {
+		t.Fatal("stranger projection leaked from_id")
+	}
+	if _, ok := strangerProjection.GetMessage(); ok {
+		t.Fatal("stranger projection leaked gift note")
+	}
+	if ids := savedStarGiftUserIDs(stranger, []domain.SavedStarGift{userGift}); len(ids) != 0 {
+		t.Fatalf("stranger user ids = %v, want empty", ids)
+	}
+	if ids := savedStarGiftUserIDs(ownerID, []domain.SavedStarGift{userGift}); !reflect.DeepEqual(ids, []int64{senderID}) {
+		t.Fatalf("owner user ids = %v, want sender %d", ids, senderID)
+	}
+	// Канальный подарок: admin видит, обычный зритель нет — и в users[]
+	// отправитель уезжает вместе с подписью.
+	adminProjection := tgSavedStarGifts(stranger, []domain.SavedStarGift{adminGift}, catalog, nil)[0]
+	if _, ok := adminProjection.GetFromID(); !ok {
+		t.Fatal("admin projection lost channel gift from_id")
+	}
+	memberProjection := tgSavedStarGifts(stranger, []domain.SavedStarGift{channelGift}, catalog, nil)[0]
+	if _, ok := memberProjection.GetFromID(); ok {
+		t.Fatal("member projection leaked channel gift from_id")
+	}
+	if ids := savedStarGiftUserIDs(stranger, []domain.SavedStarGift{channelGift}); len(ids) != 0 {
+		t.Fatalf("member channel sender ids = %v, want empty", ids)
+	}
+	if ids := savedStarGiftUserIDs(stranger, []domain.SavedStarGift{adminGift}); !reflect.DeepEqual(ids, []int64{senderID}) {
+		t.Fatalf("admin channel sender ids = %v, want sender %d", ids, senderID)
+	}
+}
+
+// Раунд 25: в списке подарков канала подпись отправителя и附言 видит только
+// администрация; обычный подписчик получает подарок без from_id/message.
+func TestStarGiftChannelSenderCaptionAdminOnly(t *testing.T) {
+	r, sender, owner, gift := starGiftTestRouter(t)
+	ctx := context.Background()
+	senderCtx := WithUserID(ctx, sender.ID)
+	ownerCtx := WithUserID(ctx, owner.ID)
+
+	created, err := r.deps.Channels.CreateChannel(ctx, owner.ID, domain.CreateChannelRequest{
+		CreatorUserID: owner.ID, Title: "Caption Channel", Broadcast: true,
+		MemberUserIDs: []int64{sender.ID}, Date: 1700002000,
+	})
+	if err != nil {
+		t.Fatalf("create channel: %v", err)
+	}
+	channel := created.Channel
+	channelPeer := &tg.InputPeerChannel{ChannelID: channel.ID, AccessHash: channel.AccessHash}
+	if _, err := r.deps.Gifts.RecordSavedGift(ctx, domain.SavedStarGift{
+		Owner: domain.Peer{Type: domain.PeerTypeChannel, ID: channel.ID}, FromUserID: sender.ID,
+		GiftID: gift.ID, RevisionID: gift.RevisionID, SavedID: 71, Date: 1700002001,
+		Message: "channel note",
+	}); err != nil {
+		t.Fatalf("record channel gift: %v", err)
+	}
+
+	memberView, err := r.onPaymentsGetSavedStarGifts(senderCtx, &tg.PaymentsGetSavedStarGiftsRequest{Peer: channelPeer})
+	if err != nil || memberView.Count != 1 || len(memberView.Gifts) != 1 {
+		t.Fatalf("member channel gifts = %+v err %v", memberView, err)
+	}
+	if _, ok := memberView.Gifts[0].GetFromID(); ok {
+		t.Fatal("member view leaked gift sender (from_id)")
+	}
+	if _, ok := memberView.Gifts[0].GetMessage(); ok {
+		t.Fatal("member view leaked gift note (message)")
+	}
+	if len(memberView.Users) != 0 {
+		t.Fatalf("member view users = %+v, want empty", memberView.Users)
+	}
+
+	ownerView, err := r.onPaymentsGetSavedStarGifts(ownerCtx, &tg.PaymentsGetSavedStarGiftsRequest{Peer: channelPeer})
+	if err != nil || ownerView.Count != 1 || len(ownerView.Gifts) != 1 {
+		t.Fatalf("owner channel gifts = %+v err %v", ownerView, err)
+	}
+	if from, ok := ownerView.Gifts[0].GetFromID(); !ok {
+		t.Fatal("owner view lost gift sender (from_id)")
+	} else if peer, ok := from.(*tg.PeerUser); !ok || peer.UserID != sender.ID {
+		t.Fatalf("owner view from_id = %#v, want sender %d", from, sender.ID)
+	}
+	if note, ok := ownerView.Gifts[0].GetMessage(); !ok || note.Text != "channel note" {
+		t.Fatalf("owner view message = %#v, want channel note", note)
+	}
+	foundSender := false
+	for _, user := range ownerView.Users {
+		if u, ok := user.(*tg.User); ok && u.ID == sender.ID {
+			foundSender = true
+		}
+	}
+	if !foundSender {
+		t.Fatalf("owner view users = %+v, want sender %d", ownerView.Users, sender.ID)
+	}
+}
+
+// Раунд 25: страница коллекционного подарка, скрытого из профиля (unsaved),
+// отдаёт только имя владельца (owner_name) — без owner_id и без владельца в
+// users[]: перейти в профиль владельца по ссылке невозможно.
+func TestHiddenUniqueGiftSlugHidesOwnerProfile(t *testing.T) {
+	r, sender, owner, gift := starGiftTestRouter(t)
+	ctx := context.Background()
+
+	unique := domain.UniqueStarGift{
+		ID: 9200000000000011, GiftID: gift.ID, Title: gift.Title, Slug: "hidden-cake-1", Num: 1,
+		Owner:              domain.Peer{Type: domain.PeerTypeUser, ID: owner.ID},
+		Model:              collectibleRPCAttribute(domain.StarGiftCollectibleModel, 8301, "Aurora"),
+		Pattern:            collectibleRPCAttribute(domain.StarGiftCollectiblePattern, 8302, "Orbit"),
+		Backdrop:           collectibleRPCAttribute(domain.StarGiftCollectibleBackdrop, 1, "Midnight"),
+		AvailabilityIssued: 1, AvailabilityTotal: 500,
+	}
+	base := r.deps.Gifts
+
+	// Контроль: видимый подарок несёт owner_id и владельца в users[].
+	r.deps.Gifts = &uniqueGiftRPCService{GiftsService: base, unique: unique}
+	visible, err := r.onPaymentsGetUniqueStarGift(WithUserID(ctx, sender.ID), unique.Slug)
+	if err != nil {
+		t.Fatalf("visible slug page: %v", err)
+	}
+	visibleGift, ok := visible.Gift.(*tg.StarGiftUnique)
+	if !ok {
+		t.Fatalf("visible gift type = %T", visible.Gift)
+	}
+	if peer, ok := visibleGift.GetOwnerID(); !ok {
+		t.Fatal("visible gift lost owner_id")
+	} else if _, isUser := peer.(*tg.PeerUser); !isUser {
+		t.Fatalf("visible owner_id = %#v, want PeerUser", peer)
+	}
+	if _, ok := visibleGift.GetOwnerName(); ok {
+		t.Fatal("visible gift must not carry owner_name")
+	}
+	foundOwner := false
+	for _, user := range visible.Users {
+		if u, ok := user.(*tg.User); ok && u.ID == owner.ID {
+			foundOwner = true
+		}
+	}
+	if !foundOwner {
+		t.Fatalf("visible users = %+v, want owner %d", visible.Users, owner.ID)
+	}
+
+	// Скрытый подарок: owner_name вместо owner_id, владелец не в users[].
+	hidden := unique
+	hidden.Unsaved = true
+	r.deps.Gifts = &uniqueGiftRPCService{GiftsService: base, unique: hidden}
+	response, err := r.onPaymentsGetUniqueStarGift(WithUserID(ctx, sender.ID), hidden.Slug)
+	if err != nil {
+		t.Fatalf("hidden slug page: %v", err)
+	}
+	hiddenGift, ok := response.Gift.(*tg.StarGiftUnique)
+	if !ok {
+		t.Fatalf("hidden gift type = %T", response.Gift)
+	}
+	if _, ok := hiddenGift.GetOwnerID(); ok {
+		t.Fatal("hidden gift leaked owner_id")
+	}
+	if name, ok := hiddenGift.GetOwnerName(); !ok || name != owner.FirstName {
+		t.Fatalf("hidden gift owner_name = %q ok=%v, want %q", name, ok, owner.FirstName)
+	}
+	for _, user := range response.Users {
+		if u, ok := user.(*tg.User); ok && u.ID == owner.ID {
+			t.Fatalf("hidden gift users leaked owner: %+v", response.Users)
+		}
+	}
+	if len(response.Chats) != 0 {
+		t.Fatalf("hidden gift chats = %+v, want empty", response.Chats)
+	}
+}
