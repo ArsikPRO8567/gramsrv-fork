@@ -1945,7 +1945,7 @@ WHERE j.saved_gift_id=$1 AND j.action_kind='star_gift' AND j.delivered_at>0`, pr
 		t.Fatalf("round25 transfer envelope sender = %d, want official 777000", toActor.Send.SenderMessage.OwnerUserID)
 	}
 	toActorAction := toActor.Send.RecipientMessage.Media.ServiceAction.StarGiftUnique
-	if toActorAction == nil || toActorAction.FromUserID != 0 || toActorAction.FromPeer == nil || *toActorAction.FromPeer != channelPeer ||
+	if toActorAction == nil || toActorAction.FromUserID != 0 || toActorAction.FromPeer != channelPeer ||
 		toActorAction.Gift.Owner != actorPeer || !toActorAction.Transferred {
 		t.Fatalf("round25 transfer action from = %+v (from_user_id=%d), want channel peer %v", toActorAction.FromPeer, toActorAction.FromUserID, channelPeer)
 	}

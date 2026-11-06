@@ -135,6 +135,19 @@ func fillStarGiftSnapshot(action *domain.MessageStarGiftAction, gift domain.Star
 	if gift.LockedUntilDate > 0 {
 		action.LockedUntilDate = gift.LockedUntilDate
 	}
+	// Раунд 23 (дамп 185743): аукционные подарки несут в блоке StarGift
+	// полный аукционный контекст — флаг auction, слаг, размер раунда,
+	// дату старта и палитру фона.
+	if gift.Auction {
+		action.Auction = true
+		action.AuctionSlug = gift.AuctionSlug
+		action.GiftsPerRound = gift.GiftsPerRound
+		action.AuctionStartDate = gift.AuctionStartDate
+		if gift.Background != nil {
+			background := *gift.Background
+			action.Background = &background
+		}
+	}
 	return action
 }
 
@@ -325,7 +338,7 @@ func (s *StarGiftLifecycleStore) purchaseStarGiftToChannel(ctx context.Context, 
 		if err := NewChannelStore(tx).appendStarGiftAdminLogTx(ctx, tx, req.To.ID, req.BuyerUserID, id, req.Date, action); err != nil {
 			return err
 		}
-		if err := enqueueChannelStarGiftNotifications(ctx, tx, id, req.To.ID, req.Date, action.StarGift); err != nil {
+		if err := enqueueChannelStarGiftNotifications(ctx, tx, id, req.To.ID, req.Date, action.StarGift, 0); err != nil {
 			return err
 		}
 		if err := s.insertStarGiftPurchaseCommand(ctx, tx, req, id, gift.Stars+saved.PrepaidUpgradeStars, balance.Balance); err != nil {
