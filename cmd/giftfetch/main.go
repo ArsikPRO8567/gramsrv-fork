@@ -6,6 +6,12 @@
 // Usage:
 //
 //	SESSION=/path/to/session giftfetch -out <directory>
+//
+// By default it connects to the production Telegram DC list. Use -test to
+// snapshot the official Telegram test servers instead (test DC 2 is
+// 149.154.167.40:443) or pass -addr host:port to connect to an explicit
+// address. The session must be authorized on the same server it dumps: a
+// production session is not valid on the test servers and vice versa.
 package main
 
 import (
@@ -17,6 +23,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"sort"
@@ -27,6 +34,7 @@ import (
 
 	"github.com/iamxvbaba/td/bin"
 	"github.com/iamxvbaba/td/telegram"
+	"github.com/iamxvbaba/td/telegram/dcs"
 	"github.com/iamxvbaba/td/telegram/downloader"
 	"github.com/iamxvbaba/td/tg"
 	"golang.org/x/sync/errgroup"
@@ -38,6 +46,7 @@ const (
 	apiID              = 17349
 	apiHash            = "344583e45741c457fe1862106095a5eb"
 	defaultMaxDocBytes = int64(16 << 20)
+	defaultDC          = 2
 	defaultWorkers     = 8
 	maxCatalogGifts    = 5000
 	maxUpgradeAttrs    = 10000
@@ -193,6 +202,9 @@ func main() {
 	workers := flag.Int("workers", defaultWorkers, "concurrent document downloads")
 	reuseMetadata := flag.Bool("reuse-metadata", false, "reuse and strictly decode catalog.tl plus upgrade-attributes/*.tl instead of refetching metadata")
 	allowedMissingThumbsRaw := flag.String("allow-missing-thumb", "", "comma-separated document_id:photo|video:type entries that may be recorded as explicitly missing after a failed download")
+	testServer := flag.Bool("test", false, "connect to the official Telegram test DC list (test DC 2 = 149.154.167.40:443)")
+	dcID := flag.Int("dc", defaultDC, "DC id to connect to")
+	addrOverride := flag.String("addr", "", "explicit host:port replacing the chosen DC address")
 	flag.Parse()
 	if strings.TrimSpace(*outDir) == "" {
 		fmt.Fprintln(os.Stderr, "usage: SESSION=/path/to/session giftfetch -out <directory>")
@@ -217,9 +229,21 @@ func main() {
 		os.Exit(2)
 	}
 
+	if *dcID <= 0 {
+		*dcID = defaultDC
+	}
+	dcList, err := buildDCList(*testServer, *dcID, strings.TrimSpace(*addrOverride))
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "ERROR:", err)
+		os.Exit(2)
+	}
+	fmt.Printf("[target] mode=%s dc=%d addr=%s\n", modeName(*testServer), *dcID, describeConnectAddr(dcList, *dcID))
+
 	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Hour)
 	defer cancel()
 	client := telegram.NewClient(apiID, apiHash, telegram.Options{
+		DC:             *dcID,
+		DCList:         dcList,
 		SessionStorage: &telegram.FileSessionStorage{Path: session},
 	})
 	if err := client.Run(ctx, func(ctx context.Context) error {
@@ -236,6 +260,80 @@ func main() {
 		fmt.Fprintln(os.Stderr, "ERROR:", err)
 		os.Exit(1)
 	}
+}
+
+// buildDCList returns the DC list giftfetch connects with. test selects the
+// official Telegram test servers instead of production; addr replaces every
+// address recorded for dc so the initial connection goes to exactly that
+// host:port (mirrors, staging deployments, or non-standard ports). The list
+// seeds the client config, so the first connection uses it directly and the
+// server-side config refresh keeps the flow on the same environment.
+func buildDCList(test bool, dc int, addr string) (dcs.List, error) {
+	list := dcs.Prod()
+	if test {
+		list = dcs.Test()
+	}
+	if addr == "" {
+		if !dcListHas(list, dc) {
+			return dcs.List{}, fmt.Errorf("DC %d is missing from the %s DC list; pass -addr host:port to connect explicitly", dc, modeName(test))
+		}
+		return list, nil
+	}
+	host, portRaw, err := net.SplitHostPort(addr)
+	if err != nil {
+		return dcs.List{}, fmt.Errorf("-addr must be host:port: %w", err)
+	}
+	port, err := strconv.Atoi(portRaw)
+	if err != nil || port <= 0 || port > 65535 {
+		return dcs.List{}, fmt.Errorf("-addr port %q is invalid", portRaw)
+	}
+	host = strings.TrimSpace(host)
+	if host == "" {
+		return dcs.List{}, fmt.Errorf("-addr host is empty")
+	}
+	options := make([]tg.DCOption, 0, len(list.Options)+1)
+	for _, option := range list.Options {
+		if option.ID == dc {
+			continue
+		}
+		options = append(options, option)
+	}
+	options = append(options, tg.DCOption{
+		ID:        dc,
+		IPAddress: host,
+		Port:      port,
+		Ipv6:      strings.Contains(host, ":"),
+	})
+	list.Options = options
+	return list, nil
+}
+
+func dcListOption(list dcs.List, dc int) (tg.DCOption, bool) {
+	for _, option := range list.Options {
+		if option.ID == dc {
+			return option, true
+		}
+	}
+	return tg.DCOption{}, false
+}
+
+func dcListHas(list dcs.List, dc int) bool {
+	_, ok := dcListOption(list, dc)
+	return ok
+}
+
+func describeConnectAddr(list dcs.List, dc int) string {
+	if option, ok := dcListOption(list, dc); ok {
+		return fmt.Sprintf("%s:%d", option.IPAddress, option.Port)
+	}
+	return "unknown"
+}
+
+func modeName(test bool) string {
+	if test {
+		return "test"
+	}
+	return "production"
 }
 
 func fetchCatalog(ctx context.Context, api *tg.Client, outDir string, maxDocBytes int64, skipThumbs bool, workers int, reuseMetadata bool, allowedMissingThumbs map[string]struct{}) error {

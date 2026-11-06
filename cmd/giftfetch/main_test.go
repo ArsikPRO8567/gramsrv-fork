@@ -253,3 +253,95 @@ func testGiftDocument(id int64) *tg.Document {
 		},
 	}
 }
+
+func TestBuildDCListProductionDefault(t *testing.T) {
+	list, err := buildDCList(false, defaultDC, "")
+	if err != nil {
+		t.Fatalf("buildDCList(production): %v", err)
+	}
+	if list.Test {
+		t.Fatalf("production list flagged as test")
+	}
+	option, ok := dcListOption(list, defaultDC)
+	if !ok {
+		t.Fatalf("production list has no DC %d", defaultDC)
+	}
+	if option.IPAddress == "" || option.Port <= 0 {
+		t.Fatalf("production DC %d address = %#v", defaultDC, option)
+	}
+	if !dcListHas(list, 1) || !dcListHas(list, 5) {
+		t.Fatalf("production list must expose DC 1 and DC 5")
+	}
+}
+
+func TestBuildDCListTestServers(t *testing.T) {
+	list, err := buildDCList(true, defaultDC, "")
+	if err != nil {
+		t.Fatalf("buildDCList(test): %v", err)
+	}
+	if !list.Test {
+		t.Fatalf("test list not flagged as test")
+	}
+	option, ok := dcListOption(list, defaultDC)
+	if !ok {
+		t.Fatalf("test list has no DC %d", defaultDC)
+	}
+	if option.IPAddress != "149.154.167.40" || option.Port != 443 {
+		t.Fatalf("test DC %d = %s:%d, want 149.154.167.40:443", defaultDC, option.IPAddress, option.Port)
+	}
+	if !dcListHas(list, 1) || !dcListHas(list, 3) {
+		t.Fatalf("test list must expose DC 1 and DC 3")
+	}
+	if dcListHas(list, 4) {
+		t.Fatalf("test list must not expose DC 4 without -addr")
+	}
+}
+
+func TestBuildDCListAddrOverride(t *testing.T) {
+	list, err := buildDCList(true, defaultDC, "149.154.167.40:433")
+	if err != nil {
+		t.Fatalf("buildDCList(test, addr): %v", err)
+	}
+	if !list.Test {
+		t.Fatalf("override must keep the test flag")
+	}
+	option, ok := dcListOption(list, defaultDC)
+	if !ok {
+		t.Fatalf("override list has no DC %d", defaultDC)
+	}
+	if option.IPAddress != "149.154.167.40" || option.Port != 433 || option.Ipv6 {
+		t.Fatalf("override DC %d = %#v, want 149.154.167.40:433", defaultDC, option)
+	}
+	if !dcListHas(list, 1) || !dcListHas(list, 3) {
+		t.Fatalf("override must not remove the other DCs from the list")
+	}
+	if got := describeConnectAddr(list, defaultDC); got != "149.154.167.40:433" {
+		t.Fatalf("describeConnectAddr = %q, want %q", got, "149.154.167.40:433")
+	}
+}
+
+func TestBuildDCListAddrValidation(t *testing.T) {
+	for _, addr := range []string{
+		"149.154.167.40",
+		"149.154.167.40:notaport",
+		"149.154.167.40:0",
+		"149.154.167.40:70000",
+		":443",
+	} {
+		if _, err := buildDCList(true, defaultDC, addr); err == nil {
+			t.Fatalf("addr %q must be rejected", addr)
+		}
+	}
+	if _, err := buildDCList(true, 5, ""); err == nil {
+		t.Fatalf("test list has no DC 5, must be rejected")
+	}
+}
+
+func TestModeName(t *testing.T) {
+	if got := modeName(false); got != "production" {
+		t.Fatalf("modeName(false) = %q, want %q", got, "production")
+	}
+	if got := modeName(true); got != "test" {
+		t.Fatalf("modeName(true) = %q, want %q", got, "test")
+	}
+}
