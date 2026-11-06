@@ -144,6 +144,12 @@ type SavedStarGift struct {
         // не реализована — флаг подготовлен к будущему использованию.
         Refunded bool
         Unique   *UniqueStarGift
+        // ViewerCanManage — транзитное (не хранится в БД) вычисленное RPC-слоем
+        // право текущего зрителя управлять профилем владельца: личный профиль —
+        // только сам владелец, профиль канала — администрация канала. Драйвер
+        // приватности оригинальных деталей (раунд 25): отправителя и 附言 в
+        // карточке подарка видит только тот, кто управляет профилем.
+        ViewerCanManage bool
 }
 
 type StarGiftLifecycleStatus string
@@ -296,6 +302,12 @@ type UniqueStarGift struct {
         OriginalDate        int
         OriginalMessage     string
         OriginalNameHidden  bool
+        // Unsaved — подарок скрыт из профиля владельца (peer_star_gifts.unsaved,
+        // транзитно из JOIN peer_star_gifts; раунд 25). На странице по ссылке
+        // (payments.getUniqueStarGift) такой подарок отдаёт только имя владельца
+        // (owner_name) без owner_id и без владельца в users/chats: перейти в
+        // профиль владельца нельзя.
+        Unsaved   bool
         CreatedAt           time.Time
 }
 

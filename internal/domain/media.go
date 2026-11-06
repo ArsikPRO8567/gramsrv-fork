@@ -782,6 +782,12 @@ type MessageStarGiftAction struct {
 type MessageStarGiftUniqueAction struct {
         Gift                     UniqueStarGift  `json:"gift"`
         FromUserID               int64           `json:"from_user_id,omitempty"`
+        // FromPeer — from_id действия в виде произвольного пира (раунд 25).
+        // При передаче подарка С канала from_id = канал-владелец: клиент
+        // строит подпись «{канал} передал(а) {получатель} подарок!» из этого
+        // поля, а конверт сервисного сообщения отправляет служебный аккаунт
+        // 777000. Имеет приоритет над FromUserID.
+        FromPeer                 *Peer           `json:"from_peer,omitempty"`
         Peer                     Peer            `json:"peer"`
         SavedID                  int64           `json:"saved_id,omitempty"`
         Upgrade                  bool            `json:"upgrade,omitempty"`
