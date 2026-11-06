@@ -2934,8 +2934,11 @@ func TestPublicChannelSearchAndResolveUsername(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SearchPublicChannels joined: %v", err)
 	}
-	if len(joined.MyResults) != 0 || len(joined.Results) != 0 {
-		t.Fatalf("joined public search = %+v, want no discovery result for active member", joined)
+	// Свои чаты (участник) теперь идут в my_results: официальный contacts.search
+	// отдаёт «свои» совпадения там, а строка глобального discovery (results)
+	// для участника по-прежнему пуста.
+	if len(joined.MyResults) != 1 || joined.MyResults[0].ID == 0 || len(joined.Results) != 0 {
+		t.Fatalf("joined public search = %+v, want own channel in my_results, no discovery result", joined)
 	}
 	global, err := service.SearchPublicChannels(ctx, 1003, "public", 10)
 	if err != nil {
