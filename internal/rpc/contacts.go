@@ -916,6 +916,10 @@ func (r *Router) onContactsSearch(ctx context.Context, req *tg.ContactsSearchReq
 		if err != nil {
 			return nil, channelInvalidErr(err)
 		}
+		// Совпадения среди своих чатов (включая приватные каналы) идут в
+		// my_results — официальный формат; пикер получателя передачи
+		// подарка показывает канал только из этого поля.
+		res.MyChannelResults = channelRes.MyResults
 		res.ChannelResults = channelRes.Results
 	}
 	return r.tgContactsFound(ctx, userID, r.withUserSearchPresence(res)), nil

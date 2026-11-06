@@ -613,8 +613,15 @@ func TestContactsSearchFindsPublicChannels(t *testing.T) {
 	if !ok {
 		t.Fatalf("result type = %T, want *tg.ContactsFound", enc)
 	}
-	if len(box.MyResults) != 0 || len(box.Results) != 0 || len(box.Chats) != 0 {
-		t.Fatalf("member public search = my %d results %d chats %d, want no discovery channel for active member", len(box.MyResults), len(box.Results), len(box.Chats))
+	// Совпадение среди своих чатов попадает в my_results (официальный формат
+	// «своих» результатов: их видит только сам участник), а строка глобального
+	// discovery (results) для участника по-прежнему пуста.
+	if len(box.MyResults) != 1 || len(box.Results) != 0 || len(box.Chats) != 1 {
+		t.Fatalf("member public search = my %d results %d chats %d, want own channel in my_results, no discovery row", len(box.MyResults), len(box.Results), len(box.Chats))
+	}
+	memberPeer, ok := box.MyResults[0].(*tg.PeerChannel)
+	if !ok || memberPeer.ChannelID != public.ID {
+		t.Fatalf("member peer = %T %+v, want own public channel", box.MyResults[0], box.MyResults[0])
 	}
 
 	var strangerIn bin.Buffer
