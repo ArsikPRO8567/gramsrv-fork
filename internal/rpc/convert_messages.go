@@ -43,6 +43,12 @@ func tgMessage(m domain.Message) tg.MessageClass {
 			PeerID:      peer,
 			Date:        m.Date,
 			Action:      action,
+			// Раунд 23: официальные серверы разрешают реакции на сервисные
+			// сообщения (дампы 185743/198247/198254/88848/168414 несут
+			// reactions_are_possible=true). Флаг включает в клиентах кнопку
+			// реакций; хранение реакций на сервисных сообщениях работает
+			// штатно, как на обычных.
+			ReactionsArePossible: true,
 		}
 		if from := tgPeer(m.From); from != nil {
 			msg.FromID = from
