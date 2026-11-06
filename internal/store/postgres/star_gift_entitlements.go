@@ -86,6 +86,12 @@ func (s *StarGiftLifecycleStore) PrepayStarGiftUpgrade(ctx context.Context, req 
 		OriginAuthKeyID: req.OriginAuthKeyID, OriginSessionID: req.OriginSessionID, OriginUserID: req.PayerUserID,
 		IdempotencyFingerprint: fingerprint[:]}
 	var result domain.StarGiftPrepaidUpgradeResult
+	// Раунд 25: action собирается в before-хуке, который правит КОПИЮ запроса
+	// (sendPrivateTextOnce передаёт req по значению) — внешний messageReq.Media
+	// в after-хуке оставался пустым placeholder'ом, и в Recent Actions канала
+	// попадал action без stars/gift_id/prepaid_upgrade (регрессия раунда 24).
+	// Дублируем action в захваченную переменную — ей и пользуется admin log.
+	var prepaidAction *domain.MessageStarGiftAction
 	hooks := privateSendTxHooks{before: func(ctx context.Context, tx pgx.Tx, messageReq *domain.SendPrivateTextRequest) error {
 		locked, err := lockSavedStarGiftByPrepayHash(ctx, tx, req.Owner, req.Hash)
 		if err != nil || locked.ID != target.ID || !locked.LifecycleStatus.Live() || locked.UniqueGiftID != 0 || locked.PrepaidUpgradeStars != 0 {
@@ -138,6 +144,7 @@ VALUES($1,$2,$3,$4,$5,$6,$7)`, req.PayerUserID, req.CommandKey, locked.ID, req.F
 		// исторически теряло новые атрибуты payload.
 		messageReq.Media = &domain.MessageMedia{Kind: domain.MessageMediaKindService, ServiceAction: &domain.MessageServiceAction{
 			Kind: domain.MessageServiceActionStarGift, StarGift: action}}
+		prepaidAction = action
 		locked.PrepaidUpgradeStars, locked.PrepaidUpgradeHash = req.ChargeStars, ""
 		result.Saved, result.Balance = locked, balance
 		return nil
@@ -162,7 +169,13 @@ VALUES($1,$2,$3,$4,$5,$6,$7)`, req.PayerUserID, req.CommandKey, locked.ID, req.F
 			result.Saved.ID, req.Owner, 0); err != nil {
 			return err
 		}
-		action := messageReq.Media.ServiceAction.StarGift
+		action := prepaidAction
+		if action == nil && messageReq.Media != nil && messageReq.Media.ServiceAction != nil {
+			action = messageReq.Media.ServiceAction.StarGift
+		}
+		if action == nil {
+			return fmt.Errorf("prepaid channel gift notification missing action")
+		}
 		return NewChannelStore(tx).appendStarGiftAdminLogTx(ctx, tx, req.Owner.ID, req.PayerUserID,
 			result.Saved.SavedID, req.Date, domain.ChannelMessageAction{Type: domain.ChannelActionStarGift, StarGift: action})
 	}}

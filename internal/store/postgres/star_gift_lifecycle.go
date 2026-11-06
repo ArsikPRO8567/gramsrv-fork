@@ -947,8 +947,22 @@ func (s *StarGiftLifecycleStore) TransferStarGift(ctx context.Context, req domai
         if req.To.Type != domain.PeerTypeUser {
                 return s.transferStarGiftWithoutPrivateMessage(ctx, req)
         }
+        // Раунд 25: передача подарка С канала пользователю — конверт сервисного
+        // сообщения отправляет служебный аккаунт «Telegram» (777000), а
+        // messageActionStarGiftUnique несёт from_id = канал-владелец: клиент
+        // строит подпись «{канал} передал(а) {получатель} подарок!» из from_id
+        // действия, а не из from_id конверта. Валидацию актуального владельца
+        // выполняет lockTransferableStarGift внутри транзакции
+        // (saved.Owner != req.Ref.Owner -> отказ), поэтому расхождение
+        // pre-check и блокировки для получателя безопасно: отправителем
+        // останется 777000, как на официальном сервере.
+        sourceIsChannel := req.Ref.Owner.Type == domain.PeerTypeChannel
+        messageSenderID := req.ActorUserID
+        if sourceIsChannel {
+                messageSenderID = domain.OfficialSystemUserID
+        }
         messageReq := domain.SendPrivateTextRequest{
-                SenderUserID: req.ActorUserID, RecipientUserID: req.To.ID,
+                SenderUserID: messageSenderID, RecipientUserID: req.To.ID,
                 RandomID: lifecycleCommandRandomID("gift-transfer", req.ActorUserID, req.CommandKey), Date: req.Date,
                 OriginAuthKeyID: req.OriginAuthKeyID, OriginSessionID: req.OriginSessionID, OriginUserID: req.ActorUserID,
                 Media: &domain.MessageMedia{Kind: domain.MessageMediaKindService, ServiceAction: &domain.MessageServiceAction{
@@ -986,13 +1000,27 @@ func (s *StarGiftLifecycleStore) TransferStarGift(ctx context.Context, req domai
                         unique.Owner = req.To
                         saved.Owner = req.To
                         result.Saved, result.Unique, result.Balance = saved, unique, balance
-                        send.Media.ServiceAction.StarGiftUnique = transferUniqueAction(unique, req.ActorUserID, req.To, saved)
+                        transfer := transferUniqueAction(unique, req.ActorUserID, req.To, saved)
+                        if sourceIsChannel {
+                                // Раунд 25: from_id = канал-владелец (см. комментарий выше);
+                                // FromPeer приоритетнее FromUserID в TL-проекции.
+                                from := sourceSaved.Owner
+                                transfer.FromPeer = &from
+                        }
+                        send.Media.ServiceAction.StarGiftUnique = transfer
                         return nil
                 },
                 after: func(ctx context.Context, tx pgx.Tx, sent domain.SendPrivateTextResult) error {
+                        // Раунд 25: якорь gift-строки — бокс, принадлежащий получателю.
+                        // При канальном источнике конверт отправляет 777000, поэтому
+                        // recipient-бокс получателя — единственный его бокс; прежняя
+                        // ветка «actor==To → sender-бокс» была верна только для
+                        // отправителя-владельца и сломала бы привязку msg_id.
                         msgID := sent.RecipientMessage.ID
-                        if req.ActorUserID == req.To.ID {
-                                msgID = sent.SenderMessage.ID
+                        if sent.RecipientMessage.ID <= 0 || sent.RecipientMessage.OwnerUserID != req.To.ID {
+                                if sent.SenderMessage.ID > 0 && sent.SenderMessage.OwnerUserID == req.To.ID {
+                                        msgID = sent.SenderMessage.ID
+                                }
                         }
                         if msgID <= 0 {
                                 return domain.ErrStarGiftTransferUnavailable
@@ -1953,8 +1981,16 @@ func (s *StarGiftLifecycleStore) transferStarGiftWithoutPrivateMessage(ctx conte
                 unique.Owner = req.To
                 saved.Owner, saved.MsgID, saved.SavedID, saved.UpgradeMsgID, saved.Date = req.To, 0, saved.ID, 0, req.Date
                 saved.FromUserID = req.ActorUserID
+                transfer := transferUniqueAction(unique, req.ActorUserID, req.To, saved)
+                if sourceSaved.Owner.Type == domain.PeerTypeChannel {
+                        // Раунд 25: передача С канала на другой канал — from_id действия
+                        // = канал-источник («{канал} передал(а) {канал} подарок!»),
+                        // выполнявший передачу аккаунт владельца в подписи не участвует.
+                        from := sourceSaved.Owner
+                        transfer.FromPeer = &from
+                }
                 action := domain.ChannelMessageAction{Type: domain.ChannelActionStarGiftUnique,
-                        StarGiftUnique: transferUniqueAction(unique, req.ActorUserID, req.To, saved)}
+                        StarGiftUnique: transfer}
                 if err := NewChannelStore(tx).appendStarGiftAdminLogTx(ctx, tx, req.To.ID, req.ActorUserID, saved.ID, req.Date, action); err != nil {
                         return err
                 }

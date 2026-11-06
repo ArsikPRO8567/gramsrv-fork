@@ -1173,9 +1173,12 @@ WHERE channel_id=$1 AND event_type='send_message' AND message::text LIKE '%star_
                 prepayAlias.SavedID != channelPrepay.Saved.SavedID {
                 t.Fatalf("channel prepaid notification alias = %+v found=%v err=%v", prepayAlias, found, err)
         }
+        // Раунд 25: три записи с prepaid-маркерами — две покупки с авто-хэшем
+        // предоплаты (обычная и target) и полностью заполненный action
+        // предоплаты (prepaid_upgrade=true; до раунда 25 его снимок терялся).
         var prepayLogs int
         if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM channel_admin_log_events
-WHERE channel_id=$1 AND message::text LIKE '%prepaid_upgrade%'`, created.Channel.ID).Scan(&prepayLogs); err != nil || prepayLogs != 2 {
+WHERE channel_id=$1 AND message::text LIKE '%prepaid_upgrade%'`, created.Channel.ID).Scan(&prepayLogs); err != nil || prepayLogs != 3 {
                 t.Fatalf("channel prepaid upgrade admin logs = %d err %v", prepayLogs, err)
         }
         channelPrepayReplay, err := lifecycle.PrepayStarGiftUpgrade(ctx, channelPrepayReq)
@@ -1183,7 +1186,7 @@ WHERE channel_id=$1 AND message::text LIKE '%prepaid_upgrade%'`, created.Channel
                 t.Fatalf("channel prepaid entitlement replay = %+v err %v", channelPrepayReplay, err)
         }
         if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM channel_admin_log_events
-WHERE channel_id=$1 AND message::text LIKE '%prepaid_upgrade%'`, created.Channel.ID).Scan(&prepayLogs); err != nil || prepayLogs != 2 {
+WHERE channel_id=$1 AND message::text LIKE '%prepaid_upgrade%'`, created.Channel.ID).Scan(&prepayLogs); err != nil || prepayLogs != 3 {
                 t.Fatalf("channel prepaid upgrade replay logs = %d err %v", prepayLogs, err)
         }
 
@@ -1808,4 +1811,204 @@ func starGiftUniqueActionFromEdit(edit domain.EditedMessageForUser) *domain.Mess
                 return nil
         }
         return edit.Message.Media.ServiceAction.StarGiftUnique
+}
+
+// TestStarGiftRound25ChannelGiftDeliveryPostgres — раунд 25: канальные подарки.
+// 1) Предоплаченное улучшение помечается в сообщении владельцу/админам
+//    prepaid_upgrade=true и внешним upgrade_stars (владелец не может повторно
+//    оплатить уже оплаченное улучшение);
+// 2) передача подарка С канала пользователю приходит от служебного аккаунта
+//    777000 с from_id = канал-владелец («{канал} передал(а) подарок!»);
+// 3) передача с канала на другой канал несёт from_id = канал-источник;
+// 4) скрытый из профиля коллекционный подарок читается UniqueBySlug с
+//    Unsaved=true (страница по ссылке не должна раскрывать профиль владельца).
+func TestStarGiftRound25ChannelGiftDeliveryPostgres(t *testing.T) {
+	pool := testPool(t)
+	ctx := context.Background()
+	suffix := randomSuffix(t)
+	now := int(time.Now().Unix())
+	users := NewUserStore(pool)
+	actor := createTestUser(t, ctx, users, "+1883"+suffix+"01", "Round25Actor", "")
+	if _, _, err := NewStarsStore(pool).EnsureGrant(ctx, actor.ID, 10000, now); err != nil {
+		t.Fatalf("grant actor stars: %v", err)
+	}
+	channelStore := NewChannelStore(pool)
+	created, err := channelStore.CreateChannel(ctx, domain.CreateChannelRequest{
+		CreatorUserID: actor.ID, Title: "Round25 Channel " + suffix, Megagroup: true, Date: now,
+	})
+	if err != nil {
+		t.Fatalf("create source channel: %v", err)
+	}
+	channelPeer := domain.Peer{Type: domain.PeerTypeChannel, ID: created.Channel.ID}
+	// Отдельный создатель целевого канала: PK очереди уведомлений
+	// (saved_gift_id, target_user_id, action_kind) не даст переиспользовать
+	// джобу предыдущей передачи одному и тому же владельцу.
+	targetOwner := createTestUser(t, ctx, users, "+1883"+suffix+"02", "Round25TargetOwner", "")
+	createdTarget, err := channelStore.CreateChannel(ctx, domain.CreateChannelRequest{
+		CreatorUserID: targetOwner.ID, Title: "Round25 Target " + suffix, Megagroup: true, Date: now,
+	})
+	if err != nil {
+		t.Fatalf("create target channel: %v", err)
+	}
+	targetChannelPeer := domain.Peer{Type: domain.PeerTypeChannel, ID: createdTarget.Channel.ID}
+
+	gifts := NewStarGiftStore(pool)
+	baseDocumentID := (time.Now().UnixNano() & 0x7ffffffffffff000) + 700
+	entry, err := gifts.CreateCatalogRevision(ctx, domain.StarGiftCatalogWrite{
+		Title: "Round25 Gift " + suffix, Stars: 50, ConvertStars: 20, Enabled: true,
+		Document: collectibleTestDocument(baseDocumentID, "round25.tgs"), Blob: collectibleTestBlob(baseDocumentID, "round25"),
+		Animation: collectibleTestAnimation("round25.tgs"), Actor: "integration", CommandID: "round25-" + suffix,
+	})
+	if err != nil {
+		t.Fatalf("create round25 catalog: %v", err)
+	}
+	if _, err := gifts.PublishCollectibleRevision(ctx, domain.StarGiftCollectibleWrite{
+		GiftID: entry.Gift.ID, UpgradeStars: 100, SupplyTotal: 10, SlugPrefix: "round25-" + suffix,
+		Models: []domain.StarGiftCollectibleAttribute{
+			{Kind: domain.StarGiftCollectibleModel, Name: "R25 Model", RarityKind: domain.StarGiftRarityPermille, RarityPermille: 1000,
+				Document: collectibleTestDocumentPtr(baseDocumentID+1, "r25-model.tgs"), Blob: collectibleTestBlobPtr(baseDocumentID+1, "r25-model"), Animation: collectibleTestAnimationPtr("r25-model.tgs")},
+			{Kind: domain.StarGiftCollectibleModel, Name: "R25 Model Two", RarityKind: domain.StarGiftRarityPermille, RarityPermille: 500,
+				Document: collectibleTestDocumentPtr(baseDocumentID+4, "r25-model-two.tgs"), Blob: collectibleTestBlobPtr(baseDocumentID+4, "r25-model-two"), Animation: collectibleTestAnimationPtr("r25-model-two.tgs")},
+		},
+		Patterns: []domain.StarGiftCollectibleAttribute{
+			{Kind: domain.StarGiftCollectiblePattern, Name: "R25 Pattern", RarityKind: domain.StarGiftRarityPermille, RarityPermille: 1000,
+				Document: collectibleTestPatternDocumentPtr(baseDocumentID+3, "r25-pattern.tgs"), Blob: collectibleTestBlobPtr(baseDocumentID+3, "r25-pattern"), Animation: collectibleTestAnimationPtr("r25-pattern.tgs")},
+			{Kind: domain.StarGiftCollectiblePattern, Name: "R25 Pattern Two", RarityKind: domain.StarGiftRarityPermille, RarityPermille: 500,
+				Document: collectibleTestPatternDocumentPtr(baseDocumentID+5, "r25-pattern-two.tgs"), Blob: collectibleTestBlobPtr(baseDocumentID+5, "r25-pattern-two"), Animation: collectibleTestAnimationPtr("r25-pattern-two.tgs")},
+		},
+		Backdrops: []domain.StarGiftCollectibleAttribute{
+			{Kind: domain.StarGiftCollectibleBackdrop, Name: "R25 Backdrop", BackdropID: 90, CenterColor: 0x112233, EdgeColor: 0x223344, PatternColor: 0x334455, TextColor: 0xffffff, RarityKind: domain.StarGiftRarityPermille, RarityPermille: 1000},
+			{Kind: domain.StarGiftCollectibleBackdrop, Name: "R25 Backdrop Two", BackdropID: 91, CenterColor: 0xaabbcc, EdgeColor: 0x778899, PatternColor: 0xddeeff, TextColor: 0x111111, RarityKind: domain.StarGiftRarityPermille, RarityPermille: 1000},
+		},
+		Actor: "integration", CommandID: "round25-pool-" + suffix,
+	}); err != nil {
+		t.Fatalf("publish round25 pool: %v", err)
+	}
+
+	messages := NewMessageStore(pool)
+	lifecycle := NewStarGiftLifecycleStore(pool, messages, 1_000_000, WithStarGiftMarketPolicy(domain.StarGiftMarketPolicy{
+		StarsProceedsPermille: 900, TONProceedsPermille: 900,
+	}))
+	upgrades := NewStarGiftUpgradeStore(pool, messages, WithStarGiftLifecyclePolicy(domain.StarGiftLifecyclePolicy{
+		TransferStars: 25, DropOriginalDetailsStars: 25, OfferMinStars: 1, CraftChancePermille: 500,
+	}))
+
+	// 1) Покупка каналу с предоплаченным улучшением: prepaid-маркеры в
+	//    уведомлении владельцу и в admin log.
+	prepaidReq := issueLifecyclePurchaseForm(t, ctx, lifecycle, domain.StarGiftPurchaseRequest{BuyerUserID: actor.ID, To: channelPeer,
+		GiftID: entry.Gift.ID, IncludeUpgrade: true, CommandKey: "round25-prepaid-" + suffix, Date: now + 1})
+	prepaid, err := lifecycle.PurchaseStarGift(ctx, prepaidReq)
+	if err != nil || prepaid.Saved.PrepaidUpgradeStars != 100 || prepaid.Saved.SavedID <= 0 {
+		t.Fatalf("round25 prepaid channel purchase = %+v err %v", prepaid, err)
+	}
+	var adminLogStars string
+	var adminLogPrepaid any
+	var adminLogUpgradeStars any
+	if err := pool.QueryRow(ctx, `SELECT message #>> '{Action,StarGift,stars}', message #>> '{Action,StarGift,prepaid_upgrade}', message #>> '{Action,StarGift,upgrade_stars}'
+FROM channel_admin_log_events WHERE channel_id=$1 AND event_type='send_message' ORDER BY id DESC LIMIT 1`, created.Channel.ID).
+		Scan(&adminLogStars, &adminLogPrepaid, &adminLogUpgradeStars); err != nil ||
+		adminLogStars != "50" || adminLogPrepaid != "true" || adminLogUpgradeStars != "100" {
+		t.Fatalf("round25 prepaid admin log stars=%q prepaid=%v upgrade_stars=%v err=%v (want stars=50 prepaid=true upgrade_stars=100)",
+			adminLogStars, adminLogPrepaid, adminLogUpgradeStars, err)
+	}
+	var notificationStars string
+	var notificationPrepaid any
+	if err := pool.QueryRow(ctx, `SELECT m.media #>> '{service_action,star_gift,stars}', m.media #>> '{service_action,star_gift,prepaid_upgrade}'
+FROM star_gift_channel_notification_jobs j JOIN message_boxes m ON m.owner_user_id=j.target_user_id AND m.box_id=j.message_id
+WHERE j.saved_gift_id=$1 AND j.action_kind='star_gift' AND j.delivered_at>0`, prepaid.Saved.SavedID).
+		Scan(&notificationStars, &notificationPrepaid); err != nil || notificationStars != "50" || notificationPrepaid != "true" {
+		t.Fatalf("round25 prepaid notification stars=%q prepaid=%v err=%v (want stars=50 prepaid=true)", notificationStars, notificationPrepaid, err)
+	}
+
+	// 2) Улучшение prepaid-формой бесплатно, затем передача с канала владельцу:
+	//    конверт сообщения — от 777000, from_id действия — канал.
+	upgraded, err := upgrades.UpgradeStarGift(ctx, domain.StarGiftUpgradeRequest{UserID: actor.ID,
+		Ref: domain.SavedStarGiftRef{Owner: channelPeer, SavedID: prepaid.Saved.SavedID}, RequirePrepaid: true,
+		CommandKey: "round25-upgrade-" + suffix, Date: now + 2})
+	if err != nil || upgraded.Unique.Owner != channelPeer {
+		t.Fatalf("round25 prepaid upgrade = %+v err %v", upgraded, err)
+	}
+	actorPeer := domain.Peer{Type: domain.PeerTypeUser, ID: actor.ID}
+	toActor, err := lifecycle.TransferStarGift(ctx, domain.StarGiftTransferRequest{
+		ActorUserID: actor.ID,
+		Ref:         domain.SavedStarGiftRef{Owner: channelPeer, SavedID: prepaid.Saved.SavedID},
+		To:          actorPeer, ChargeStars: upgraded.Saved.TransferStars,
+		CommandKey: "round25-to-user-" + suffix, Date: now + 3,
+	})
+	if err != nil || toActor.Saved.Owner != actorPeer {
+		t.Fatalf("round25 channel-to-user transfer = %+v err %v", toActor, err)
+	}
+	if toActor.Send.RecipientMessage.OwnerUserID != actor.ID || toActor.Send.RecipientMessage.ID <= 0 {
+		t.Fatalf("round25 transfer recipient box = %+v, want actor-owned recipient box", toActor.Send.RecipientMessage)
+	}
+	if toActor.Send.SenderMessage.OwnerUserID != domain.OfficialSystemUserID {
+		t.Fatalf("round25 transfer envelope sender = %d, want official 777000", toActor.Send.SenderMessage.OwnerUserID)
+	}
+	toActorAction := toActor.Send.RecipientMessage.Media.ServiceAction.StarGiftUnique
+	if toActorAction == nil || toActorAction.FromUserID != 0 || toActorAction.FromPeer == nil || *toActorAction.FromPeer != channelPeer ||
+		toActorAction.Gift.Owner != actorPeer || !toActorAction.Transferred {
+		t.Fatalf("round25 transfer action from = %+v (from_user_id=%d), want channel peer %v", toActorAction.FromPeer, toActorAction.FromUserID, channelPeer)
+	}
+	var envelopeSender int64
+	if err := pool.QueryRow(ctx, `SELECT message_sender_id FROM message_boxes
+WHERE owner_user_id=$1 AND box_id=$2`, actor.ID, toActor.Send.RecipientMessage.ID).
+		Scan(&envelopeSender); err != nil || envelopeSender != domain.OfficialSystemUserID {
+		t.Fatalf("round25 transfer private message sender = %d err=%v, want 777000", envelopeSender, err)
+	}
+
+	// 3) Обратная передача на канал (источник — пользователь): прежнее
+	//    поведение from_id=актор сохраняется.
+	backToChannel, err := lifecycle.TransferStarGift(ctx, domain.StarGiftTransferRequest{
+		ActorUserID: actor.ID,
+		Ref:         domain.SavedStarGiftRef{Owner: actorPeer, MsgID: toActor.Saved.MsgID},
+		To:          channelPeer, ChargeStars: toActor.Saved.TransferStars,
+		CommandKey: "round25-back-to-channel-" + suffix, Date: now + 4,
+	})
+	if err != nil || backToChannel.Saved.Owner != channelPeer {
+		t.Fatalf("round25 user-to-channel transfer = %+v err %v", backToChannel, err)
+	}
+	// 4) Передача с канала на другой канал: from_id = канал-источник.
+	channelToChannel, err := lifecycle.TransferStarGift(ctx, domain.StarGiftTransferRequest{
+		ActorUserID: actor.ID,
+		Ref:         domain.SavedStarGiftRef{Owner: channelPeer, SavedID: backToChannel.Saved.SavedID},
+		To:          targetChannelPeer, ChargeStars: backToChannel.Saved.TransferStars,
+		CommandKey: "round25-channel-to-channel-" + suffix, Date: now + 5,
+	})
+	if err != nil || channelToChannel.Saved.Owner != targetChannelPeer {
+		t.Fatalf("round25 channel-to-channel transfer = %+v err %v", channelToChannel, err)
+	}
+	var channelFromType string
+	var channelFromID int64
+	if err := pool.QueryRow(ctx, `SELECT m.media #>> '{service_action,star_gift_unique,from_peer,Type}',
+COALESCE((m.media #>> '{service_action,star_gift_unique,from_peer,ID}')::bigint, 0)
+FROM star_gift_channel_notification_jobs j JOIN message_boxes m ON m.owner_user_id=j.target_user_id AND m.box_id=j.message_id
+WHERE j.saved_gift_id=$1 AND j.action_kind='star_gift_unique' AND j.delivered_at>0
+  AND j.target_user_id=$2`, channelToChannel.Saved.SavedID, targetOwner.ID).
+		Scan(&channelFromType, &channelFromID); err != nil || channelFromType != "channel" || channelFromID != created.Channel.ID {
+		t.Fatalf("round25 channel-to-channel from = %s:%d err=%v, want channel:%d", channelFromType, channelFromID, err, created.Channel.ID)
+	}
+
+	// 5) Скрытие из профиля: UniqueBySlug помечает подарок Unsaved.
+	slug := channelToChannel.Unique.Slug
+	if slug == "" {
+		t.Fatalf("round25 transferred collectible slug is empty")
+	}
+	visible, found, err := gifts.UniqueBySlug(ctx, slug)
+	if err != nil || !found || visible.Unsaved {
+		t.Fatalf("round25 visible slug = %+v found=%v err=%v, want Unsaved=false", visible, found, err)
+	}
+	if ok, err := gifts.SetUnsaved(ctx, domain.SavedStarGiftRef{Owner: targetChannelPeer, SavedID: channelToChannel.Saved.SavedID}, true); err != nil || !ok {
+		t.Fatalf("round25 hide gift ok=%v err=%v", ok, err)
+	}
+	hidden, found, err := gifts.UniqueBySlug(ctx, slug)
+	if err != nil || !found || !hidden.Unsaved {
+		t.Fatalf("round25 hidden slug = %+v found=%v err=%v, want Unsaved=true", hidden, found, err)
+	}
+	if ok, err := gifts.SetUnsaved(ctx, domain.SavedStarGiftRef{Owner: targetChannelPeer, SavedID: channelToChannel.Saved.SavedID}, false); err != nil || !ok {
+		t.Fatalf("round25 unhide gift ok=%v err=%v", ok, err)
+	}
+	restored, found, err := gifts.UniqueBySlug(ctx, slug)
+	if err != nil || !found || restored.Unsaved {
+		t.Fatalf("round25 restored slug = %+v found=%v err=%v, want Unsaved=false", restored, found, err)
+	}
 }

@@ -294,14 +294,22 @@ func (s *StarGiftLifecycleStore) purchaseStarGiftToChannel(ctx context.Context, 
                 // как и в приватной покупке — convert_stars при разрешённой конвертации,
                 // ноль только у предоплаченных улучшений.
                 canUpgrade, actionConvertStars := domain.StarGiftMessageFlags(gift, saved.ConvertStars, saved.PrepaidUpgradeStars)
+                // Раунд 25: предоплаченное улучшение канального подарка помечается в
+                // сообщении владельцу/админам флагом prepaid_upgrade и внешним
+                // upgrade_stars (стоимость улучшения вынесена из gift.stars, как в
+                // приватном wire-формате предоплаты, дамп 183490). Без флага клиент
+                // рисует платную кнопку «Улучшить за N» — владелец мог повторно
+                // оплатить уже оплаченное отправителем улучшение; с флагом он видит
+                // бесплатное «Распаковать» (payments.upgradeStarGift без списания).
+                actionPrepaidUpgrade := saved.PrepaidUpgradeStars > 0
                 action := domain.ChannelMessageAction{
                         Type: domain.ChannelActionStarGift,
                         StarGift: fillStarGiftSnapshot(&domain.MessageStarGiftAction{
                                 GiftID: gift.ID,
-                                // Канальная покупка — тоже обычное сообщение о дарении: цена в
-                                // объекте равна сумме цены подарка и апгрейда, флаги prepaid_upgrade
-                                // не выставляются.
-                                Stars:           gift.Stars + saved.PrepaidUpgradeStars,
+                                // Канальная покупка — обычное сообщение о дарении: gift.stars
+                                // несёт чистую цену подарка, предоплаченное улучшение —
+                                // во внешнем upgrade_stars (см. комментарий выше).
+                                Stars:           gift.Stars,
                                 ConvertStars:    actionConvertStars,
                                 Title:           gift.Title,
                                 Sticker:         &sticker,
@@ -313,11 +321,15 @@ func (s *StarGiftLifecycleStore) purchaseStarGiftToChannel(ctx context.Context, 
                                 NameHidden:      saved.NameHidden,
                                 Saved:           true,
                                 CanUpgrade:      canUpgrade,
-                                // PrepaidUpgradeHash сознательно не включается: hash — это инвойс
-                                // «оплатить улучшение чужого подарка», он привязан к приватному диалогу
-                                // плательщика. В канальном действии он заставляет клиентов отправлять
-                                // prepay invoice с peer = сервисный аккаунт/канал (STARGIFT_INVALID
-                                // либо нежелательную предоплату вместо обычного улучшения).
+                                PrepaidUpgrade:  actionPrepaidUpgrade,
+                                UpgradeStars:    saved.PrepaidUpgradeStars,
+                                // PrepaidUpgradeHash — инвойс «оплатить улучшение чужого
+                                // подарка»: для обычной канальной покупки без улучшения
+                                // (prepaid_upgrade_stars=0) hash позволяет отправителю
+                                // внести улучшение позже. Регрессия интеграции раунда 24
+                                // (маркеры prepaid пропали из канального действия) —
+                                // восстановлена в раунде 25 вместе с флагом выше.
+                                PrepaidUpgradeHash: saved.PrepaidUpgradeHash,
                                 UpgradePriceStars: gift.UpgradeStars,
                                 GiftNum:           saved.GiftNum,
                                 // Раунд 23 (дамп 88848): канальные копии не несут
