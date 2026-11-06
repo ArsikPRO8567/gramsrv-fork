@@ -239,12 +239,31 @@ func main() {
 	}
 	fmt.Printf("[target] mode=%s dc=%d addr=%s\n", modeName(*testServer), *dcID, describeConnectAddr(dcList, *dcID))
 
+	sessionPath := session
+	switch detected, detectErr := detectSessionFormat(sessionPath); {
+	case detectErr != nil:
+		fmt.Fprintln(os.Stderr, "ERROR:", detectErr)
+		os.Exit(2)
+	case detected == sessionFormatSQLite:
+		converted, created, convertErr := convertTelethonSession(sessionPath)
+		if convertErr != nil {
+			fmt.Fprintln(os.Stderr, "ERROR:", convertErr)
+			os.Exit(1)
+		}
+		if created {
+			fmt.Printf("[session] telethon .session converted -> %s\n", converted)
+		} else {
+			fmt.Printf("[session] reusing converted session %s\n", converted)
+		}
+		sessionPath = converted
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Hour)
 	defer cancel()
 	client := telegram.NewClient(apiID, apiHash, telegram.Options{
 		DC:             *dcID,
 		DCList:         dcList,
-		SessionStorage: &telegram.FileSessionStorage{Path: session},
+		SessionStorage: &telegram.FileSessionStorage{Path: sessionPath},
 	})
 	if err := client.Run(ctx, func(ctx context.Context) error {
 		status, err := client.Auth().Status(ctx)
