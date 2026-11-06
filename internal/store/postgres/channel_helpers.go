@@ -152,6 +152,51 @@ func (s *ChannelStore) SearchPublicChannels(ctx context.Context, viewerUserID in
 	}
 	queryPrefix := escapeLike(queryLower) + "%"
 	queryLike := "%" + escapeLike(queryLower) + "%"
+	// Собственные (в том числе приватные) каналы/супергруппы, совпавшие по
+	// названию или username, идут в my_results: официальный contacts.search
+	// показывает «свои» чаты именно там. Пикер получателя передачи подарка
+	// строит список из этого ответа, иначе передать подарок каналу нельзя.
+	myRows, err := s.db.Query(ctx, `
+SELECT `+channelColumns+`
+FROM channels c
+JOIN channel_members m ON m.channel_id = c.id AND m.user_id = $1 AND m.status = 'active'
+WHERE NOT c.deleted
+  AND (c.broadcast OR c.megagroup)
+  AND (
+    lower(COALESCE(c.username, '')) = $2
+    OR lower(COALESCE(c.username, '')) LIKE $3 ESCAPE '\'
+    OR lower(COALESCE(c.username, '')) LIKE $4 ESCAPE '\'
+    OR lower(c.title) LIKE $3 ESCAPE '\'
+    OR lower(c.title) LIKE $4 ESCAPE '\'
+  )
+ORDER BY CASE
+    WHEN lower(COALESCE(c.username, '')) = $2 THEN 0
+    WHEN lower(COALESCE(c.username, '')) LIKE $3 ESCAPE '\' THEN 1
+    WHEN lower(c.title) LIKE $3 ESCAPE '\' THEN 2
+    ELSE 3
+  END,
+  c.participants_count DESC,
+  c.date DESC,
+  c.id DESC
+LIMIT $5`, viewerUserID, queryLower, queryPrefix, queryLike, limit)
+	if err != nil {
+		return domain.PublicChannelSearchResult{}, fmt.Errorf("search own channels: %w", err)
+	}
+	defer myRows.Close()
+	out := domain.PublicChannelSearchResult{
+		MyResults: make([]domain.Channel, 0, limit),
+		Results:   make([]domain.Channel, 0, limit),
+	}
+	for myRows.Next() {
+		ch, err := scanChannel(myRows)
+		if err != nil {
+			return domain.PublicChannelSearchResult{}, err
+		}
+		out.MyResults = append(out.MyResults, ch)
+	}
+	if err := myRows.Err(); err != nil {
+		return domain.PublicChannelSearchResult{}, err
+	}
 	rows, err := s.db.Query(ctx, `
 WITH username_matches AS (
   SELECT
@@ -205,9 +250,6 @@ LIMIT $5`, viewerUserID, queryLower, queryPrefix, queryLike, limit)
 		return domain.PublicChannelSearchResult{}, fmt.Errorf("search public channels: %w", err)
 	}
 	defer rows.Close()
-	out := domain.PublicChannelSearchResult{
-		Results: make([]domain.Channel, 0, limit),
-	}
 	for rows.Next() {
 		ch, err := scanChannel(rows)
 		if err != nil {
@@ -240,7 +282,7 @@ AND EXISTS (
   WHERE c.id = channel_messages.channel_id
     AND NOT c.deleted
     AND COALESCE(c.username, '') <> ''
-	)`
+        )`
 	if query != "" {
 		args = append(args, "%"+escapeLike(query)+"%")
 		where += fmt.Sprintf(" AND body ILIKE $%d ESCAPE '\\'", len(args))

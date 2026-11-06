@@ -64,11 +64,23 @@ func TestTransferUniqueActionSavedIDNamespace(t *testing.T) {
 	user := domain.Peer{Type: domain.PeerTypeUser, ID: 100}
 	channel := domain.Peer{Type: domain.PeerTypeChannel, ID: 200}
 
-	if action := transferUniqueAction(unique, 1, user, saved); action.SavedID != 0 || action.CanCraftAt != saved.CanCraftAt {
+	if action := transferUniqueAction(unique, 1, domain.Peer{}, user, saved); action.SavedID != 0 || action.CanCraftAt != saved.CanCraftAt {
 		t.Fatalf("user transfer action leaked channel saved_id: %+v", action)
 	}
-	if action := transferUniqueAction(unique, 1, channel, saved); action.SavedID != saved.SavedID || action.CanCraftAt != 0 {
+	if action := transferUniqueAction(unique, 1, domain.Peer{}, channel, saved); action.SavedID != saved.SavedID || action.CanCraftAt != 0 {
 		t.Fatalf("channel transfer action lost channel saved_id: %+v", action)
+	}
+	// Передача от канала пользователю: from_id в действии указывает на канал
+	// (сообщение уходит от 777000), peer/saved_id остаются в нулевом
+	// пользовательском пространстве.
+	action := transferUniqueAction(unique, 1, channel, user, saved)
+	if action.FromPeer != channel || action.FromUserID != 0 || action.Peer.Type != "" || action.SavedID != 0 {
+		t.Fatalf("channel->user transfer action namespace broken: %+v", action)
+	}
+	// Личная передача: from_id отсутствует в приватных копиях.
+	action = transferUniqueAction(unique, 1, domain.Peer{}, user, saved)
+	if action.FromPeer.Type != "" || action.FromUserID != 0 {
+		t.Fatalf("user transfer action leaked from identity: %+v", action)
 	}
 }
 
