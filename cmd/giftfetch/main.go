@@ -2,8 +2,13 @@
 // complete current upgrade-attribute pools, and all document resources
 // referenced by either response. Catalog entries whose sticker document is
 // unusable and unique-gift entries are skipped and reported in the manifest
-// instead of failing the whole snapshot. It is a read-only fetcher: it never
-// imports data into telesrv and never copies the authorization session.
+// instead of failing the whole snapshot, and documents that cannot be
+// downloaded after retries are recorded the same way so a re-run picks them
+// up. It is a read-only fetcher: it never imports data into telesrv and
+// never copies the authorization session out of the session storage; for
+// documents stored on a foreign DC it transfers the existing authorization
+// in memory (auth.exportAuthorization/auth.importAuthorization) to download
+// them directly from the DC that stores them.
 //
 // Usage:
 //
@@ -22,17 +27,23 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/gotd/log/logzap"
 	"github.com/iamxvbaba/td/bin"
 	"github.com/iamxvbaba/td/telegram"
 	"github.com/iamxvbaba/td/telegram/dcs"
 	"github.com/iamxvbaba/td/telegram/downloader"
 	"github.com/iamxvbaba/td/tg"
+	"github.com/iamxvbaba/td/tgerr"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 	"golang.org/x/sync/errgroup"
 
 	"telesrv/internal/app/stargifts"
@@ -49,6 +60,17 @@ const (
 	maxDocuments       = 50000
 	maxWorkers         = 128
 	floodWaitMargin    = 5 * time.Second
+	// Metadata RPCs (catalog, upgrade attributes) are small single calls;
+	// without a deadline a wedged server would stall the whole dump.
+	metadataTimeout = 60 * time.Second
+	// mediaConnectTimeout bounds the secondary file-DC connection setup:
+	// key exchange plus one auth export/import round-trip.
+	mediaConnectTimeout = 2 * time.Minute
+	// downloadBaseTimeout bounds one download attempt for the first chunk;
+	// larger resources get one extra second per 64 KiB part.
+	downloadBaseTimeout = 90 * time.Second
+	downloadAttempts    = 3
+	heartbeatInterval   = 30 * time.Second
 )
 
 type catalogManifest struct {
@@ -216,11 +238,32 @@ type skippedItemManifest struct {
 }
 
 type skipLog struct {
+	mu    sync.Mutex
 	items []skippedItemManifest
 }
 
 func (l *skipLog) add(item skippedItemManifest) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
 	l.items = append(l.items, item)
+}
+
+func (l *skipLog) snapshot() []skippedItemManifest {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return append([]skippedItemManifest(nil), l.items...)
+}
+
+func (l *skipLog) countKind(kind string) int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	count := 0
+	for _, item := range l.items {
+		if item.Kind == kind {
+			count++
+		}
+	}
+	return count
 }
 
 func giftClassIdentity(class tg.StarGiftClass) (string, int64) {
@@ -278,6 +321,7 @@ func main() {
 	addrOverride := flag.String("addr", "", "explicit host:port replacing the chosen DC address")
 	reuseMetadata := flag.Bool("reuse-metadata", false, "reuse and strictly decode catalog.tl plus upgrade-attributes/*.tl instead of refetching metadata")
 	allowedMissingThumbsRaw := flag.String("allow-missing-thumb", "", "comma-separated document_id:photo|video:type entries that may be recorded as explicitly missing after a failed download")
+	debug := flag.Bool("debug", false, "log raw td protocol events (connections, retries, RPC errors)")
 	flag.Parse()
 	if strings.TrimSpace(*outDir) == "" {
 		fmt.Fprintln(os.Stderr, "usage: SESSION=/path/to/session giftfetch -out <directory>")
@@ -310,16 +354,33 @@ func main() {
 		os.Exit(2)
 	}
 	fmt.Printf("[target] mode=%s dc=%d addr=%s\n", modeName(*testServer), *dcID, describeConnectAddr(dcList, *dcID))
+	// Media documents can live on any DC, and upload.getFile answers
+	// FILE_MIGRATE_<dc> for them: gotd then dials the migration target using
+	// the static DC list. Hardcoded fallback lists go stale (the shipped test
+	// DC 1 address no longer matches the live server and every migration
+	// attempt dies in a "wrong DC" reconnect loop), so the list is refreshed
+	// from the server's own help.getConfig response before dumping.
+	dcList, err = refreshDCList(ctx, dcList, *dcID, strings.TrimSpace(*addrOverride))
+	if err != nil {
+		fmt.Printf("[dc list] server config unavailable (%v); continuing with the built-in list\n", err)
+	}
+	for _, dc := range dcIDs(dcList) {
+		fmt.Printf("[dc list] dc=%d addresses=%s\n", dc, describeDCAddresses(dcList, dc))
+	}
 	resolvedSession, err := resolveSessionPath(session)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "ERROR:", err)
 		os.Exit(2)
 	}
-	client := telegram.NewClient(apiID, apiHash, telegram.Options{
+	options := telegram.Options{
 		DC:             *dcID,
 		DCList:         dcList,
 		SessionStorage: &telegram.FileSessionStorage{Path: resolvedSession},
-	})
+	}
+	if *debug {
+		options.Logger = logzap.New(verboseZapLogger())
+	}
+	client := telegram.NewClient(apiID, apiHash, options)
 	if err := client.Run(ctx, func(ctx context.Context) error {
 		status, err := client.Auth().Status(ctx)
 		if err != nil {
@@ -329,16 +390,35 @@ func main() {
 			return errors.New("SESSION is not authorized")
 		}
 		fmt.Println("[session authorized]")
-		return fetchCatalog(ctx, client.API(), *outDir, *maxDocBytes, *skipThumbs, *workers, *reuseMetadata, allowedMissingThumbs)
+		return fetchCatalog(ctx, client.API(), dcList, *dcID, *outDir, *maxDocBytes, *skipThumbs, *workers, *reuseMetadata, allowedMissingThumbs)
 	}); err != nil {
 		fmt.Fprintln(os.Stderr, "ERROR:", err)
 		os.Exit(1)
 	}
 }
 
-func fetchCatalog(ctx context.Context, api *tg.Client, outDir string, maxDocBytes int64, skipThumbs bool, workers int, reuseMetadata bool, allowedMissingThumbs map[string]struct{}) error {
+func verboseZapLogger() *zap.Logger {
+	encoderConfig := zap.NewDevelopmentEncoderConfig()
+	encoderConfig.EncodeLevel = zapcore.CapitalColorLevelEncoder
+	return zap.New(zapcore.NewCore(
+		zapcore.NewConsoleEncoder(encoderConfig),
+		zapcore.Lock(os.Stderr),
+		zapcore.DebugLevel,
+	))
+}
+
+func fetchCatalog(ctx context.Context, api *tg.Client, dcList dcs.List, mainDC int, outDir string, maxDocBytes int64, skipThumbs bool, workers int, reuseMetadata bool, allowedMissingThumbs map[string]struct{}) error {
 	if err := os.MkdirAll(outDir, 0o755); err != nil {
 		return err
+	}
+
+	// Downloads are routed per-document: catalog resources can live on a
+	// different DC than the session connection (the test server keeps gift
+	// documents on DC 1 while the userbot session lives on DC 2).
+	router := &mediaRouter{
+		main:    api,
+		mainDC:  mainDC,
+		remotes: newRemoteDCs(ctx, dcList, api),
 	}
 
 	var catalog *tg.PaymentsStarGifts
@@ -352,7 +432,9 @@ func fetchCatalog(ctx context.Context, api *tg.Client, outDir string, maxDocByte
 		}
 		fmt.Printf("[metadata reused] path=%s\n", rawArtifact.Path)
 	} else {
-		result, err := api.PaymentsGetStarGifts(ctx, 0)
+		rpcCtx, cancel := context.WithTimeout(ctx, metadataTimeout)
+		result, err := api.PaymentsGetStarGifts(rpcCtx, 0)
+		cancel()
 		if err != nil {
 			return fmt.Errorf("payments.getStarGifts: %w", err)
 		}
@@ -379,7 +461,7 @@ func fetchCatalog(ctx context.Context, api *tg.Client, outDir string, maxDocByte
 		RawCatalog:   rawArtifact,
 		ChatCount:    len(catalog.Chats),
 		UserCount:    len(catalog.Users),
-		BoundaryNote: "payments.getStarGifts(hash=0) plus payments.getStarGiftUpgradeAttributes for every currently upgradeable base gift: complete current official attribute definitions and referenced documents, not deleted historical definitions or precomputed model-pattern-backdrop combinations; gifts with unusable sticker documents and unique-gift entries are skipped and listed under skipped, the raw catalog.tl snapshot keeps every server entry",
+		BoundaryNote: "payments.getStarGifts(hash=0) plus payments.getStarGiftUpgradeAttributes for every currently upgradeable base gift: complete current official attribute definitions and referenced documents, not deleted historical definitions or precomputed model-pattern-backdrop combinations; gifts with unusable sticker documents and unique-gift entries are skipped and listed under skipped, the raw catalog.tl snapshot keeps every server entry; documents that could not be downloaded after retries are recorded under skipped with kind=document and are picked up by a re-run, which reuses every already downloaded artifact",
 	}
 
 	registry := newDocumentRegistry()
@@ -453,7 +535,20 @@ func fetchCatalog(ctx context.Context, api *tg.Client, outDir string, maxDocByte
 	documentResults := make([]documentManifest, len(ids))
 	group, downloadCtx := errgroup.WithContext(ctx)
 	group.SetLimit(workers)
-	var completed atomic.Int64
+	var completed, failedDocuments atomic.Int64
+	heartbeatDone := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(heartbeatInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-heartbeatDone:
+				return
+			case <-ticker.C:
+				fmt.Printf("[progress] completed=%d failed=%d total=%d\n", completed.Load(), failedDocuments.Load(), len(ids))
+			}
+		}
+	}()
 	for index, id := range ids {
 		index, id := index, id
 		group.Go(func() error {
@@ -468,19 +563,33 @@ func fetchCatalog(ctx context.Context, api *tg.Client, outDir string, maxDocByte
 					}
 				}
 			})
-			dm, err := fetchDocument(downloadCtx, api, dl, outDir, registry.sources[id], maxDocBytes, skipThumbs, allowedMissingThumbs)
+			dm, err := fetchDocument(downloadCtx, router, dl, outDir, registry.sources[id], maxDocBytes, skipThumbs, allowedMissingThumbs)
 			if err != nil {
-				return err
+				if downloadCtx.Err() != nil {
+					// The run itself was canceled or hit its global deadline;
+					// keep the whole-dump error semantics in that case.
+					return err
+				}
+				// One unreachable or broken document must not abort the
+				// whole snapshot: record it and keep going. A re-run reuses
+				// every already downloaded artifact and retries only these.
+				failedDocuments.Add(1)
+				skips.add(skippedItemManifest{Kind: "document", DocumentID: id, Reason: err.Error()})
+				fmt.Printf("[failed document] id=%d error=%v\n", id, err)
+				return nil
 			}
 			documentResults[index] = dm
 			done := completed.Add(1)
+			fmt.Printf("[document done] document=%d size=%d thumbs=%d (%d/%d)\n", dm.ID, dm.File.Size, len(dm.Thumbs), done, len(ids))
 			if done == int64(len(ids)) || done%100 == 0 {
 				fmt.Printf("[documents downloaded] completed=%d total=%d\n", done, len(ids))
 			}
 			return nil
 		})
 	}
-	if err := group.Wait(); err != nil {
+	err := group.Wait()
+	close(heartbeatDone)
+	if err != nil {
 		return err
 	}
 	for _, dm := range documentResults {
@@ -492,8 +601,8 @@ func fetchCatalog(ctx context.Context, api *tg.Client, outDir string, maxDocByte
 		manifest.Documents = append(manifest.Documents, dm)
 	}
 
-	manifest.SkippedCount = len(skips.items)
-	manifest.Skipped = skips.items
+	manifest.SkippedCount = len(skips.snapshot())
+	manifest.Skipped = skips.snapshot()
 
 	encoded, err := json.MarshalIndent(manifest, "", "  ")
 	if err != nil {
@@ -502,7 +611,7 @@ func fetchCatalog(ctx context.Context, api *tg.Client, outDir string, maxDocByte
 	if err := writeFileAtomic(filepath.Join(outDir, "manifest.json"), append(encoded, '\n')); err != nil {
 		return err
 	}
-	fmt.Printf("[complete] gifts=%d attribute_sets=%d attributes=%d documents=%d missing_thumbs=%d skipped=%d bytes=%d manifest=%s\n", len(manifest.Gifts), len(manifest.UpgradeAttributeSets), manifest.UpgradeAttributeCount, len(manifest.Documents), manifest.MissingThumbCount, manifest.SkippedCount, manifest.TotalBytes, filepath.Join(outDir, "manifest.json"))
+	fmt.Printf("[complete] gifts=%d attribute_sets=%d attributes=%d documents=%d failed_documents=%d missing_thumbs=%d skipped=%d bytes=%d manifest=%s\n", len(manifest.Gifts), len(manifest.UpgradeAttributeSets), manifest.UpgradeAttributeCount, len(manifest.Documents), skips.countKind("document"), manifest.MissingThumbCount, manifest.SkippedCount, manifest.TotalBytes, filepath.Join(outDir, "manifest.json"))
 	return nil
 }
 
@@ -530,7 +639,9 @@ func fetchUpgradeAttributeSet(ctx context.Context, api *tg.Client, root string, 
 		}
 	} else {
 		var err error
-		result, err = api.PaymentsGetStarGiftUpgradeAttributes(ctx, giftID)
+		rpcCtx, cancel := context.WithTimeout(ctx, metadataTimeout)
+		result, err = api.PaymentsGetStarGiftUpgradeAttributes(rpcCtx, giftID)
+		cancel()
 		if err != nil {
 			return upgradeAttributeSetManifest{}, fmt.Errorf("payments.getStarGiftUpgradeAttributes(gift_id=%d): %w", giftID, err)
 		}
@@ -724,7 +835,7 @@ func collectGift(index int, class tg.StarGiftClass, addDocument addDocumentFunc)
 	}
 }
 
-func fetchDocument(ctx context.Context, api *tg.Client, dl *downloader.Downloader, root string, source *documentSource, maxBytes int64, skipThumbs bool, allowedMissingThumbs map[string]struct{}) (documentManifest, error) {
+func fetchDocument(ctx context.Context, router *mediaRouter, dl *downloader.Downloader, root string, source *documentSource, maxBytes int64, skipThumbs bool, allowedMissingThumbs map[string]struct{}) (documentManifest, error) {
 	doc := source.document
 	if doc.Size <= 0 || doc.Size > maxBytes {
 		return documentManifest{}, fmt.Errorf("document %d size %d is outside (0, %d]", doc.ID, doc.Size, maxBytes)
@@ -738,7 +849,7 @@ func fetchDocument(ctx context.Context, api *tg.Client, dl *downloader.Downloade
 	}
 	if !reused {
 		fmt.Printf("[network fetch] document=%d resource=document expected_size=%d part_size=%d\n", doc.ID, doc.Size, downloadPartSize(doc.Size))
-		data, err = download(ctx, api, dl, doc, "", doc.Size, maxBytes)
+		data, err = downloadWithRetry(ctx, router, dl, doc, "", doc.Size, maxBytes)
 		if err != nil {
 			return documentManifest{}, fmt.Errorf("download document %d: %w", doc.ID, err)
 		}
@@ -777,7 +888,7 @@ func fetchDocument(ctx context.Context, api *tg.Client, dl *downloader.Downloade
 	if skipThumbs {
 		return dm, nil
 	}
-	thumbs, missingThumbs, err := fetchThumbs(ctx, api, dl, root, doc, maxBytes, allowedMissingThumbs)
+	thumbs, missingThumbs, err := fetchThumbs(ctx, router, dl, root, doc, maxBytes, allowedMissingThumbs)
 	if err != nil {
 		return documentManifest{}, err
 	}
@@ -786,7 +897,7 @@ func fetchDocument(ctx context.Context, api *tg.Client, dl *downloader.Downloade
 	return dm, nil
 }
 
-func fetchThumbs(ctx context.Context, api *tg.Client, dl *downloader.Downloader, root string, doc *tg.Document, maxBytes int64, allowedMissingThumbs map[string]struct{}) ([]fileArtifact, []missingThumb, error) {
+func fetchThumbs(ctx context.Context, router *mediaRouter, dl *downloader.Downloader, root string, doc *tg.Document, maxBytes int64, allowedMissingThumbs map[string]struct{}) ([]fileArtifact, []missingThumb, error) {
 	seen := make(map[string]struct{})
 	artifacts := make([]fileArtifact, 0, len(doc.Thumbs)+len(doc.VideoThumbs))
 	missing := make([]missingThumb, 0)
@@ -822,7 +933,7 @@ func fetchThumbs(ctx context.Context, api *tg.Client, dl *downloader.Downloader,
 			if err == nil && !reused {
 				downloadAttempted = true
 				fmt.Printf("[network fetch] document=%d resource=photo-thumb type=%s expected_size=%d part_size=%d\n", doc.ID, thumbType, expectedSize, downloadPartSize(expectedSize))
-				data, err = download(ctx, api, dl, doc, thumbType, expectedSize, maxBytes)
+				data, err = downloadWithRetry(ctx, router, dl, doc, thumbType, expectedSize, maxBytes)
 			}
 		case *tg.PhotoSizeProgressive:
 			if len(value.Sizes) == 0 {
@@ -838,7 +949,7 @@ func fetchThumbs(ctx context.Context, api *tg.Client, dl *downloader.Downloader,
 			if err == nil && !reused {
 				downloadAttempted = true
 				fmt.Printf("[network fetch] document=%d resource=photo-thumb-progressive type=%s expected_size=%d part_size=%d\n", doc.ID, thumbType, expectedSize, downloadPartSize(expectedSize))
-				data, err = download(ctx, api, dl, doc, thumbType, expectedSize, maxBytes)
+				data, err = downloadWithRetry(ctx, router, dl, doc, thumbType, expectedSize, maxBytes)
 			}
 		default:
 			continue
@@ -880,7 +991,7 @@ func fetchThumbs(ctx context.Context, api *tg.Client, dl *downloader.Downloader,
 		if err == nil && !reused {
 			downloadAttempted = true
 			fmt.Printf("[network fetch] document=%d resource=video-thumb type=%s expected_size=%d part_size=%d\n", doc.ID, value.Type, value.Size, downloadPartSize(int64(value.Size)))
-			data, err = download(ctx, api, dl, doc, value.Type, int64(value.Size), maxBytes)
+			data, err = downloadWithRetry(ctx, router, dl, doc, value.Type, int64(value.Size), maxBytes)
 		}
 		if err != nil {
 			if downloadAttempted && missingThumbAllowed(allowedMissingThumbs, doc.ID, "video", value.Type) {
@@ -909,6 +1020,212 @@ func fetchThumbs(ctx context.Context, api *tg.Client, dl *downloader.Downloader,
 		return missing[i].Type < missing[j].Type
 	})
 	return artifacts, missing, nil
+}
+
+// mediaRouter hands every resource download to the tg.Client whose
+// connection actually stores the document. Documents carry the DC that
+// stores them (tg.Document.DCID); on the Telegram test server the gift
+// catalog lives on DC 2 while all documents live on DC 1, so blind downloads
+// through the session connection trigger upload.getFile's FILE_MIGRATE
+// handling. The automatic gotd migration cannot be used here: its
+// sub-connection creator does not apply the test-server DC id shift
+// (dc+10000), the handshake answers "wrong DC" (protocol error 444) forever,
+// and the download stalls. Explicit per-DC clients with one auth
+// export/import round-trip avoid that path entirely.
+type mediaRouter struct {
+	main    *tg.Client
+	mainDC  int
+	remotes remoteInvoker
+}
+
+type remoteInvoker interface {
+	acquire(ctx context.Context, dc int) (*tg.Client, error)
+}
+
+func (r *mediaRouter) forDocument(ctx context.Context, doc *tg.Document, forcedDC int) (*tg.Client, error) {
+	target := forcedDC
+	if target == 0 {
+		target = doc.DCID
+	}
+	if target <= 0 || target == r.mainDC {
+		return r.main, nil
+	}
+	api, err := r.remotes.acquire(ctx, target)
+	if err != nil {
+		return nil, fmt.Errorf("route document %d to DC %d: %w", doc.ID, target, err)
+	}
+	return api, nil
+}
+
+// migrationTargetDC extracts the DC id from gotd's automatic migration
+// failure ("create connection to DC %d: ..."), which surfaces when
+// upload.getFile answered FILE_MIGRATE_<dc> on the session connection. It is
+// a fallback for documents that do not carry a usable DCID.
+func migrationTargetDC(err error) (int, bool) {
+	var re = regexp.MustCompile(`create connection to DC (\d+)`)
+	match := re.FindStringSubmatch(err.Error())
+	if match == nil {
+		return 0, false
+	}
+	dc, parseErr := strconv.Atoi(match[1])
+	if parseErr != nil || dc <= 0 {
+		return 0, false
+	}
+	return dc, true
+}
+
+// remoteDCs owns one lazily started telegram.Client per file DC. Every client
+// generates its own auth key (the primary connection path applies the test
+// DC id shift correctly) and receives the session authorization through a
+// single auth.exportAuthorization/auth.importAuthorization pair.
+type remoteDCs struct {
+	parent  context.Context
+	dcList  dcs.List
+	mainAPI *tg.Client
+
+	mu      sync.Mutex
+	clients map[int]*remoteClient
+}
+
+type remoteClient struct {
+	ready chan struct{}
+	mu    sync.Mutex
+	api   *tg.Client
+	err   error
+}
+
+func newRemoteDCs(parent context.Context, dcList dcs.List, mainAPI *tg.Client) *remoteDCs {
+	return &remoteDCs{
+		parent:  parent,
+		dcList:  dcList,
+		mainAPI: mainAPI,
+		clients: make(map[int]*remoteClient),
+	}
+}
+
+func (r *remoteDCs) acquire(ctx context.Context, dc int) (*tg.Client, error) {
+	r.mu.Lock()
+	client, ok := r.clients[dc]
+	if !ok {
+		client = &remoteClient{ready: make(chan struct{})}
+		r.clients[dc] = client
+		go r.start(dc, client)
+	}
+	r.mu.Unlock()
+	select {
+	case <-client.ready:
+		return client.api, client.err
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+func (r *remoteDCs) start(dc int, client *remoteClient) {
+	runCtx, cancel := context.WithCancel(r.parent)
+	defer cancel()
+	second := telegram.NewClient(apiID, apiHash, telegram.Options{DC: dc, DCList: r.dcList})
+	var connected *tg.Client
+	err := second.Run(runCtx, func(ctx context.Context) error {
+		connectCtx, cancel := context.WithTimeout(ctx, mediaConnectTimeout)
+		defer cancel()
+		exported, err := r.mainAPI.AuthExportAuthorization(connectCtx, dc)
+		if err != nil {
+			return fmt.Errorf("export auth to DC %d: %w", dc, err)
+		}
+		if _, err := tg.NewClient(second).AuthImportAuthorization(connectCtx, &tg.AuthImportAuthorizationRequest{
+			ID:    exported.ID,
+			Bytes: exported.Bytes,
+		}); err != nil {
+			return fmt.Errorf("import auth to DC %d: %w", dc, err)
+		}
+		connected = second.API()
+		client.mu.Lock()
+		client.api = connected
+		client.mu.Unlock()
+		close(client.ready)
+		// Keep the client alive for the rest of the dump; returning would
+		// stop Run and tear the connection down.
+		<-ctx.Done()
+		return ctx.Err()
+	})
+	cancel()
+	if connected == nil {
+		client.mu.Lock()
+		if err == nil {
+			err = errors.New("file DC connection closed before becoming ready")
+		}
+		client.err = fmt.Errorf("connect to DC %d: %w", dc, err)
+		client.mu.Unlock()
+		close(client.ready)
+		// Drop the failed instance so a retry starts a fresh client.
+		r.mu.Lock()
+		delete(r.clients, dc)
+		r.mu.Unlock()
+	}
+}
+
+// downloadWithRetry bounds every attempt with a per-resource deadline and
+// retries transient failures (the attempt's own timeout, FLOOD_WAIT) a few
+// times before the caller records the resource as failed. Permanent errors
+// are returned immediately: retrying cannot help there.
+func downloadWithRetry(ctx context.Context, router *mediaRouter, dl *downloader.Downloader, doc *tg.Document, thumbType string, expectedSize, maxBytes int64) ([]byte, error) {
+	resource := "document"
+	if thumbType != "" {
+		resource = "thumb:" + thumbType
+	}
+	var lastErr error
+	forcedDC := 0
+	for attempt := 1; attempt <= downloadAttempts; attempt++ {
+		api, routeErr := router.forDocument(ctx, doc, forcedDC)
+		if routeErr != nil {
+			return nil, routeErr
+		}
+		attemptCtx, cancel := context.WithTimeout(ctx, downloadTimeout(expectedSize))
+		data, err := download(attemptCtx, api, dl, doc, thumbType, expectedSize, maxBytes)
+		cancel()
+		if err == nil {
+			return data, nil
+		}
+		if ctx.Err() != nil {
+			// The whole run is winding down; report immediately.
+			return nil, err
+		}
+		lastErr = err
+		if forcedDC == 0 {
+			if dc, ok := migrationTargetDC(err); ok {
+				forcedDC = dc
+			}
+		}
+		var wait time.Duration
+		if floodWait, isFlood := tgerr.AsFloodWait(err); isFlood {
+			wait = floodWait + floodWaitMargin
+		} else if !errors.Is(err, context.DeadlineExceeded) {
+			// Permanent failure (invalid location, size limits, ...):
+			// retrying cannot help, let the caller record it.
+			return nil, err
+		} else {
+			wait = time.Duration(attempt) * 2 * time.Second
+		}
+		fmt.Printf("[download retry] document=%d resource=%s attempt=%d wait=%s error=%v\n", doc.ID, resource, attempt, wait, err)
+		timer := time.NewTimer(wait)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return nil, ctx.Err()
+		case <-timer.C:
+		}
+	}
+	return nil, lastErr
+}
+
+// downloadTimeout bounds one download attempt: enough for the initial chunk
+// plus one second per additional 64 KiB part.
+func downloadTimeout(expectedSize int64) time.Duration {
+	timeout := downloadBaseTimeout
+	if expectedSize > 64<<10 {
+		timeout += time.Duration(expectedSize/(64<<10)) * time.Second
+	}
+	return timeout
 }
 
 func download(ctx context.Context, api *tg.Client, dl *downloader.Downloader, doc *tg.Document, thumbType string, expectedSize, maxBytes int64) ([]byte, error) {
@@ -1073,6 +1390,12 @@ func buildDCList(test bool, dc int, addr string) (dcs.List, error) {
 		}
 		return list, nil
 	}
+	return applyAddrOverride(list, dc, addr)
+}
+
+// applyAddrOverride replaces every option of the chosen DC with a single
+// explicit host:port entry so private deployments stay reachable.
+func applyAddrOverride(list dcs.List, dc int, addr string) (dcs.List, error) {
 	host, portRaw, err := net.SplitHostPort(addr)
 	if err != nil {
 		return dcs.List{}, fmt.Errorf("invalid -addr %q: %v", addr, err)
@@ -1094,6 +1417,111 @@ func buildDCList(test bool, dc int, addr string) (dcs.List, error) {
 	options = append(options, tg.DCOption{ID: dc, IPAddress: host, Port: port, Ipv6: strings.Contains(host, ":")})
 	list.Options = options
 	return list, nil
+}
+
+// refreshDCList asks the connected server for its authoritative DC addresses
+// (help.getConfig) and rebuilds the DC list from that response. The static
+// lists compiled into the td runtime go stale: as of November 2026 the test
+// DC 1 address they ship no longer matches the live server, and every
+// FILE_MIGRATE to DC 1 died in an endless "wrong DC" (protocol error 444)
+// reconnect loop. The server-provided config cannot go stale.
+func refreshDCList(ctx context.Context, base dcs.List, dc int, addrOverride string) (dcs.List, error) {
+	bootstrapCtx, cancel := context.WithTimeout(ctx, metadataTimeout)
+	defer cancel()
+	bootstrap := telegram.NewClient(apiID, apiHash, telegram.Options{DC: dc, DCList: base})
+	var configOptions []tg.DCOption
+	if err := bootstrap.Run(bootstrapCtx, func(ctx context.Context) error {
+		cfg, err := bootstrap.API().HelpGetConfig(ctx)
+		if err != nil {
+			return fmt.Errorf("help.getConfig: %w", err)
+		}
+		configOptions = cfg.DCOptions
+		return nil
+	}); err != nil {
+		return dcs.List{}, err
+	}
+	resolved, err := buildResolvedDCList(base, configOptions)
+	if err != nil {
+		return dcs.List{}, err
+	}
+	if addrOverride != "" {
+		resolved, err = applyAddrOverride(resolved, dc, addrOverride)
+		if err != nil {
+			return dcs.List{}, err
+		}
+	}
+	return resolved, nil
+}
+
+// buildResolvedDCList converts help.getConfig DC options into the dcs.List
+// giftfetch hands to the td runtime, deduplicating entries and preserving
+// the built-in list only for DCs the server did not describe.
+func buildResolvedDCList(base dcs.List, configOptions []tg.DCOption) (dcs.List, error) {
+	if len(configOptions) == 0 {
+		return dcs.List{}, fmt.Errorf("server config contains no DC options")
+	}
+	type optionKey struct {
+		id   int
+		addr string
+		port int
+		ipv6 bool
+	}
+	seen := make(map[optionKey]struct{}, len(configOptions))
+	options := make([]tg.DCOption, 0, len(configOptions))
+	for _, option := range configOptions {
+		if option.ID <= 0 || option.IPAddress == "" || option.Port <= 0 {
+			continue
+		}
+		key := optionKey{id: option.ID, addr: option.IPAddress, port: option.Port, ipv6: option.Ipv6}
+		if _, duplicate := seen[key]; duplicate {
+			continue
+		}
+		seen[key] = struct{}{}
+		options = append(options, option)
+	}
+	covered := make(map[int]struct{}, len(options))
+	for _, option := range options {
+		covered[option.ID] = struct{}{}
+	}
+	for _, option := range base.Options {
+		if _, ok := covered[option.ID]; ok {
+			continue
+		}
+		options = append(options, option)
+		covered[option.ID] = struct{}{}
+	}
+	if len(options) == 0 {
+		return dcs.List{}, fmt.Errorf("resolved DC list is empty")
+	}
+	return dcs.List{Options: options, Test: base.Test}, nil
+}
+
+func dcIDs(list dcs.List) []int {
+	seen := make(map[int]struct{}, len(list.Options))
+	ids := make([]int, 0, len(list.Options))
+	for _, option := range list.Options {
+		if _, ok := seen[option.ID]; ok {
+			continue
+		}
+		seen[option.ID] = struct{}{}
+		ids = append(ids, option.ID)
+	}
+	sort.Ints(ids)
+	return ids
+}
+
+func describeDCAddresses(list dcs.List, dc int) string {
+	addresses := make([]string, 0, 4)
+	for _, option := range list.Options {
+		if option.ID != dc || option.IPAddress == "" {
+			continue
+		}
+		addresses = append(addresses, fmt.Sprintf("%s:%d", option.IPAddress, option.Port))
+	}
+	if len(addresses) == 0 {
+		return "discovered at runtime"
+	}
+	return strings.Join(addresses, ",")
 }
 
 func dcListOption(list dcs.List, dc int) (tg.DCOption, bool) {

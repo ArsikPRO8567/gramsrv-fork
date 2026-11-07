@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -430,5 +431,170 @@ func TestIsSkippableDocumentError(t *testing.T) {
 	}
 	if isSkippableDocumentError(errors.New("document 2 has conflicting metadata")) {
 		t.Fatal("conflicting metadata must abort the run")
+	}
+}
+
+func TestBuildResolvedDCList(t *testing.T) {
+	base, err := buildDCList(true, 2, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The live test server reports DC 1 at a different address than the
+	// static list ships; the refreshed list must follow the server config.
+	configOptions := []tg.DCOption{
+		{ID: 1, IPAddress: "149.154.175.40", Port: 80},
+		{ID: 1, IPAddress: "149.154.175.40", Port: 80, Static: true},
+		{ID: 1, Ipv6: true, IPAddress: "2001:0b28:f23d:f001:0000:0000:0000:000e", Port: 443},
+		{ID: 2, IPAddress: "149.154.167.40", Port: 443, Static: true},
+		{ID: 2, IPAddress: "149.154.167.40", Port: 443},
+		{ID: 2, Ipv6: true, IPAddress: "2001:067c:04e8:f002:0000:0000:0000:000e", Port: 443},
+		{ID: 3, IPAddress: "149.154.175.117", Port: 443, Static: true},
+		// Malformed entries must be dropped.
+		{ID: 0, IPAddress: "127.0.0.1", Port: 443},
+		{ID: 4, IPAddress: "", Port: 443},
+		{ID: 4, IPAddress: "127.0.0.1", Port: 0},
+	}
+	resolved, err := buildResolvedDCList(base, configOptions)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !resolved.Test {
+		t.Fatal("resolved list must keep the test flag")
+	}
+	dc1 := dcIDs(resolved)
+	if len(dc1) != 3 {
+		t.Fatalf("resolved DCs = %v, want 3 DCs", dc1)
+	}
+	if option, ok := dcListOption(resolved, 1); !ok || option.IPAddress != "149.154.175.40" || option.Port != 80 {
+		t.Fatalf("DC 1 option = %+v, want 149.154.175.40:80 from the server config", option)
+	}
+	addresses := describeDCAddresses(resolved, 1)
+	if !strings.Contains(addresses, "149.154.175.40:80") || strings.Contains(addresses, "149.154.175.10") {
+		t.Fatalf("DC 1 addresses = %q, stale static address must be gone", addresses)
+	}
+	for _, option := range resolved.Options {
+		if option.ID == 0 || option.IPAddress == "" || option.Port <= 0 {
+			t.Fatalf("resolved list kept malformed option %+v", option)
+		}
+	}
+}
+
+func TestBuildResolvedDCListFallsBackToBase(t *testing.T) {
+	base, err := buildDCList(true, 2, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A DC the server did not describe must stay covered by the base list.
+	resolved, err := buildResolvedDCList(base, []tg.DCOption{{ID: 2, IPAddress: "149.154.167.40", Port: 443}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, dc := range []int{1, 2, 3} {
+		if !dcListHas(resolved, dc) {
+			t.Fatalf("resolved list lost DC %d", dc)
+		}
+	}
+	if option, ok := dcListOption(resolved, 1); !ok || option.IPAddress != "149.154.175.10" {
+		t.Fatalf("DC 1 fallback option = %+v, want the built-in address", option)
+	}
+	if _, err := buildResolvedDCList(base, nil); err == nil {
+		t.Fatal("empty server config must be an error")
+	}
+}
+
+func TestApplyAddrOverrideReplacesAllOptions(t *testing.T) {
+	base, err := buildDCList(true, 2, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	overridden, err := applyAddrOverride(base, 2, "127.0.0.1:8443")
+	if err != nil {
+		t.Fatal(err)
+	}
+	count := 0
+	for _, option := range overridden.Options {
+		if option.ID == 2 {
+			count++
+			if option.IPAddress != "127.0.0.1" || option.Port != 8443 || option.Ipv6 {
+				t.Fatalf("overridden DC 2 option = %+v", option)
+			}
+		}
+	}
+	if count != 1 {
+		t.Fatalf("DC 2 options after override = %d, want 1", count)
+	}
+	if !dcListHas(overridden, 1) {
+		t.Fatal("override must keep other DCs untouched")
+	}
+	if _, err := applyAddrOverride(base, 2, "no-port"); err == nil {
+		t.Fatal("invalid override address must be rejected")
+	}
+}
+
+func TestDownloadTimeout(t *testing.T) {
+	if got := downloadTimeout(36847); got != downloadBaseTimeout {
+		t.Fatalf("downloadTimeout(36847) = %s, want %s", got, downloadBaseTimeout)
+	}
+	if got := downloadTimeout(16 << 20); got <= downloadBaseTimeout {
+		t.Fatalf("downloadTimeout(16MiB) = %s, want scaled above %s", got, downloadBaseTimeout)
+	}
+}
+
+func TestSkipLogCountKind(t *testing.T) {
+	logs := &skipLog{}
+	logs.add(skippedItemManifest{Kind: "document", DocumentID: 1})
+	logs.add(skippedItemManifest{Kind: "document", DocumentID: 2})
+	logs.add(skippedItemManifest{Kind: "regular-gift", GiftID: 3})
+	if got := logs.countKind("document"); got != 2 {
+		t.Fatalf("countKind(document) = %d, want 2", got)
+	}
+	if got := logs.countKind("regular-gift"); got != 1 {
+		t.Fatalf("countKind(regular-gift) = %d, want 1", got)
+	}
+	if got := len(logs.snapshot()); got != 3 {
+		t.Fatalf("snapshot length = %d, want 3", got)
+	}
+}
+
+type fakeRemoteInvoker struct {
+	requested []int
+	client    *tg.Client
+}
+
+func (f *fakeRemoteInvoker) acquire(ctx context.Context, dc int) (*tg.Client, error) {
+	f.requested = append(f.requested, dc)
+	return f.client, nil
+}
+
+func TestMediaRouterForDocument(t *testing.T) {
+	main := &tg.Client{}
+	remote := &tg.Client{}
+	remotes := &fakeRemoteInvoker{client: remote}
+	router := &mediaRouter{main: main, mainDC: 2, remotes: remotes}
+
+	if api, err := router.forDocument(context.Background(), &tg.Document{ID: 1, DCID: 2}, 0); err != nil || api != main {
+		t.Fatalf("document on the session DC must use the main client, got %v, %v", api, err)
+	}
+	if api, err := router.forDocument(context.Background(), &tg.Document{ID: 2, DCID: 0}, 0); err != nil || api != main {
+		t.Fatalf("document without DCID must fall back to the main client, got %v, %v", api, err)
+	}
+	if api, err := router.forDocument(context.Background(), &tg.Document{ID: 3, DCID: 1}, 0); err != nil || api != remote {
+		t.Fatalf("document on DC 1 must be routed to the remote client, got %v, %v", api, err)
+	}
+	if api, err := router.forDocument(context.Background(), &tg.Document{ID: 4, DCID: 2}, 1); err != nil || api != remote {
+		t.Fatalf("forced DC must override the document DCID, got %v, %v", api, err)
+	}
+	if len(remotes.requested) != 2 || remotes.requested[0] != 1 || remotes.requested[1] != 1 {
+		t.Fatalf("remotes requested = %v, want [1 1]", remotes.requested)
+	}
+}
+
+func TestMigrationTargetDC(t *testing.T) {
+	dc, ok := migrationTargetDC(errors.New("download document 5: create connection to DC 1: transfer: onTransfer: export to 1: boom"))
+	if !ok || dc != 1 {
+		t.Fatalf("migrationTargetDC = (%d, %v), want (1, true)", dc, ok)
+	}
+	if _, ok := migrationTargetDC(errors.New("download document 5: FLOOD_WAIT_10")); ok {
+		t.Fatal("non-migration errors must not yield a target DC")
 	}
 }

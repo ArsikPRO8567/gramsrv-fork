@@ -19,6 +19,18 @@ func loadTestTelethonSession(t *testing.T) []byte {
 	return raw
 }
 
+// loadTestTelethonSessionRowidAlias returns a fixture that reproduces the
+// real Telethon 1.x layout: dc_id is declared INTEGER PRIMARY KEY, so SQLite
+// stores NULL in the record and keeps the value in the cell rowid.
+func loadTestTelethonSessionRowidAlias(t *testing.T) []byte {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join("testdata", "telethon-session-sqlite-rowid-alias.bin"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return raw
+}
+
 // fixtureTelethonKey mirrors the auth key embedded in
 // testdata/telethon-session-sqlite.bin (bytes 0..255).
 var fixtureTelethonKey = func() []byte {
@@ -149,6 +161,95 @@ func TestResolveSessionPathRejectsBrokenSQLite(t *testing.T) {
 func TestConvertTelethonSessionRejectsNonSQLite(t *testing.T) {
 	if _, err := convertTelethonSession([]byte("not a database")); err == nil {
 		t.Fatal("expected error for non-SQLite payload")
+	}
+}
+
+// TestConvertTelethonSessionRowidAlias covers the schema Telethon actually
+// ships: dc_id INTEGER PRIMARY KEY stores NULL in the record and keeps the
+// value in the rowid. Regression test for the "sessions row has unexpected
+// column types" conversion failure.
+func TestConvertTelethonSessionRowidAlias(t *testing.T) {
+	converted, err := convertTelethonSession(loadTestTelethonSessionRowidAlias(t))
+	if err != nil {
+		t.Fatalf("convert: %v", err)
+	}
+	var envelope tdSessionEnvelope
+	if err := json.Unmarshal(converted, &envelope); err != nil {
+		t.Fatal(err)
+	}
+	if envelope.Version != 1 || envelope.Data.DC != 2 || envelope.Data.Addr != "149.154.167.40:443" {
+		t.Fatalf("converted session = version %d dc %d addr %q", envelope.Version, envelope.Data.DC, envelope.Data.Addr)
+	}
+	if string(envelope.Data.AuthKey) != string(fixtureTelethonKey) {
+		t.Fatal("converted auth key mismatch")
+	}
+	wantKeyID := crypto.Key(fixtureTelethonKey).ID()
+	if string(envelope.Data.AuthKeyID) != string(wantKeyID[:]) {
+		t.Fatal("converted auth key id mismatch")
+	}
+}
+
+func TestSQLiteRowidAliasColumn(t *testing.T) {
+	cases := []struct {
+		name   string
+		sql    string
+		want   string
+		wantOK bool
+	}{
+		{
+			name:   "column level telethon schema",
+			sql:    "CREATE TABLE sessions (\n dc_id integer primary key,\n server_address text,\n port integer,\n auth_key blob,\n takeout_id integer,\n tmp_auth_key blob\n)",
+			want:   "dc_id",
+			wantOK: true,
+		},
+		{
+			name:   "table level single integer key",
+			sql:    "CREATE TABLE t (id INTEGER, name TEXT, PRIMARY KEY (id))",
+			want:   "id",
+			wantOK: true,
+		},
+		{
+			name:   "column level desc is not an alias",
+			sql:    "CREATE TABLE t (id integer primary key desc, name text)",
+			want:   "",
+			wantOK: false,
+		},
+		{
+			name:   "table level desc is not an alias",
+			sql:    "CREATE TABLE t (id INTEGER, name TEXT, PRIMARY KEY (id DESC))",
+			want:   "",
+			wantOK: false,
+		},
+		{
+			name:   "composite key is not an alias",
+			sql:    "CREATE TABLE t (a integer, b integer, PRIMARY KEY (a, b))",
+			want:   "",
+			wantOK: false,
+		},
+		{
+			name:   "text primary key is not an alias",
+			sql:    "CREATE TABLE t (slug text primary key, n integer)",
+			want:   "",
+			wantOK: false,
+		},
+		{
+			name:   "without rowid never aliases",
+			sql:    "CREATE TABLE t (id integer primary key, name text) WITHOUT ROWID",
+			want:   "",
+			wantOK: false,
+		},
+		{
+			name:   "no primary key",
+			sql:    "CREATE TABLE t (a integer, b text)",
+			want:   "",
+			wantOK: false,
+		},
+	}
+	for _, tc := range cases {
+		got, ok := sqliteRowidAliasColumn(tc.sql)
+		if ok != tc.wantOK || got != tc.want {
+			t.Fatalf("%s: sqliteRowidAliasColumn = (%q, %v), want (%q, %v)", tc.name, got, ok, tc.want, tc.wantOK)
+		}
 	}
 }
 

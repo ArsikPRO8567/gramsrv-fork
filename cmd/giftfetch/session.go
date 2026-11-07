@@ -351,7 +351,9 @@ func signExtend(value int64, size int) int64 {
 // readTelethonSessionRow locates the sessions table via sqlite_master and
 // returns the columns Telethon stores: dc_id, server_address, port and
 // auth_key. Columns are resolved by name from the CREATE TABLE statement so
-// that column order changes across Telethon versions do not matter.
+// that column order changes across Telethon versions do not matter. When
+// dc_id is declared INTEGER PRIMARY KEY it aliases the rowid: SQLite then
+// stores NULL in the record and keeps the real value in the cell rowid.
 func readTelethonSessionRow(raw []byte) (dcID int, serverAddress string, port int, authKey []byte, err error) {
 	pageSize, err := sqlitePageSize(raw)
 	if err != nil {
@@ -404,25 +406,116 @@ func readTelethonSessionRow(raw []byte) (dcID int, serverAddress string, port in
 	portValue := row.values[index["port"]]
 	addrValue := row.values[index["server_address"]]
 	keyValue := row.values[index["auth_key"]]
-	if dcValue.kind != 1 || portValue.kind != 1 || addrValue.kind != 2 || keyValue.kind != 3 {
+	if portValue.kind != 1 || addrValue.kind != 2 || keyValue.kind != 3 {
 		return 0, "", 0, nil, fmt.Errorf("sessions row has unexpected column types")
 	}
-	if dcValue.int64 < 1 || dcValue.int64 > 5 {
-		return 0, "", 0, nil, fmt.Errorf("sessions row has invalid dc_id %d", dcValue.int64)
+	rowidAlias, hasRowidAlias := sqliteRowidAliasColumn(createSQL)
+	switch {
+	case dcValue.kind == 1:
+		dcID = int(dcValue.int64)
+	case dcValue.kind == 0 && hasRowidAlias && strings.EqualFold(rowidAlias, "dc_id"):
+		dcID = int(row.rowid)
+	default:
+		return 0, "", 0, nil, fmt.Errorf("sessions row has unexpected dc_id column type")
 	}
-	return int(dcValue.int64), addrValue.text, int(portValue.int64), keyValue.blob, nil
+	if dcID < 1 || dcID > 5 {
+		return 0, "", 0, nil, fmt.Errorf("sessions row has invalid dc_id %d", dcID)
+	}
+	return dcID, addrValue.text, int(portValue.int64), keyValue.blob, nil
 }
 
-// sqliteCreateTableColumns extracts the column names from a CREATE TABLE
-// statement, skipping table-level constraints.
-func sqliteCreateTableColumns(sql string) ([]string, error) {
+// sqliteRowidAliasColumn returns the name of the column that aliases the
+// SQLite rowid (INTEGER PRIMARY KEY), if any. SQLite stores NULL in such
+// columns and keeps the actual value in the b-tree cell rowid, so readers
+// must substitute the rowid for a NULL value of that column.
+func sqliteRowidAliasColumn(createSQL string) (string, bool) {
+	if strings.Contains(strings.ToLower(createSQL), "without rowid") {
+		return "", false
+	}
+	definitions, err := sqliteColumnDefinitions(createSQL)
+	if err != nil {
+		return "", false
+	}
+	types := make(map[string]string, len(definitions))
+	for _, definition := range definitions {
+		types[strings.ToLower(definition.name)] = strings.ToLower(definition.definition)
+	}
+	isIntegerColumn := func(name string) bool {
+		definition, ok := types[strings.ToLower(name)]
+		if !ok {
+			return false
+		}
+		_, rest := splitFirstToken(definition)
+		typeToken, _ := splitFirstToken(strings.TrimSpace(rest))
+		return typeToken == "integer"
+	}
+	// Column-level form: "dc_id integer primary key". PRIMARY KEY DESC does
+	// not alias the rowid, so a DESC marker disqualifies the column.
+	for _, definition := range definitions {
+		body := strings.ToLower(definition.definition)
+		if !strings.Contains(body, "primary key") {
+			continue
+		}
+		if after := body[strings.Index(body, "primary key")+len("primary key"):]; strings.HasPrefix(strings.TrimSpace(after), "desc") {
+			continue
+		}
+		if isIntegerColumn(definition.name) {
+			return definition.name, true
+		}
+	}
+	// Table-level form: "PRIMARY KEY (dc_id)" with a single INTEGER column.
+	for _, definition := range definitions {
+		body := strings.ToLower(definition.definition)
+		if !strings.HasPrefix(strings.TrimSpace(body), "primary") {
+			continue
+		}
+		open := strings.Index(body, "(")
+		closeIdx := strings.LastIndex(body, ")")
+		if open < 0 || closeIdx <= open {
+			continue
+		}
+		inner := strings.TrimSpace(body[open+1 : closeIdx])
+		if inner == "" || strings.Contains(inner, ",") {
+			// Composite keys never alias the rowid.
+			continue
+		}
+		tokens := strings.Fields(inner)
+		desc := false
+		for _, token := range tokens[1:] {
+			if token == "desc" {
+				desc = true
+				break
+			}
+		}
+		if desc {
+			continue
+		}
+		name := tokens[0]
+		if isIntegerColumn(unquoteIdentifier(name)) {
+			return unquoteIdentifier(name), true
+		}
+	}
+	return "", false
+}
+
+// sqliteColumnDefinition is one column definition from a CREATE TABLE
+// statement: the identifier plus the raw definition text.
+type sqliteColumnDefinition struct {
+	name       string
+	definition string
+}
+
+// sqliteColumnDefinitions extracts every top-level comma-separated
+// definition from a CREATE TABLE statement, including table-level
+// constraints (their name is the first token, for example "PRIMARY").
+func sqliteColumnDefinitions(sql string) ([]sqliteColumnDefinition, error) {
 	open := strings.Index(sql, "(")
 	close := strings.LastIndex(sql, ")")
 	if open < 0 || close <= open {
 		return nil, fmt.Errorf("cannot parse CREATE TABLE statement %q", sql)
 	}
 	body := sql[open+1 : close]
-	var columns []string
+	var definitions []sqliteColumnDefinition
 	var current strings.Builder
 	depth := 0
 	quote := byte(0)
@@ -432,16 +525,8 @@ func sqliteCreateTableColumns(sql string) ([]string, error) {
 		if definition == "" {
 			return
 		}
-		name, rest := splitFirstToken(definition)
-		_ = rest
-		upper := strings.ToUpper(name)
-		if depth == 0 && quote == 0 {
-			switch upper {
-			case "PRIMARY", "UNIQUE", "CHECK", "FOREIGN", "CONSTRAINT":
-				return
-			}
-		}
-		columns = append(columns, unquoteIdentifier(name))
+		name, _ := splitFirstToken(definition)
+		definitions = append(definitions, sqliteColumnDefinition{name: unquoteIdentifier(name), definition: definition})
 	}
 	for i := 0; i < len(body); i++ {
 		c := body[i]
@@ -476,6 +561,28 @@ func sqliteCreateTableColumns(sql string) ([]string, error) {
 		}
 	}
 	flush()
+	if len(definitions) == 0 {
+		return nil, fmt.Errorf("CREATE TABLE statement %q has no columns", sql)
+	}
+	return definitions, nil
+}
+
+// sqliteCreateTableColumns extracts the column names from a CREATE TABLE
+// statement, skipping table-level constraints.
+func sqliteCreateTableColumns(sql string) ([]string, error) {
+	definitions, err := sqliteColumnDefinitions(sql)
+	if err != nil {
+		return nil, err
+	}
+	var columns []string
+	for _, definition := range definitions {
+		upper := strings.ToUpper(definition.name)
+		switch upper {
+		case "PRIMARY", "UNIQUE", "CHECK", "FOREIGN", "CONSTRAINT":
+			continue
+		}
+		columns = append(columns, definition.name)
+	}
 	if len(columns) == 0 {
 		return nil, fmt.Errorf("CREATE TABLE statement %q has no columns", sql)
 	}
