@@ -1,17 +1,13 @@
 // Command giftfetch snapshots the official Telegram star-gift catalog, the
 // complete current upgrade-attribute pools, and all document resources
-// referenced by either response. It is a read-only fetcher: it never imports
-// data into telesrv and never copies the authorization session.
+// referenced by either response. Catalog entries whose sticker document is
+// unusable and unique-gift entries are skipped and reported in the manifest
+// instead of failing the whole snapshot. It is a read-only fetcher: it never
+// imports data into telesrv and never copies the authorization session.
 //
 // Usage:
 //
 //	SESSION=/path/to/session giftfetch -out <directory>
-//
-// By default it connects to the production Telegram DC list. Use -test to
-// snapshot the official Telegram test servers instead (test DC 2 is
-// 149.154.167.40:443) or pass -addr host:port to connect to an explicit
-// address. The session must be authorized on the same server it dumps: a
-// production session is not valid on the test servers and vice versa.
 package main
 
 import (
@@ -60,6 +56,8 @@ type catalogManifest struct {
 	Hash                     int                           `json:"hash"`
 	RawCatalog               fileArtifact                  `json:"raw_catalog"`
 	GiftCount                int                           `json:"gift_count"`
+	SkippedCount             int                           `json:"skipped_count"`
+	Skipped                  []skippedItemManifest         `json:"skipped,omitempty"`
 	ChatCount                int                           `json:"chat_count"`
 	UserCount                int                           `json:"user_count"`
 	UpgradeableGiftCount     int                           `json:"upgradeable_gift_count"`
@@ -195,16 +193,91 @@ type documentSource struct {
 
 type addDocumentFunc func(tg.DocumentClass, string) (*tg.Document, error)
 
+// Documents that the official server ships without a renderable sticker
+// attribute, or without a decodable document body at all, cannot be rendered
+// or imported by telesrv. giftfetch records the referencing gift or attribute
+// as skipped instead of failing the whole snapshot.
+var (
+	errInvalidStickerDocument = errors.New("invalid document")
+	errNoRenderableSticker    = errors.New("has neither sticker nor custom-emoji attribute")
+)
+
+func isSkippableDocumentError(err error) bool {
+	return errors.Is(err, errInvalidStickerDocument) || errors.Is(err, errNoRenderableSticker)
+}
+
+type skippedItemManifest struct {
+	CatalogIndex int    `json:"catalog_index,omitempty"`
+	Kind         string `json:"kind"`
+	GiftID       int64  `json:"gift_id,omitempty"`
+	DocumentID   int64  `json:"document_id,omitempty"`
+	Name         string `json:"name,omitempty"`
+	Reason       string `json:"reason"`
+}
+
+type skipLog struct {
+	items []skippedItemManifest
+}
+
+func (l *skipLog) add(item skippedItemManifest) {
+	l.items = append(l.items, item)
+}
+
+func giftClassIdentity(class tg.StarGiftClass) (string, int64) {
+	switch gift := class.(type) {
+	case *tg.StarGift:
+		return "regular-gift", gift.ID
+	case *tg.StarGiftUnique:
+		return "unique-gift", gift.ID
+	default:
+		return fmt.Sprintf("%T", class), 0
+	}
+}
+
+type documentRegistry struct {
+	sources map[int64]*documentSource
+}
+
+func newDocumentRegistry() *documentRegistry {
+	return &documentRegistry{sources: make(map[int64]*documentSource)}
+}
+
+func (r *documentRegistry) add(class tg.DocumentClass, purpose string) (*tg.Document, error) {
+	doc, ok := class.(*tg.Document)
+	if !ok || doc.ID == 0 {
+		return nil, fmt.Errorf("%s references %w %T", purpose, errInvalidStickerDocument, class)
+	}
+	if !hasRenderableStickerAttribute(doc) {
+		return doc, fmt.Errorf("%s document %d %w", purpose, doc.ID, errNoRenderableSticker)
+	}
+	existing := r.sources[doc.ID]
+	if existing == nil {
+		existing = &documentSource{document: doc, purposes: make(map[string]struct{})}
+		r.sources[doc.ID] = existing
+	} else if existing.document.Size != doc.Size || existing.document.MimeType != doc.MimeType {
+		return nil, fmt.Errorf("document %d has conflicting metadata", doc.ID)
+	}
+	existing.purposes[purpose] = struct{}{}
+	return doc, nil
+}
+
+func skippedDocumentID(doc *tg.Document) int64 {
+	if doc == nil {
+		return 0
+	}
+	return doc.ID
+}
+
 func main() {
 	outDir := flag.String("out", "", "output directory")
 	maxDocBytes := flag.Int64("max-document-bytes", defaultMaxDocBytes, "maximum bytes accepted for one document or thumbnail")
 	skipThumbs := flag.Bool("skip-thumbs", false, "download main documents only")
 	workers := flag.Int("workers", defaultWorkers, "concurrent document downloads")
-	reuseMetadata := flag.Bool("reuse-metadata", false, "reuse and strictly decode catalog.tl plus upgrade-attributes/*.tl instead of refetching metadata")
-	allowedMissingThumbsRaw := flag.String("allow-missing-thumb", "", "comma-separated document_id:photo|video:type entries that may be recorded as explicitly missing after a failed download")
 	testServer := flag.Bool("test", false, "connect to the official Telegram test DC list (test DC 2 = 149.154.167.40:443)")
 	dcID := flag.Int("dc", defaultDC, "DC id to connect to")
 	addrOverride := flag.String("addr", "", "explicit host:port replacing the chosen DC address")
+	reuseMetadata := flag.Bool("reuse-metadata", false, "reuse and strictly decode catalog.tl plus upgrade-attributes/*.tl instead of refetching metadata")
+	allowedMissingThumbsRaw := flag.String("allow-missing-thumb", "", "comma-separated document_id:photo|video:type entries that may be recorded as explicitly missing after a failed download")
 	flag.Parse()
 	if strings.TrimSpace(*outDir) == "" {
 		fmt.Fprintln(os.Stderr, "usage: SESSION=/path/to/session giftfetch -out <directory>")
@@ -229,41 +302,23 @@ func main() {
 		os.Exit(2)
 	}
 
-	if *dcID <= 0 {
-		*dcID = defaultDC
-	}
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Hour)
+	defer cancel()
 	dcList, err := buildDCList(*testServer, *dcID, strings.TrimSpace(*addrOverride))
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "ERROR:", err)
 		os.Exit(2)
 	}
 	fmt.Printf("[target] mode=%s dc=%d addr=%s\n", modeName(*testServer), *dcID, describeConnectAddr(dcList, *dcID))
-
-	sessionPath := session
-	switch detected, detectErr := detectSessionFormat(sessionPath); {
-	case detectErr != nil:
-		fmt.Fprintln(os.Stderr, "ERROR:", detectErr)
+	resolvedSession, err := resolveSessionPath(session)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "ERROR:", err)
 		os.Exit(2)
-	case detected == sessionFormatSQLite:
-		converted, created, convertErr := convertTelethonSession(sessionPath)
-		if convertErr != nil {
-			fmt.Fprintln(os.Stderr, "ERROR:", convertErr)
-			os.Exit(1)
-		}
-		if created {
-			fmt.Printf("[session] telethon .session converted -> %s\n", converted)
-		} else {
-			fmt.Printf("[session] reusing converted session %s\n", converted)
-		}
-		sessionPath = converted
 	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Hour)
-	defer cancel()
 	client := telegram.NewClient(apiID, apiHash, telegram.Options{
 		DC:             *dcID,
 		DCList:         dcList,
-		SessionStorage: &telegram.FileSessionStorage{Path: sessionPath},
+		SessionStorage: &telegram.FileSessionStorage{Path: resolvedSession},
 	})
 	if err := client.Run(ctx, func(ctx context.Context) error {
 		status, err := client.Auth().Status(ctx)
@@ -279,80 +334,6 @@ func main() {
 		fmt.Fprintln(os.Stderr, "ERROR:", err)
 		os.Exit(1)
 	}
-}
-
-// buildDCList returns the DC list giftfetch connects with. test selects the
-// official Telegram test servers instead of production; addr replaces every
-// address recorded for dc so the initial connection goes to exactly that
-// host:port (mirrors, staging deployments, or non-standard ports). The list
-// seeds the client config, so the first connection uses it directly and the
-// server-side config refresh keeps the flow on the same environment.
-func buildDCList(test bool, dc int, addr string) (dcs.List, error) {
-	list := dcs.Prod()
-	if test {
-		list = dcs.Test()
-	}
-	if addr == "" {
-		if !dcListHas(list, dc) {
-			return dcs.List{}, fmt.Errorf("DC %d is missing from the %s DC list; pass -addr host:port to connect explicitly", dc, modeName(test))
-		}
-		return list, nil
-	}
-	host, portRaw, err := net.SplitHostPort(addr)
-	if err != nil {
-		return dcs.List{}, fmt.Errorf("-addr must be host:port: %w", err)
-	}
-	port, err := strconv.Atoi(portRaw)
-	if err != nil || port <= 0 || port > 65535 {
-		return dcs.List{}, fmt.Errorf("-addr port %q is invalid", portRaw)
-	}
-	host = strings.TrimSpace(host)
-	if host == "" {
-		return dcs.List{}, fmt.Errorf("-addr host is empty")
-	}
-	options := make([]tg.DCOption, 0, len(list.Options)+1)
-	for _, option := range list.Options {
-		if option.ID == dc {
-			continue
-		}
-		options = append(options, option)
-	}
-	options = append(options, tg.DCOption{
-		ID:        dc,
-		IPAddress: host,
-		Port:      port,
-		Ipv6:      strings.Contains(host, ":"),
-	})
-	list.Options = options
-	return list, nil
-}
-
-func dcListOption(list dcs.List, dc int) (tg.DCOption, bool) {
-	for _, option := range list.Options {
-		if option.ID == dc {
-			return option, true
-		}
-	}
-	return tg.DCOption{}, false
-}
-
-func dcListHas(list dcs.List, dc int) bool {
-	_, ok := dcListOption(list, dc)
-	return ok
-}
-
-func describeConnectAddr(list dcs.List, dc int) string {
-	if option, ok := dcListOption(list, dc); ok {
-		return fmt.Sprintf("%s:%d", option.IPAddress, option.Port)
-	}
-	return "unknown"
-}
-
-func modeName(test bool) string {
-	if test {
-		return "test"
-	}
-	return "production"
 }
 
 func fetchCatalog(ctx context.Context, api *tg.Client, outDir string, maxDocBytes int64, skipThumbs bool, workers int, reuseMetadata bool, allowedMissingThumbs map[string]struct{}) error {
@@ -396,44 +377,55 @@ func fetchCatalog(ctx context.Context, api *tg.Client, outDir string, maxDocByte
 		Schema:       2,
 		Hash:         catalog.Hash,
 		RawCatalog:   rawArtifact,
-		GiftCount:    len(catalog.Gifts),
 		ChatCount:    len(catalog.Chats),
 		UserCount:    len(catalog.Users),
-		BoundaryNote: "payments.getStarGifts(hash=0) plus payments.getStarGiftUpgradeAttributes for every currently upgradeable base gift: complete current official attribute definitions and referenced documents, not deleted historical definitions or precomputed model-pattern-backdrop combinations",
+		BoundaryNote: "payments.getStarGifts(hash=0) plus payments.getStarGiftUpgradeAttributes for every currently upgradeable base gift: complete current official attribute definitions and referenced documents, not deleted historical definitions or precomputed model-pattern-backdrop combinations; gifts with unusable sticker documents and unique-gift entries are skipped and listed under skipped, the raw catalog.tl snapshot keeps every server entry",
 	}
 
-	documents := make(map[int64]*documentSource)
-	addDocument := func(class tg.DocumentClass, purpose string) (*tg.Document, error) {
-		doc, ok := class.(*tg.Document)
-		if !ok || doc.ID == 0 {
-			return nil, fmt.Errorf("%s references invalid document %T", purpose, class)
-		}
-		if !hasRenderableStickerAttribute(doc) {
-			return nil, fmt.Errorf("%s document %d has neither sticker nor custom-emoji attribute", purpose, doc.ID)
-		}
-		existing := documents[doc.ID]
-		if existing == nil {
-			existing = &documentSource{document: doc, purposes: make(map[string]struct{})}
-			documents[doc.ID] = existing
-		} else if existing.document.Size != doc.Size || existing.document.MimeType != doc.MimeType {
-			return nil, fmt.Errorf("document %d has conflicting metadata", doc.ID)
-		}
-		existing.purposes[purpose] = struct{}{}
-		return doc, nil
-	}
+	registry := newDocumentRegistry()
+	addDocument := registry.add
+	skips := &skipLog{}
+	skippedGiftIDs := make(map[int64]struct{})
 
 	for index, class := range catalog.Gifts {
+		if unique, ok := class.(*tg.StarGiftUnique); ok {
+			// telesrv imports only regular catalog gifts; unique entries stay
+			// available in the raw catalog.tl snapshot.
+			reason := "unique gift entries are not importable as official gifts; the raw catalog.tl snapshot keeps the full entry"
+			skippedGiftIDs[unique.ID] = struct{}{}
+			skips.add(skippedItemManifest{CatalogIndex: index, Kind: "unique-gift", GiftID: unique.ID, Reason: reason})
+			fmt.Printf("[skipped gift] index=%d id=%d kind=unique-gift reason=%s\n", index, unique.ID, reason)
+			continue
+		}
 		gm, err := collectGift(index, class, addDocument)
 		if err != nil {
-			return err
+			if !isSkippableDocumentError(err) {
+				return err
+			}
+			kind, giftID := giftClassIdentity(class)
+			skippedGiftIDs[giftID] = struct{}{}
+			skips.add(skippedItemManifest{CatalogIndex: index, Kind: kind, GiftID: giftID, Reason: err.Error()})
+			fmt.Printf("[skipped gift] index=%d id=%d kind=%s reason=%v\n", index, giftID, kind, err)
+			continue
 		}
 		manifest.Gifts = append(manifest.Gifts, gm)
 	}
+	manifest.GiftCount = len(manifest.Gifts)
 
 	upgradeableGiftIDs := collectUpgradeableGiftIDs(catalog.Gifts)
+	if len(skippedGiftIDs) > 0 {
+		filtered := make([]int64, 0, len(upgradeableGiftIDs))
+		for _, giftID := range upgradeableGiftIDs {
+			if _, skipped := skippedGiftIDs[giftID]; skipped {
+				continue
+			}
+			filtered = append(filtered, giftID)
+		}
+		upgradeableGiftIDs = filtered
+	}
 	manifest.UpgradeableGiftCount = len(upgradeableGiftIDs)
 	for _, giftID := range upgradeableGiftIDs {
-		attributeSet, err := fetchUpgradeAttributeSet(ctx, api, outDir, giftID, addDocument, reuseMetadata)
+		attributeSet, err := fetchUpgradeAttributeSet(ctx, api, outDir, giftID, addDocument, reuseMetadata, skips)
 		if err != nil {
 			return err
 		}
@@ -448,12 +440,12 @@ func fetchCatalog(ctx context.Context, api *tg.Client, outDir string, maxDocByte
 	if manifest.UpgradeAttributeSetCount != manifest.UpgradeableGiftCount {
 		return fmt.Errorf("upgrade attribute set count mismatch: got %d want %d", manifest.UpgradeAttributeSetCount, manifest.UpgradeableGiftCount)
 	}
-	if len(documents) > maxDocuments {
-		return fmt.Errorf("catalog and upgrade attributes reference %d documents, limit is %d", len(documents), maxDocuments)
+	if len(registry.sources) > maxDocuments {
+		return fmt.Errorf("catalog and upgrade attributes reference %d documents, limit is %d", len(registry.sources), maxDocuments)
 	}
 
-	ids := make([]int64, 0, len(documents))
-	for id := range documents {
+	ids := make([]int64, 0, len(registry.sources))
+	for id := range registry.sources {
 		ids = append(ids, id)
 	}
 	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
@@ -476,7 +468,7 @@ func fetchCatalog(ctx context.Context, api *tg.Client, outDir string, maxDocByte
 					}
 				}
 			})
-			dm, err := fetchDocument(downloadCtx, api, dl, outDir, documents[id], maxDocBytes, skipThumbs, allowedMissingThumbs)
+			dm, err := fetchDocument(downloadCtx, api, dl, outDir, registry.sources[id], maxDocBytes, skipThumbs, allowedMissingThumbs)
 			if err != nil {
 				return err
 			}
@@ -500,6 +492,9 @@ func fetchCatalog(ctx context.Context, api *tg.Client, outDir string, maxDocByte
 		manifest.Documents = append(manifest.Documents, dm)
 	}
 
+	manifest.SkippedCount = len(skips.items)
+	manifest.Skipped = skips.items
+
 	encoded, err := json.MarshalIndent(manifest, "", "  ")
 	if err != nil {
 		return err
@@ -507,7 +502,7 @@ func fetchCatalog(ctx context.Context, api *tg.Client, outDir string, maxDocByte
 	if err := writeFileAtomic(filepath.Join(outDir, "manifest.json"), append(encoded, '\n')); err != nil {
 		return err
 	}
-	fmt.Printf("[complete] gifts=%d attribute_sets=%d attributes=%d documents=%d missing_thumbs=%d bytes=%d manifest=%s\n", len(manifest.Gifts), len(manifest.UpgradeAttributeSets), manifest.UpgradeAttributeCount, len(manifest.Documents), manifest.MissingThumbCount, manifest.TotalBytes, filepath.Join(outDir, "manifest.json"))
+	fmt.Printf("[complete] gifts=%d attribute_sets=%d attributes=%d documents=%d missing_thumbs=%d skipped=%d bytes=%d manifest=%s\n", len(manifest.Gifts), len(manifest.UpgradeAttributeSets), manifest.UpgradeAttributeCount, len(manifest.Documents), manifest.MissingThumbCount, manifest.SkippedCount, manifest.TotalBytes, filepath.Join(outDir, "manifest.json"))
 	return nil
 }
 
@@ -523,7 +518,7 @@ func collectUpgradeableGiftIDs(classes []tg.StarGiftClass) []int64 {
 	return ids
 }
 
-func fetchUpgradeAttributeSet(ctx context.Context, api *tg.Client, root string, giftID int64, addDocument addDocumentFunc, reuseMetadata bool) (upgradeAttributeSetManifest, error) {
+func fetchUpgradeAttributeSet(ctx context.Context, api *tg.Client, root string, giftID int64, addDocument addDocumentFunc, reuseMetadata bool, skips *skipLog) (upgradeAttributeSetManifest, error) {
 	var result *tg.PaymentsStarGiftUpgradeAttributes
 	var rawArtifact fileArtifact
 	if reuseMetadata {
@@ -554,19 +549,19 @@ func fetchUpgradeAttributeSet(ctx context.Context, api *tg.Client, root string, 
 	if len(result.Attributes) > maxUpgradeAttrs {
 		return upgradeAttributeSetManifest{}, fmt.Errorf("gift %d has %d upgrade attributes, limit is %d", giftID, len(result.Attributes), maxUpgradeAttrs)
 	}
-	return collectUpgradeAttributes(giftID, result, rawArtifact, addDocument)
+	return collectUpgradeAttributes(giftID, result, rawArtifact, addDocument, skips)
 }
 
-func collectUpgradeAttributes(giftID int64, result *tg.PaymentsStarGiftUpgradeAttributes, rawArtifact fileArtifact, addDocument addDocumentFunc) (upgradeAttributeSetManifest, error) {
+func collectUpgradeAttributes(giftID int64, result *tg.PaymentsStarGiftUpgradeAttributes, rawArtifact fileArtifact, addDocument addDocumentFunc, skips *skipLog) (upgradeAttributeSetManifest, error) {
 	if result == nil {
 		return upgradeAttributeSetManifest{}, fmt.Errorf("gift %d has nil upgrade-attribute result", giftID)
 	}
 	set := upgradeAttributeSetManifest{
-		GiftID:         giftID,
-		RawAttributes:  rawArtifact,
-		AttributeCount: len(result.Attributes),
+		GiftID:        giftID,
+		RawAttributes: rawArtifact,
 	}
 	documentIDs := make(map[int64]struct{})
+	skippedAttributes := 0
 	for index, attribute := range result.Attributes {
 		switch value := attribute.(type) {
 		case *tg.StarGiftAttributeModel:
@@ -576,7 +571,13 @@ func collectUpgradeAttributes(giftID int64, result *tg.PaymentsStarGiftUpgradeAt
 			}
 			doc, err := addDocument(value.Document, fmt.Sprintf("gift:%d:upgrade-model:%s", giftID, value.Name))
 			if err != nil {
-				return upgradeAttributeSetManifest{}, err
+				if !isSkippableDocumentError(err) {
+					return upgradeAttributeSetManifest{}, err
+				}
+				skippedAttributes++
+				skips.add(skippedItemManifest{Kind: "upgrade-model", GiftID: giftID, DocumentID: skippedDocumentID(doc), Name: value.Name, Reason: err.Error()})
+				fmt.Printf("[skipped attribute] gift_id=%d kind=model name=%q reason=%v\n", giftID, value.Name, err)
+				continue
 			}
 			set.Models = append(set.Models, upgradeModelManifest{Name: value.Name, DocumentID: doc.ID, Crafted: value.GetCrafted(), Rarity: rarity})
 			documentIDs[doc.ID] = struct{}{}
@@ -587,7 +588,13 @@ func collectUpgradeAttributes(giftID int64, result *tg.PaymentsStarGiftUpgradeAt
 			}
 			doc, err := addDocument(value.Document, fmt.Sprintf("gift:%d:upgrade-pattern:%s", giftID, value.Name))
 			if err != nil {
-				return upgradeAttributeSetManifest{}, err
+				if !isSkippableDocumentError(err) {
+					return upgradeAttributeSetManifest{}, err
+				}
+				skippedAttributes++
+				skips.add(skippedItemManifest{Kind: "upgrade-pattern", GiftID: giftID, DocumentID: skippedDocumentID(doc), Name: value.Name, Reason: err.Error()})
+				fmt.Printf("[skipped attribute] gift_id=%d kind=pattern name=%q reason=%v\n", giftID, value.Name, err)
+				continue
 			}
 			set.Patterns = append(set.Patterns, upgradePatternManifest{Name: value.Name, DocumentID: doc.ID, Rarity: rarity})
 			documentIDs[doc.ID] = struct{}{}
@@ -608,8 +615,9 @@ func collectUpgradeAttributes(giftID int64, result *tg.PaymentsStarGiftUpgradeAt
 	if len(set.Models) == 0 || len(set.Patterns) == 0 || len(set.Backdrops) == 0 {
 		return upgradeAttributeSetManifest{}, fmt.Errorf("gift %d incomplete upgrade attributes: models=%d patterns=%d backdrops=%d", giftID, len(set.Models), len(set.Patterns), len(set.Backdrops))
 	}
-	if len(set.Models)+len(set.Patterns)+len(set.Backdrops) != set.AttributeCount {
-		return upgradeAttributeSetManifest{}, fmt.Errorf("gift %d parsed %d of %d upgrade attributes", giftID, len(set.Models)+len(set.Patterns)+len(set.Backdrops), set.AttributeCount)
+	set.AttributeCount = len(set.Models) + len(set.Patterns) + len(set.Backdrops)
+	if set.AttributeCount+skippedAttributes != len(result.Attributes) {
+		return upgradeAttributeSetManifest{}, fmt.Errorf("gift %d parsed %d of %d upgrade attributes", giftID, set.AttributeCount, len(result.Attributes))
 	}
 	for id := range documentIDs {
 		set.DocumentIDs = append(set.DocumentIDs, id)
@@ -1049,6 +1057,71 @@ func safePart(value string) string {
 		return "unknown"
 	}
 	return builder.String()
+}
+
+// buildDCList assembles the DC list giftfetch connects to. The production
+// and test DC lists come from the td runtime; -addr replaces the address of
+// the chosen DC so that private test deployments stay reachable.
+func buildDCList(test bool, dc int, addr string) (dcs.List, error) {
+	list := dcs.Prod()
+	if test {
+		list = dcs.Test()
+	}
+	if addr == "" {
+		if !dcListHas(list, dc) {
+			return dcs.List{}, fmt.Errorf("DC %d is missing from the %s DC list; pass -addr host:port to specify the server", dc, modeName(test))
+		}
+		return list, nil
+	}
+	host, portRaw, err := net.SplitHostPort(addr)
+	if err != nil {
+		return dcs.List{}, fmt.Errorf("invalid -addr %q: %v", addr, err)
+	}
+	if host == "" {
+		return dcs.List{}, fmt.Errorf("invalid -addr %q: empty host", addr)
+	}
+	port, err := strconv.Atoi(portRaw)
+	if err != nil || port < 1 || port > 65535 {
+		return dcs.List{}, fmt.Errorf("invalid -addr %q: port must be in [1, 65535]", addr)
+	}
+	options := make([]tg.DCOption, 0, len(list.Options)+1)
+	for _, option := range list.Options {
+		if option.ID == dc {
+			continue
+		}
+		options = append(options, option)
+	}
+	options = append(options, tg.DCOption{ID: dc, IPAddress: host, Port: port, Ipv6: strings.Contains(host, ":")})
+	list.Options = options
+	return list, nil
+}
+
+func dcListOption(list dcs.List, dc int) (tg.DCOption, bool) {
+	for _, option := range list.Options {
+		if option.ID == dc {
+			return option, true
+		}
+	}
+	return tg.DCOption{}, false
+}
+
+func dcListHas(list dcs.List, dc int) bool {
+	_, ok := dcListOption(list, dc)
+	return ok
+}
+
+func describeConnectAddr(list dcs.List, dc int) string {
+	if option, ok := dcListOption(list, dc); ok && option.IPAddress != "" {
+		return fmt.Sprintf("%s:%d", option.IPAddress, option.Port)
+	}
+	return "discovered at runtime"
+}
+
+func modeName(test bool) string {
+	if test {
+		return "test"
+	}
+	return "production"
 }
 
 func parseAllowedMissingThumbs(raw string) (map[string]struct{}, error) {

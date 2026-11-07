@@ -3,8 +3,10 @@ package main
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/iamxvbaba/td/bin"
@@ -190,7 +192,7 @@ func TestCollectUpgradeAttributes(t *testing.T) {
 		}
 		added[doc.ID] = purpose
 		return doc, nil
-	})
+	}, &skipLog{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -216,7 +218,7 @@ func TestCollectUpgradeAttributesRejectsInstanceOnlyAttribute(t *testing.T) {
 		&tg.StarGiftAttributeOriginalDetails{},
 	}}, fileArtifact{}, func(tg.DocumentClass, string) (*tg.Document, error) {
 		return nil, nil
-	})
+	}, &skipLog{})
 	if err == nil {
 		t.Fatal("expected unsupported-constructor error")
 	}
@@ -257,91 +259,176 @@ func testGiftDocument(id int64) *tg.Document {
 func TestBuildDCListProductionDefault(t *testing.T) {
 	list, err := buildDCList(false, defaultDC, "")
 	if err != nil {
-		t.Fatalf("buildDCList(production): %v", err)
+		t.Fatal(err)
 	}
 	if list.Test {
-		t.Fatalf("production list flagged as test")
+		t.Fatal("production list must not be flagged as test")
 	}
 	option, ok := dcListOption(list, defaultDC)
-	if !ok {
-		t.Fatalf("production list has no DC %d", defaultDC)
-	}
-	if option.IPAddress == "" || option.Port <= 0 {
-		t.Fatalf("production DC %d address = %#v", defaultDC, option)
-	}
-	if !dcListHas(list, 1) || !dcListHas(list, 5) {
-		t.Fatalf("production list must expose DC 1 and DC 5")
+	if !ok || option.IPAddress != "149.154.167.41" || option.Port != 443 {
+		t.Fatalf("production DC 2 option = %+v", option)
 	}
 }
 
 func TestBuildDCListTestServers(t *testing.T) {
-	list, err := buildDCList(true, defaultDC, "")
+	list, err := buildDCList(true, 2, "")
 	if err != nil {
-		t.Fatalf("buildDCList(test): %v", err)
+		t.Fatal(err)
 	}
 	if !list.Test {
-		t.Fatalf("test list not flagged as test")
+		t.Fatal("test list must be flagged as test")
 	}
-	option, ok := dcListOption(list, defaultDC)
-	if !ok {
-		t.Fatalf("test list has no DC %d", defaultDC)
+	option, ok := dcListOption(list, 2)
+	if !ok || option.IPAddress != "149.154.167.40" || option.Port != 443 {
+		t.Fatalf("test DC 2 option = %+v", option)
 	}
-	if option.IPAddress != "149.154.167.40" || option.Port != 443 {
-		t.Fatalf("test DC %d = %s:%d, want 149.154.167.40:443", defaultDC, option.IPAddress, option.Port)
-	}
-	if !dcListHas(list, 1) || !dcListHas(list, 3) {
-		t.Fatalf("test list must expose DC 1 and DC 3")
+	for _, dc := range []int{1, 3} {
+		if !dcListHas(list, dc) {
+			t.Fatalf("test DC list misses DC %d", dc)
+		}
 	}
 	if dcListHas(list, 4) {
-		t.Fatalf("test list must not expose DC 4 without -addr")
+		t.Fatal("test DC list must not contain DC 4")
 	}
 }
 
 func TestBuildDCListAddrOverride(t *testing.T) {
-	list, err := buildDCList(true, defaultDC, "149.154.167.40:433")
+	list, err := buildDCList(true, 2, "149.154.167.40:433")
 	if err != nil {
-		t.Fatalf("buildDCList(test, addr): %v", err)
+		t.Fatal(err)
 	}
-	if !list.Test {
-		t.Fatalf("override must keep the test flag")
-	}
-	option, ok := dcListOption(list, defaultDC)
-	if !ok {
-		t.Fatalf("override list has no DC %d", defaultDC)
-	}
-	if option.IPAddress != "149.154.167.40" || option.Port != 433 || option.Ipv6 {
-		t.Fatalf("override DC %d = %#v, want 149.154.167.40:433", defaultDC, option)
+	option, ok := dcListOption(list, 2)
+	if !ok || option.IPAddress != "149.154.167.40" || option.Port != 433 || option.Ipv6 {
+		t.Fatalf("overridden DC 2 option = %+v", option)
 	}
 	if !dcListHas(list, 1) || !dcListHas(list, 3) {
-		t.Fatalf("override must not remove the other DCs from the list")
+		t.Fatal("other test DCs must be preserved")
 	}
-	if got := describeConnectAddr(list, defaultDC); got != "149.154.167.40:433" {
-		t.Fatalf("describeConnectAddr = %q, want %q", got, "149.154.167.40:433")
+	if got := describeConnectAddr(list, 2); got != "149.154.167.40:433" {
+		t.Fatalf("describeConnectAddr = %q", got)
 	}
 }
 
 func TestBuildDCListAddrValidation(t *testing.T) {
-	for _, addr := range []string{
-		"149.154.167.40",
-		"149.154.167.40:notaport",
-		"149.154.167.40:0",
-		"149.154.167.40:70000",
-		":443",
-	} {
-		if _, err := buildDCList(true, defaultDC, addr); err == nil {
-			t.Fatalf("addr %q must be rejected", addr)
+	for _, addr := range []string{"host-only", "host:not-a-port", "host:0", "host:70000", ":443"} {
+		if _, err := buildDCList(false, defaultDC, addr); err == nil {
+			t.Errorf("buildDCList(addr=%q) succeeded", addr)
 		}
 	}
 	if _, err := buildDCList(true, 5, ""); err == nil {
-		t.Fatalf("test list has no DC 5, must be rejected")
+		t.Fatal("expected error for DC 5 missing from the test list")
 	}
 }
 
 func TestModeName(t *testing.T) {
-	if got := modeName(false); got != "production" {
-		t.Fatalf("modeName(false) = %q, want %q", got, "production")
+	if modeName(true) != "test" || modeName(false) != "production" {
+		t.Fatalf("modeName = %q / %q", modeName(true), modeName(false))
 	}
-	if got := modeName(true); got != "test" {
-		t.Fatalf("modeName(true) = %q, want %q", got, "test")
+}
+
+func TestDocumentRegistry(t *testing.T) {
+	registry := newDocumentRegistry()
+	doc := testGiftDocument(101)
+	first, err := registry.add(doc, "gift:1:sticker")
+	if err != nil || first != doc {
+		t.Fatalf("add(valid) = (%v, %v)", first, err)
+	}
+	if _, err := registry.add(testGiftDocument(101), "unique:2:model:Same"); err != nil {
+		t.Fatalf("add(same id) = %v", err)
+	}
+	if len(registry.sources) != 1 {
+		t.Fatalf("sources = %d, want 1", len(registry.sources))
+	}
+	if len(registry.sources[101].purposes) != 2 {
+		t.Fatalf("purposes = %v", registry.sources[101].purposes)
+	}
+	_, err = registry.add(&tg.DocumentEmpty{}, "gift:1:sticker")
+	if !errors.Is(err, errInvalidStickerDocument) {
+		t.Fatalf("add(empty) = %v, want errInvalidStickerDocument", err)
+	}
+	if got := err.Error(); got != "gift:1:sticker references invalid document *tg.DocumentEmpty" {
+		t.Fatalf("add(empty) message = %q", got)
+	}
+	broken := &tg.Document{ID: 102, Size: 1, MimeType: "application/x-tgsticker"}
+	returned, err := registry.add(broken, "gift:1:sticker")
+	if !errors.Is(err, errNoRenderableSticker) || returned != broken {
+		t.Fatalf("add(broken) = (%v, %v), want (doc, errNoRenderableSticker)", returned, err)
+	}
+	if got := err.Error(); got != "gift:1:sticker document 102 has neither sticker nor custom-emoji attribute" {
+		t.Fatalf("add(broken) message = %q", got)
+	}
+	if _, ok := registry.sources[102]; ok {
+		t.Fatal("broken document must not be registered")
+	}
+	conflict := testGiftDocument(101)
+	conflict.Size = 2
+	if _, err := registry.add(conflict, "gift:1:sticker"); err == nil || isSkippableDocumentError(err) {
+		t.Fatalf("add(conflicting) = %v, want non-skippable conflict error", err)
+	}
+}
+
+func TestCollectUpgradeAttributesSkipsUnusableDocuments(t *testing.T) {
+	registry := newDocumentRegistry()
+	result := &tg.PaymentsStarGiftUpgradeAttributes{Attributes: []tg.StarGiftAttributeClass{
+		&tg.StarGiftAttributeModel{
+			Name:     "Broken model",
+			Document: &tg.Document{ID: 9001, Size: 1, MimeType: "application/x-tgsticker"},
+			Rarity:   &tg.StarGiftAttributeRarityLegendary{},
+		},
+		&tg.StarGiftAttributeModel{Name: "Good model", Document: testGiftDocument(101), Rarity: &tg.StarGiftAttributeRarityEpic{}},
+		&tg.StarGiftAttributePattern{Name: "Pattern", Document: testGiftDocument(102), Rarity: &tg.StarGiftAttributeRarity{Permille: 125}},
+		&tg.StarGiftAttributeBackdrop{Name: "Backdrop", BackdropID: 7, CenterColor: 1, EdgeColor: 2, PatternColor: 3, TextColor: 4, Rarity: &tg.StarGiftAttributeRarityUncommon{}},
+	}}
+	skips := &skipLog{}
+	set, err := collectUpgradeAttributes(99, result, fileArtifact{Path: "upgrade-attributes/99.tl"}, registry.add, skips)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if set.AttributeCount != 3 || len(set.Models) != 1 || len(set.Patterns) != 1 || len(set.Backdrops) != 1 {
+		t.Fatalf("unexpected attribute counts: %+v", set)
+	}
+	if set.Models[0].Name != "Good model" {
+		t.Fatalf("models = %+v", set.Models)
+	}
+	if len(set.DocumentIDs) != 2 {
+		t.Fatalf("document ids = %v", set.DocumentIDs)
+	}
+	if _, ok := registry.sources[9001]; ok {
+		t.Fatal("broken document must not be queued for download")
+	}
+	if len(skips.items) != 1 {
+		t.Fatalf("skips = %+v", skips.items)
+	}
+	skip := skips.items[0]
+	if skip.Kind != "upgrade-model" || skip.GiftID != 99 || skip.DocumentID != 9001 || skip.Name != "Broken model" {
+		t.Fatalf("skip = %+v", skip)
+	}
+	if !strings.Contains(skip.Reason, "has neither sticker nor custom-emoji attribute") {
+		t.Fatalf("skip reason = %q", skip.Reason)
+	}
+}
+
+func TestGiftClassIdentity(t *testing.T) {
+	if kind, id := giftClassIdentity(&tg.StarGift{ID: 7}); kind != "regular-gift" || id != 7 {
+		t.Fatalf("giftClassIdentity(regular) = (%q, %d)", kind, id)
+	}
+	if kind, id := giftClassIdentity(&tg.StarGiftUnique{ID: 9}); kind != "unique-gift" || id != 9 {
+		t.Fatalf("giftClassIdentity(unique) = (%q, %d)", kind, id)
+	}
+	if kind, id := giftClassIdentity(nil); kind != "<nil>" || id != 0 {
+		t.Fatalf("giftClassIdentity(nil) = (%q, %d)", kind, id)
+	}
+}
+
+func TestIsSkippableDocumentError(t *testing.T) {
+	wrapped := fmt.Errorf("gift:1:sticker document 2 %w", errNoRenderableSticker)
+	if !isSkippableDocumentError(wrapped) {
+		t.Fatalf("isSkippableDocumentError(%v) = false", wrapped)
+	}
+	if !isSkippableDocumentError(fmt.Errorf("prefix: %w", errInvalidStickerDocument)) {
+		t.Fatal("invalid document error must be skippable")
+	}
+	if isSkippableDocumentError(errors.New("document 2 has conflicting metadata")) {
+		t.Fatal("conflicting metadata must abort the run")
 	}
 }
