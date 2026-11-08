@@ -71,8 +71,24 @@ WHERE NOT refunded AND amount_nanoton > 0 AND (
 UPDATE public.stars_transactions SET reason = 'gift_convert'
 WHERE reason = 'gift' AND title = 'Star gift conversion';
 
-UPDATE public.ton_transactions SET reason = 'gift_convert'
-WHERE reason = 'gift' AND title = 'Star gift conversion';
+-- У ton_transactions колонки title нет, да и конвертации в TON-реестре не
+-- существовали (обмен подарка на звёзды всегда начисляется в Stars-реестре):
+-- переименовывать здесь нечего.
+--
+-- В канальном Stars-реестре колонки title тоже нет, но маркер конвертации
+-- есть — журнал star_gift_conversions (точная связь: владелец-канал + актёр +
+-- сумма + момент времени + каталоговый подарок через peer_star_gifts).
+UPDATE public.channel_stars_transactions t
+SET reason = 'gift_convert'
+FROM public.star_gift_conversions c
+JOIN public.peer_star_gifts p ON p.id = c.saved_gift_id
+WHERE t.reason = 'gift'
+  AND c.owner_peer_type = 'channel'
+  AND c.owner_peer_id = t.channel_id
+  AND c.actor_user_id = t.actor_user_id
+  AND c.amount = t.amount
+  AND c.converted_at = t.date
+  AND p.gift_id = t.gift_id;
 
 CREATE UNIQUE INDEX IF NOT EXISTS stars_transactions_transaction_id_uidx
     ON public.stars_transactions(transaction_id) WHERE transaction_id <> '';
