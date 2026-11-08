@@ -88,13 +88,21 @@ func StarGiftUpgradeAvailable(gift StarGift, prepaidUpgradeStars int64) bool {
 // prepaid (сумма предоплаты), обычная цена улучшения живёт в gift.upgrade_stars.
 func StarGiftMessageFlags(gift StarGift, savedConvertStars, prepaidUpgradeStars int64) (canUpgrade bool, convertStars int64) {
         canUpgrade = StarGiftUpgradeAvailable(gift, prepaidUpgradeStars)
+        return canUpgrade, StarGiftConvertStars(savedConvertStars, prepaidUpgradeStars)
+}
+
+// StarGiftConvertStars — convert_stars, который сервер отдаёт на обёртке
+// savedStarGift (профильная сетка) и на messageActionStarGift (сервисное
+// сообщение). Предоплаченное улучшение запрещает конвертацию в звёзды
+// (ConvertStarGift отклоняет такие подарки с STARGIFT_INVALID), поэтому
+// convert_stars не отдаётся: иначе официальный клиент рисует кнопку
+// «Обменять на N звёзд»/«Продать», которая всегда падает (дамп 183490 —
+// у prepaid-подарка convert_stars отсутствует).
+func StarGiftConvertStars(savedConvertStars, prepaidUpgradeStars int64) int64 {
         if prepaidUpgradeStars > 0 {
-                // Предоплата улучшения блокирует конвертацию в звёзды
-                // (ConvertStarGift отклоняет такие подарки), поэтому и подпись
-                // конвертации в сервисном сообщении отсутствует (дамп 183490).
-                return canUpgrade, 0
+                return 0
         }
-        return canUpgrade, savedConvertStars
+        return savedConvertStars
 }
 
 // StarGiftBackground is the release-level palette used by auction cards and
@@ -144,12 +152,6 @@ type SavedStarGift struct {
         // не реализована — флаг подготовлен к будущему использованию.
         Refunded bool
         Unique   *UniqueStarGift
-        // ViewerCanManage — транзитное (не хранится в БД) вычисленное RPC-слоем
-        // право текущего зрителя управлять профилем владельца: личный профиль —
-        // только сам владелец, профиль канала — администрация канала. Драйвер
-        // приватности оригинальных деталей (раунд 25): отправителя и 附言 в
-        // карточке подарка видит только тот, кто управляет профилем.
-        ViewerCanManage bool
 }
 
 type StarGiftLifecycleStatus string
@@ -302,12 +304,6 @@ type UniqueStarGift struct {
         OriginalDate        int
         OriginalMessage     string
         OriginalNameHidden  bool
-        // Unsaved — подарок скрыт из профиля владельца (peer_star_gifts.unsaved,
-        // транзитно из JOIN peer_star_gifts; раунд 25). На странице по ссылке
-        // (payments.getUniqueStarGift) такой подарок отдаёт только имя владельца
-        // (owner_name) без owner_id и без владельца в users/chats: перейти в
-        // профиль владельца нельзя.
-        Unsaved   bool
         CreatedAt           time.Time
 }
 
@@ -315,16 +311,10 @@ type UniqueStarGift struct {
 // status shape consumed by Telegram clients.  Ownership/lifecycle validation
 // is intentionally performed by the caller because it depends on the actor;
 // this helper validates only the immutable renderable facts.
-//
-// Раунд 23 (исправление): title эмодзи-статуса должен быть в формате
-// «{имя} #{уникальный номер}» — заголовок над эмодзи-статусом клиент
-// рисует дословно из этого поля (официальный дамп установки подарка в
-// тему чата: emojiStatusCollectible{title:'Spy Agaric #5',
-// slug:'SpyAgaric-5'}). Голое имя заставляло клиента терять «#номер».
 func CollectibleEmojiStatus(g UniqueStarGift) (EmojiStatusCollectible, bool) {
         status := EmojiStatusCollectible{
                 CollectibleID: g.ID,
-                Title:         CollectibleEmojiStatusTitle(g.Title, g.Num),
+                Title:         g.Title,
                 Slug:          g.Slug,
                 CenterColor:   g.Backdrop.CenterColor,
                 EdgeColor:     g.Backdrop.EdgeColor,
@@ -338,18 +328,6 @@ func CollectibleEmojiStatus(g UniqueStarGift) (EmojiStatusCollectible, bool) {
                 status.PatternDocumentID = g.Pattern.Document.ID
         }
         return status, status.Valid()
-}
-
-// CollectibleEmojiStatusTitle форматирует title эмодзи-статуса: «{имя}
-// #{уникальный номер}» (формат официальных серверов, см. CollectibleEmojiStatus).
-// Номер опускается только для аномальных записей без номера, чтобы title
-// никогда не оставался пустым (Valid() требует непустой title).
-func CollectibleEmojiStatusTitle(title string, num int) string {
-        trimmed := strings.TrimSpace(title)
-        if num <= 0 {
-                return trimmed
-        }
-        return fmt.Sprintf("%s #%d", trimmed, num)
 }
 
 type StarGiftCurrency string
