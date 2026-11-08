@@ -19,6 +19,13 @@ type StarsStore interface {
 	// Debit 在单事务内做 SELECT ... FOR UPDATE 充足性检查后扣款（amount>0），写流水（amount=-x）。
 	// 余额不足返回 domain.ErrStarsInsufficient。
 	Debit(ctx context.Context, userID, amount int64, reason domain.StarsTransactionReason, peer domain.Peer, date int, title, desc string) (domain.StarsBalance, error)
+	// CreditFlags 贷记并携带官方投影属性（礼物载荷/退款标志）。
+	CreditFlags(ctx context.Context, userID, amount int64, reason domain.StarsTransactionReason, peer domain.Peer, date int, title, desc string, flags domain.StarsLedgerFlags) (domain.StarsBalance, error)
+	// DebitFlags 借记并携带官方投影属性（礼物载荷/退款标志）。
+	DebitFlags(ctx context.Context, userID, amount int64, reason domain.StarsTransactionReason, peer domain.Peer, date int, title, desc string, flags domain.StarsLedgerFlags) (domain.StarsBalance, error)
+	// ListTransactionsByID 按公开交易 ID 批量读取本人流水
+	// （payments.getStarsTransactionsByID）；未知 ID 静默跳过。
+	ListTransactionsByID(ctx context.Context, userID int64, ids []string) ([]domain.StarsTransaction, error)
 	// ListTransactions 按方向与顺序做 keyset 分页，返回一页流水 + 当前余额。
 	ListTransactions(ctx context.Context, userID int64, query domain.StarsTransactionQuery) (domain.StarsTransactionPage, error)
 }

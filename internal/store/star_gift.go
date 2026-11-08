@@ -125,10 +125,16 @@ type StarGiftLifecycleStore interface {
 	CompleteStarGiftWithdrawal(ctx context.Context, providerRequestID string, date int) (domain.StarGiftWithdrawal, error)
 	TonBalance(ctx context.Context, userID int64) (int64, error)
 	TonTransactions(ctx context.Context, userID int64, query domain.StarsTransactionQuery) (domain.TonTransactionPage, error)
+	// TonTransactionsByID 按公开交易 ID 批量读取本人 TON 流水（未知 ID 跳过）。
+	TonTransactionsByID(ctx context.Context, userID int64, ids []string) ([]domain.TonTransaction, error)
 	ChannelStarsBalance(ctx context.Context, channelID int64) (int64, error)
 	ChannelStarsTransactions(ctx context.Context, channelID int64, query domain.StarsTransactionQuery) (domain.StarsTransactionPage, error)
+	// ChannelStarsTransactionsByID 按公开交易 ID 批量读取频道 Stars 流水。
+	ChannelStarsTransactionsByID(ctx context.Context, channelID int64, ids []string) ([]domain.StarsTransaction, error)
 	ChannelTonBalance(ctx context.Context, channelID int64) (int64, error)
 	ChannelTonTransactions(ctx context.Context, channelID int64, query domain.StarsTransactionQuery) (domain.TonTransactionPage, error)
+	// ChannelTonTransactionsByID 按公开交易 ID 批量读取频道 TON 流水。
+	ChannelTonTransactionsByID(ctx context.Context, channelID int64, ids []string) ([]domain.TonTransaction, error)
 	// SweepStarGiftLifecycle advances time-driven offer/auction aggregates and
 	// drains their durable notification/delivery outboxes in bounded batches.
 	SweepStarGiftLifecycle(ctx context.Context, now, limit int) error
