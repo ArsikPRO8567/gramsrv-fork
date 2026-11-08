@@ -319,14 +319,13 @@ func (s *StarGiftLifecycleStore) purchaseStarGiftToChannel(ctx context.Context, 
 				NameHidden:      saved.NameHidden,
 				Saved:           true,
 				CanUpgrade:      canUpgrade,
-				// Раунд 25: канальные действия покупки несут полные prepaid-маркеры
-				// (как на официальном сервере): prepaid_upgrade=true у оплаченной
-				// предоплаты и prepaid_upgrade_hash у «покупки-цели» отдельной
-				// предоплаты (авто-хэш). Без них admin log и уведомление владельцу
-				// теряли снимок предоплаты (интеграционный тест round25:
-				// «до раунда 25 его снимок терялся»).
-				PrepaidUpgrade:    saved.PrepaidUpgradeStars > 0,
-				PrepaidUpgradeHash: saved.PrepaidUpgradeHash,
+				// PrepaidUpgradeHash сознательно не включается: hash — это инвойс
+				// «оплатить улучшение чужого подарка», он привязан к приватному диалогу
+				// плательщика. В канальном действии он заставляет клиентов отправлять
+				// prepay invoice с peer = сервисный аккаунт/канал (STARGIFT_INVALID
+				// либо нежелательную предоплату вместо обычного улучшения). Флаг
+				// prepaid_upgrade тоже запрещён: клиент рисует по нему подпись
+				// «отправил улучшение» вместо «отправил подарок каналу за N звёзд».
 				UpgradePriceStars: gift.UpgradeStars,
 				UpgradeStars:      saved.PrepaidUpgradeStars,
 				GiftNum:           saved.GiftNum,
@@ -338,7 +337,23 @@ func (s *StarGiftLifecycleStore) purchaseStarGiftToChannel(ctx context.Context, 
 				// STARGIFT_INVALID на улучшение/конвертацию из чата с 777000.
 			}, gift),
 		}
-		if err := NewChannelStore(tx).appendStarGiftAdminLogTx(ctx, tx, req.To.ID, req.BuyerUserID, id, req.Date, action); err != nil {
+		// Раунд 25: снимок предоплаты остаётся в Recent Actions канала — копия
+		// действия для админ-лога несёт полные prepaid-маркеры (prepaid_upgrade
+		// у оплаченной предоплаты и prepaid_upgrade_hash у авто-хэша
+		// «покупки-цели» отдельной предоплаты; интеграционный тест round25
+		// «до раунда 25 его снимок терялся»). Клиентский wire-формат выше —
+		// сервисное сообщение и уведомления от «Telegram» — остаётся чистым
+		// (раунд 26): маркеры в канальном действии ломали подпись «отправил
+		// подарок каналу за N звёзд» и вели клиентов к prepay invoice с чужим
+		// peer (STARGIFT_INVALID).
+		adminAction := action
+		if adminAction.StarGift != nil {
+			adminGift := *adminAction.StarGift
+			adminGift.PrepaidUpgrade = saved.PrepaidUpgradeStars > 0
+			adminGift.PrepaidUpgradeHash = saved.PrepaidUpgradeHash
+			adminAction.StarGift = &adminGift
+		}
+		if err := NewChannelStore(tx).appendStarGiftAdminLogTx(ctx, tx, req.To.ID, req.BuyerUserID, id, req.Date, adminAction); err != nil {
 			return err
 		}
 		if err := enqueueChannelStarGiftNotifications(ctx, tx, id, req.To.ID, req.Date, action.StarGift, 0); err != nil {

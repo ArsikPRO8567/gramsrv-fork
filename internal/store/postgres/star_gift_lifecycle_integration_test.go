@@ -1893,8 +1893,13 @@ func TestStarGiftRound25ChannelGiftDeliveryPostgres(t *testing.T) {
 		TransferStars: 25, DropOriginalDetailsStars: 25, OfferMinStars: 1, CraftChancePermille: 500,
 	}))
 
-	// 1) Покупка каналу с предоплаченным улучшением: prepaid-маркеры в
-	//    уведомлении владельцу и в admin log.
+	// 1) Покупка каналу с предоплаченным улучшением. Раунд 25: снимок
+	//    предоплаты остаётся в admin log (prepaid_upgrade + upgrade_stars).
+	//    Раунд 26 (восстановление): клиентское уведомление владельцу — в
+	//    официальном wire-формате: prepaid_upgrade не выставляется (иначе
+	//    клиент рисует подпись «отправил улучшение» вместо «отправил подарок
+	//    каналу за N звёзд» и шлёт prepay invoice с peer сервисного аккаунта —
+	//    STARGIFT_INVALID), сумма предоплаты несётся внешним upgrade_stars.
 	prepaidReq := issueLifecyclePurchaseForm(t, ctx, lifecycle, domain.StarGiftPurchaseRequest{BuyerUserID: actor.ID, To: channelPeer,
 		GiftID: entry.Gift.ID, IncludeUpgrade: true, CommandKey: "round25-prepaid-" + suffix, Date: now + 1})
 	prepaid, err := lifecycle.PurchaseStarGift(ctx, prepaidReq)
@@ -1913,11 +1918,13 @@ FROM channel_admin_log_events WHERE channel_id=$1 AND event_type='send_message' 
 	}
 	var notificationStars string
 	var notificationPrepaid any
-	if err := pool.QueryRow(ctx, `SELECT m.media #>> '{service_action,star_gift,stars}', m.media #>> '{service_action,star_gift,prepaid_upgrade}'
+	var notificationUpgradeStars any
+	if err := pool.QueryRow(ctx, `SELECT m.media #>> '{service_action,star_gift,stars}', m.media #>> '{service_action,star_gift,prepaid_upgrade}', m.media #>> '{service_action,star_gift,upgrade_stars}'
 FROM star_gift_channel_notification_jobs j JOIN message_boxes m ON m.owner_user_id=j.target_user_id AND m.box_id=j.message_id
 WHERE j.saved_gift_id=$1 AND j.action_kind='star_gift' AND j.delivered_at>0`, prepaid.Saved.SavedID).
-		Scan(&notificationStars, &notificationPrepaid); err != nil || notificationStars != "50" || notificationPrepaid != "true" {
-		t.Fatalf("round25 prepaid notification stars=%q prepaid=%v err=%v (want stars=50 prepaid=true)", notificationStars, notificationPrepaid, err)
+		Scan(&notificationStars, &notificationPrepaid, &notificationUpgradeStars); err != nil || notificationStars != "50" ||
+		notificationPrepaid != nil || notificationUpgradeStars != "100" {
+		t.Fatalf("round25 prepaid notification stars=%q prepaid=%v upgrade_stars=%v err=%v (want official wire format: stars=50, prepaid_upgrade absent, upgrade_stars=100)", notificationStars, notificationPrepaid, notificationUpgradeStars, err)
 	}
 
 	// 2) Улучшение prepaid-формой бесплатно, затем передача с канала владельцу:
