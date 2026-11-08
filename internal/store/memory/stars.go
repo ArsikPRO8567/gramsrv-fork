@@ -63,6 +63,11 @@ func (s *StarsStore) EnsureGrant(_ context.Context, userID, amount int64, date i
 }
 
 func (s *StarsStore) Credit(_ context.Context, userID, amount int64, reason domain.StarsTransactionReason, peer domain.Peer, date int, title, desc string) (domain.StarsBalance, error) {
+	return s.CreditFlags(context.Background(), userID, amount, reason, peer, date, title, desc, domain.StarsLedgerFlags{})
+}
+
+// CreditFlags 贷记并记录官方投影属性（与 postgres 版语义一致）。
+func (s *StarsStore) CreditFlags(_ context.Context, userID, amount int64, reason domain.StarsTransactionReason, peer domain.Peer, date int, title, desc string, flags domain.StarsLedgerFlags) (domain.StarsBalance, error) {
 	if userID == 0 || amount <= 0 {
 		return domain.StarsBalance{}, domain.ErrStarsInvalidAmount
 	}
@@ -74,11 +79,16 @@ func (s *StarsStore) Credit(_ context.Context, userID, amount int64, reason doma
 		s.states[userID] = st
 	}
 	st.balance += amount
-	s.appendTxn(st, userID, amount, reason, peer, date, title, desc)
+	s.appendTxnFlags(st, userID, amount, reason, peer, date, title, desc, flags)
 	return domain.StarsBalance{UserID: userID, Balance: st.balance, Granted: st.granted}, nil
 }
 
 func (s *StarsStore) Debit(_ context.Context, userID, amount int64, reason domain.StarsTransactionReason, peer domain.Peer, date int, title, desc string) (domain.StarsBalance, error) {
+	return s.DebitFlags(context.Background(), userID, amount, reason, peer, date, title, desc, domain.StarsLedgerFlags{})
+}
+
+// DebitFlags 借记并记录官方投影属性（与 postgres 版语义一致）。
+func (s *StarsStore) DebitFlags(_ context.Context, userID, amount int64, reason domain.StarsTransactionReason, peer domain.Peer, date int, title, desc string, flags domain.StarsLedgerFlags) (domain.StarsBalance, error) {
 	if userID == 0 || amount <= 0 {
 		return domain.StarsBalance{}, domain.ErrStarsInvalidAmount
 	}
@@ -89,7 +99,7 @@ func (s *StarsStore) Debit(_ context.Context, userID, amount int64, reason domai
 		return domain.StarsBalance{}, domain.ErrStarsInsufficient
 	}
 	st.balance -= amount
-	s.appendTxn(st, userID, -amount, reason, peer, date, title, desc)
+	s.appendTxnFlags(st, userID, -amount, reason, peer, date, title, desc, flags)
 	return domain.StarsBalance{UserID: userID, Balance: st.balance, Granted: st.granted}, nil
 }
 
@@ -110,28 +120,17 @@ func (s *StarsStore) ListTransactions(_ context.Context, userID int64, query dom
 	page := domain.StarsTransactionPage{Balance: st.balance}
 	cursor, hasCursor := domain.DecodeStarsCursor(query.Offset)
 	out := make([]domain.StarsTransaction, 0, query.Limit+1)
-	appendMatch := func(t domain.StarsTransaction) bool {
-		if hasCursor {
-			if query.Ascending && t.ID <= cursor {
-				return false
-			}
-			if !query.Ascending && t.ID >= cursor {
-				return false
-			}
-		}
-		if !query.Direction.IncludesAmount(t.Amount) {
-			return false
-		}
-		out = append(out, t)
-		return len(out) > query.Limit
-	}
 	if query.Ascending {
 		for i := 0; i < len(st.txns) && len(out) <= query.Limit; i++ {
-			appendMatch(st.txns[i])
+			if starsTxnMatchesCursor(st.txns[i], cursor, hasCursor, query) {
+				out = append(out, st.txns[i])
+			}
 		}
 	} else {
 		for i := len(st.txns) - 1; i >= 0 && len(out) <= query.Limit; i-- {
-			appendMatch(st.txns[i])
+			if starsTxnMatchesCursor(st.txns[i], cursor, hasCursor, query) {
+				out = append(out, st.txns[i])
+			}
 		}
 	}
 	if len(out) > query.Limit {
@@ -142,16 +141,62 @@ func (s *StarsStore) ListTransactions(_ context.Context, userID int64, query dom
 	return page, nil
 }
 
+// starsTxnMatchesCursor 复刻原 appendMatch 谓词：游标与方向过滤。
+func starsTxnMatchesCursor(t domain.StarsTransaction, cursor int64, hasCursor bool, query domain.StarsTransactionQuery) bool {
+	if hasCursor {
+		if query.Ascending && t.ID <= cursor {
+			return false
+		}
+		if !query.Ascending && t.ID >= cursor {
+			return false
+		}
+	}
+	return query.Direction.IncludesAmount(t.Amount)
+}
+
+// ListTransactionsByID 按公开交易 ID 过滤本人流水（内存实现）。
+func (s *StarsStore) ListTransactionsByID(_ context.Context, userID int64, ids []string) ([]domain.StarsTransaction, error) {
+	if userID == 0 || len(ids) == 0 {
+		return nil, nil
+	}
+	wanted := make(map[string]struct{}, len(ids))
+	for _, id := range ids {
+		wanted[id] = struct{}{}
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	st := s.states[userID]
+	if st == nil {
+		return nil, nil
+	}
+	out := make([]domain.StarsTransaction, 0, len(ids))
+	for _, t := range st.txns {
+		if _, ok := wanted[t.PublicID()]; ok {
+			out = append(out, t)
+		}
+	}
+	return out, nil
+}
+
 func (s *StarsStore) appendTxn(st *starsState, userID, amount int64, reason domain.StarsTransactionReason, peer domain.Peer, date int, title, desc string) {
+	s.appendTxnFlags(st, userID, amount, reason, peer, date, title, desc, domain.StarsLedgerFlags{})
+}
+
+func (s *StarsStore) appendTxnFlags(st *starsState, userID, amount int64, reason domain.StarsTransactionReason, peer domain.Peer, date int, title, desc string, flags domain.StarsLedgerFlags) {
 	s.nextID++
-	st.txns = append(st.txns, domain.StarsTransaction{
-		ID:          s.nextID,
-		UserID:      userID,
-		Peer:        peer,
-		Amount:      amount,
-		Date:        date,
-		Reason:      reason,
-		Title:       title,
-		Description: desc,
-	})
+	txn := domain.StarsTransaction{
+		ID:           s.nextID,
+		UserID:       userID,
+		Peer:         peer,
+		Amount:       amount,
+		Date:         date,
+		Reason:       reason,
+		Title:        title,
+		Description:  desc,
+		Refunded:     flags.Refunded,
+		GiftID:       flags.GiftID,
+		GiftIsUnique: flags.GiftIsUnique,
+	}
+	txn.TransactionID = domain.NewStarsTransactionID(false)
+	st.txns = append(st.txns, txn)
 }
