@@ -907,6 +907,30 @@ func (s *Service) ChannelTonTransactions(ctx context.Context, channelID int64, q
 	return s.lifecycle.ChannelTonTransactions(ctx, channelID, query)
 }
 
+// TonTransactionsByID 按公开交易 ID 批量读取本人 TON 流水（ByID RPC，ton 分支）。
+func (s *Service) TonTransactionsByID(ctx context.Context, userID int64, ids []string) ([]domain.TonTransaction, error) {
+	if s == nil || s.lifecycle == nil || len(ids) == 0 {
+		return nil, nil
+	}
+	return s.lifecycle.TonTransactionsByID(ctx, userID, ids)
+}
+
+// ChannelStarsTransactionsByID 按公开交易 ID 批量读取频道 Stars 流水。
+func (s *Service) ChannelStarsTransactionsByID(ctx context.Context, channelID int64, ids []string) ([]domain.StarsTransaction, error) {
+	if s == nil || s.lifecycle == nil || len(ids) == 0 {
+		return nil, nil
+	}
+	return s.lifecycle.ChannelStarsTransactionsByID(ctx, channelID, ids)
+}
+
+// ChannelTonTransactionsByID 按公开交易 ID 批量读取频道 TON 流水。
+func (s *Service) ChannelTonTransactionsByID(ctx context.Context, channelID int64, ids []string) ([]domain.TonTransaction, error) {
+	if s == nil || s.lifecycle == nil || len(ids) == 0 {
+		return nil, nil
+	}
+	return s.lifecycle.ChannelTonTransactionsByID(ctx, channelID, ids)
+}
+
 func (s *Service) SweepLifecycle(ctx context.Context, now, limit int) error {
 	if s == nil || s.lifecycle == nil {
 		return nil
