@@ -1,9 +1,11 @@
 package domain
 
 import (
+	"crypto/rand"
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"math/big"
 	"strconv"
 )
 
@@ -101,10 +103,14 @@ type StarsGiveawayInfo struct {
 type StarsTransactionReason string
 
 const (
-	StarsReasonGrant         StarsTransactionReason = "grant"        // 起始余额自动授予
-	StarsReasonTopup         StarsTransactionReason = "topup"        // 充值（本地铸造）
-	StarsReasonReaction      StarsTransactionReason = "reaction"     // 付费 reaction 花费
-	StarsReasonGift          StarsTransactionReason = "gift"         // 星礼花费/收取
+	StarsReasonGrant    StarsTransactionReason = "grant"    // 起始余额自动授予
+	StarsReasonTopup    StarsTransactionReason = "topup"    // 充值（本地铸造）
+	StarsReasonReaction StarsTransactionReason = "reaction" // 付费 reaction 花费
+	StarsReasonGift     StarsTransactionReason = "gift"     // 星礼花费/收取
+	// StarsReasonGiftConvert 是礼物转星（兑换回 Stars）的专用原因：官方客户端
+	// 对「出售礼物」不画 gift 标志的「来自用户的礼物」签名，只按 stargift
+	// 渲染礼物本体。
+	StarsReasonGiftConvert   StarsTransactionReason = "gift_convert" // 礼物转星（出售）
 	StarsReasonGiftUpgrade   StarsTransactionReason = "gift_upgrade" // 普通礼物升级为唯一礼物
 	StarsReasonGiftTransfer  StarsTransactionReason = "gift_transfer"
 	StarsReasonGiftResale    StarsTransactionReason = "gift_resale"
@@ -119,23 +125,66 @@ const (
 	StarsReasonAdjust        StarsTransactionReason = "adjust" // 兜底/人工调整
 )
 
-// StarsTransaction 是一条账本流水。amount 带符号：贷记 > 0（含 refund/收取），借记 < 0。
+// StarsTransaction 是一条账本流水。amount 带符号：贷记 > 0（含收取），借记 < 0。
 type StarsTransaction struct {
-	ID              int64 // 单调递增账本 id（keyset 游标）
-	UserID          int64 // 账本归属
-	Peer            Peer  // 对手方（grant/topup 等无对手时为零 Peer）
-	Amount          int64 // 带符号金额
-	Date            int   // Unix 秒
+	ID              int64  // 单调递增账本 id（keyset 游标）
+	TransactionID   string // 公开交易 ID（stars_…/ton_…；旧行为账本 id 十进制串）
+	UserID          int64  // 账本归属
+	Peer            Peer   // 对手方（grant/topup 等无对手时为零 Peer）
+	Amount          int64  // 带符号金额
+	Date            int    // Unix 秒
 	Reason          StarsTransactionReason
 	Title           string // 可选，投影到 tg.StarsTransaction.Title
 	Description     string // 可选，投影到 tg.StarsTransaction.Description
 	PaymentID       int64
 	RecipientUserID int64
 	PremiumMonths   int
+	Refunded        bool  // starsTransaction.refund：资金已退回（与方向无关）
+	GiftID          int64 // 关联礼物（目录礼物 id 或唯一礼物 id）
+	GiftIsUnique    bool  // GiftID 是否为 unique_star_gifts.id
 }
 
-// IsCredit 报告该流水是否为入账（贷记），投影到 tg.StarsTransaction.Refund。
+// IsCredit 报告该流水是否为入账（贷记）。
 func (t StarsTransaction) IsCredit() bool { return t.Amount > 0 }
+
+// PublicID 返回客户端可见的交易 ID：优先生成的公开 ID，旧行/内存行回退为
+// 账本 id 十进制串（历史服务端行为，保持客户端兼容）。
+func (t StarsTransaction) PublicID() string {
+	if t.TransactionID != "" {
+		return t.TransactionID
+	}
+	return strconv.FormatInt(t.ID, 10)
+}
+
+// StarsLedgerFlags 携带写入流水时的可选官方投影属性（礼物载荷与退款标志）。
+// 独立于 amount 符号：退款既可能是入账（撤销发放）也可能是出账（撤销扣款）。
+type StarsLedgerFlags struct {
+	GiftID       int64 // 关联礼物；0 = 无礼物载荷
+	GiftIsUnique bool  // GiftID 指向 unique_star_gifts.id（否则为目录礼物）
+	Refunded     bool  // starsTransaction.refund
+}
+
+// NewStarsTransactionID 生成官方形状的公开交易 ID：前缀 + 60 位 [A-Za-z0-9]
+// 随机串（如 stars_ab12…/ton_ab12…）。加密随机源保证不可预测；唯一性由
+// transaction_id 上的部分唯一索引兜底，62^60 空间下冲突实际不可能。
+func NewStarsTransactionID(ton bool) string {
+	prefix := "stars_"
+	if ton {
+		prefix = "ton_"
+	}
+	const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
+	out := make([]byte, 60)
+	for i := range out {
+		n, err := rand.Int(rand.Reader, big.NewInt(int64(len(alphabet))))
+		if err != nil {
+			// crypto/rand 失败属于系统级故障；退化为主进程熵源的确定性
+			// 兜底没有意义，直接让写路径失败更安全。
+			panic(fmt.Sprintf("generate stars transaction id: %v", err))
+		}
+		out[i] = alphabet[n.Int64()]
+	}
+	return prefix + string(out)
+}
 
 // StarsTransactionDirection scopes one payments.getStarsTransactions view.
 // The zero value intentionally means the combined inbound/outbound history.
@@ -200,15 +249,26 @@ type StarsTransactionPage struct {
 // the Telegram TON-denominated gift UI without contacting a wallet, Fragment,
 // a TON node, or any blockchain service.
 type TonTransaction struct {
-	ID          int64
-	UserID      int64
-	Peer        Peer
-	GiftID      int64
-	Amount      int64 // signed nanoton amount
-	Date        int
-	Reason      StarsTransactionReason
-	Title       string
-	Description string
+	ID            int64
+	TransactionID string // 公开交易 ID（ton_…；旧行为账本 id 十进制串）
+	UserID        int64
+	Peer          Peer
+	GiftID        int64
+	GiftIsUnique  bool
+	Amount        int64 // signed nanoton amount
+	Date          int
+	Reason        StarsTransactionReason
+	Title         string
+	Description   string
+	Refunded      bool // starsTransaction.refund：资金已退回
+}
+
+// PublicID 返回客户端可见的交易 ID（与 StarsTransaction.PublicID 同规则）。
+func (t TonTransaction) PublicID() string {
+	if t.TransactionID != "" {
+		return t.TransactionID
+	}
+	return strconv.FormatInt(t.ID, 10)
 }
 
 type TonTransactionPage struct {
