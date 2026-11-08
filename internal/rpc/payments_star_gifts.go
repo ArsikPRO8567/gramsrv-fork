@@ -220,6 +220,25 @@ func (r *Router) starsGiftRecipient(ctx context.Context, buyerUserID int64, inpu
         return recipient, nil
 }
 
+// ensureStarGiftRecipientExists — документированная ошибка payments.sendStarsForm:
+// «USER_ID_INVALID: The provided user ID is invalid». Отправка подарка
+// несуществующему или удалённому пользователю должна отклоняться этой ошибкой
+// до списания звёзд и выдачи формы; без проверки покупка доходит до доставки
+// сервисного сообщения, падает там и отдаёт INTERNAL_SERVER_ERROR.
+func (r *Router) ensureStarGiftRecipientExists(ctx context.Context, buyerUserID int64, peer domain.Peer) error {
+        if peer.Type != domain.PeerTypeUser || peer.ID <= 0 || r.deps.Users == nil {
+                return nil
+        }
+        recipient, found, err := r.deps.Users.ByID(ctx, buyerUserID, peer.ID)
+        if err != nil {
+                return internalErr()
+        }
+        if !found || recipient.ID <= 0 || recipient.Deleted {
+                return userIDInvalidErr()
+        }
+        return nil
+}
+
 func validateStarsGiftOption(purpose *tg.InputStorePaymentStarsGift) (tg.StarsGiftOption, error) {
         if purpose == nil || purpose.UserID == nil || purpose.Stars <= 0 || purpose.Amount <= 0 || purpose.Currency == "" {
                 return tg.StarsGiftOption{}, starsAmountInvalidErr()
@@ -537,6 +556,9 @@ func (r *Router) onPaymentsGetPaymentForm(ctx context.Context, req *tg.PaymentsG
         if err != nil {
                 return nil, err
         }
+        if err := r.ensureStarGiftRecipientExists(ctx, userID, peer); err != nil {
+                return nil, err
+        }
         gift, err := r.starGiftFromCatalog(ctx, inv.GiftID)
         if err != nil {
                 return nil, err
@@ -720,6 +742,9 @@ func (r *Router) onPaymentsSendStarsForm(ctx context.Context, req *tg.PaymentsSe
         }
         if (peer.Type != domain.PeerTypeUser && peer.Type != domain.PeerTypeChannel) || peer.ID == 0 {
                 return nil, peerIDInvalidErr()
+        }
+        if err := r.ensureStarGiftRecipientExists(ctx, userID, peer); err != nil {
+                return nil, err
         }
         if r.deps.Stars == nil || r.deps.Gifts == nil {
                 return nil, notImplementedErr()
@@ -1586,27 +1611,6 @@ func (r *Router) invalidateStarGiftOwnerProjection(owner domain.Peer) {
 }
 
 func (r *Router) tgSavedStarGiftsResponse(ctx context.Context, viewerUserID int64, gifts []domain.SavedStarGift, count int, nextOffset string) (*tg.PaymentsSavedStarGifts, error) {
-        // Раунд 25: приватность оригинальных деталей в профиле — отправитель и 附言
-        // получает только тот, кто управляет профилем владельца (личный профиль —
-        // владелец, профиль канала — администрация). Право вычисляется здесь,
-        // у чистой проекции tgSavedStarGifts нет доступа к проверке админства.
-        // Личные профили определяются чисто (viewer==owner), поэтому проверка
-        // каналов запускается только для канальных владельцев.
-        manageCache := make(map[domain.Peer]bool)
-        for i := range gifts {
-                if gifts[i].Owner.Type != domain.PeerTypeChannel {
-                        continue
-                }
-                owner := gifts[i].Owner
-                can, ok := manageCache[owner]
-                if !ok {
-                        can = r.ensureCanManageStarGiftOwner(ctx, viewerUserID, owner) == nil
-                        manageCache[owner] = can
-                }
-                if can {
-                        gifts[i].ViewerCanManage = true
-                }
-        }
         uniqueIDs := make([]int64, 0)
         seenUnique := make(map[int64]struct{})
         for _, gift := range gifts {
@@ -1861,32 +1865,6 @@ func tgMessageActionStarGift(in *domain.MessageStarGiftAction) tg.MessageActionC
         if in.LockedUntilDate > 0 {
                 gift.SetLockedUntilDate(in.LockedUntilDate)
         }
-        // Раунд 23 (дамп 185743): аукционный контекст блока StarGift.
-        if in.Auction {
-                gift.Auction = true
-                if in.AuctionSlug != "" {
-                        gift.SetAuctionSlug(in.AuctionSlug)
-                }
-                if in.GiftsPerRound > 0 {
-                        gift.SetGiftsPerRound(in.GiftsPerRound)
-                }
-                if in.AuctionStartDate > 0 {
-                        gift.SetAuctionStartDate(in.AuctionStartDate)
-                }
-                if in.Background != nil {
-                        gift.Background = tg.StarGiftBackground{
-                                CenterColor: in.Background.CenterColor,
-                                EdgeColor:   in.Background.EdgeColor,
-                                TextColor:   in.Background.TextColor,
-                        }
-                }
-        }
-        // gift.convert_stars переопределяется отдельно от action.convert_stars:
-        // копия о выигрыше аукциона несёт 85% выигрышной ставки в блоке подарка
-        // и пустой convert_stars на самом action (дамп 185743).
-        if in.GiftConvertStars > 0 {
-                gift.ConvertStars = in.GiftConvertStars
-        }
         if in.ReleasedBy != nil {
                 if releasedBy := tgPeer(*in.ReleasedBy); releasedBy != nil {
                         gift.SetReleasedBy(releasedBy)
@@ -2038,8 +2016,14 @@ func tgSavedStarGifts(viewerUserID int64, gifts []domain.SavedStarGift, catalog 
                 if g.Owner.Type == domain.PeerTypeChannel && g.SavedID > 0 {
                         item.SetSavedID(g.SavedID)
                 }
-                if g.ConvertStars > 0 {
-                        item.SetConvertStars(g.ConvertStars)
+                // convert_stars на обёртке savedStarGift — то, что клиент читает для
+                // кнопки «Обменять на N звёзд» в шторке подарка (canConvert читает
+                // бит 4). У предоплаченных улучшений конвертация запрещена
+                // (ConvertStarGift → STARGIFT_INVALID), поэтому по матрице
+                // StarGiftConvertStars (дамп 183490) бит не выставляется: кнопка
+                // не показывается, как и в сервисном сообщении.
+                if convertStars := domain.StarGiftConvertStars(g.ConvertStars, g.PrepaidUpgradeStars); convertStars > 0 {
+                        item.SetConvertStars(convertStars)
                 }
                 if g.Message != "" && savedStarGiftOriginalDetailsVisible(viewerUserID, g) {
                         msg := tg.TextWithEntities{Text: g.Message}
@@ -2177,41 +2161,50 @@ func tgSavedStarGiftGift(g domain.SavedStarGift, viewerUserID int64, catalog map
         }
 }
 
-// savedStarGiftOriginalDetailsVisible — видны ли получателю-зрителю
-// «оригинальные детали» подарка в профиле: отправитель (savedStarGift.from_id,
-// подпись «{отправитель} отправил(а) Вам этот подарок {дата}») и 附言.
-//
-// Раунд 25: это приватные данные профиля — их получает только тот, кто
-// управляет профилем владельца. Личный профиль: сам владелец (проверка чистая,
-// по Owner). Профиль канала: администрация канала — право проставляют
-// RPC-хендлеры в SavedStarGift.ViewerCanManage после проверки прав (у чистой
-// функции нет ctx для проверки админства).
-//
-// Анонимные подарки (name_hidden) как и раньше раскрывают отправителя только
-// получателю-пользователю: iOS строит InputSavedStarGiftUser по msg_id из
-// этого peer (см. тест миграции 0181).
 func savedStarGiftOriginalDetailsVisible(viewerUserID int64, gift domain.SavedStarGift) bool {
-        if gift.NameHidden {
-                return gift.Owner.Type == domain.PeerTypeUser && gift.Owner.ID == viewerUserID
+        if !gift.NameHidden {
+                return true
         }
-        if gift.Owner.Type == domain.PeerTypeUser {
-                return gift.Owner.ID == viewerUserID
-        }
-        return gift.ViewerCanManage
+        return gift.Owner.Type == domain.PeerTypeUser && gift.Owner.ID == viewerUserID
 }
 
 func savedStarGiftUserIDs(viewerUserID int64, gifts []domain.SavedStarGift) []int64 {
         seen := make(map[int64]struct{}, len(gifts))
         ids := make([]int64, 0, len(gifts))
+        add := func(id int64) {
+                if id <= 0 {
+                        return
+                }
+                if _, ok := seen[id]; ok {
+                        return
+                }
+                seen[id] = struct{}{}
+                ids = append(ids, id)
+        }
         for _, g := range gifts {
                 if g.FromUserID == 0 || !savedStarGiftOriginalDetailsVisible(viewerUserID, g) {
                         continue
                 }
-                if _, ok := seen[g.FromUserID]; ok {
+                add(g.FromUserID)
+        }
+        // Раунд 28: original_details уникального подарка всегда ссылается на
+        // оригинального получателя (recipient_id без флага) и — если отправитель
+        // не скрыт — на оригинального отправителя (sender_id). После перепродажи
+        // это третьи лица, отличные from_id обёртки (= продавец) и текущего
+        // владельца; клиенты разрешают эти peer'ы через users-вектор ответа,
+        // поэтому без них шторка/сетка рисуют «Аноним» и теряют иконку
+        // отправителя. Скрытые имена отправителей сюда не попадают — как и на
+        // wire, где sender_id у скрытых подарков отсутствует.
+        for _, g := range gifts {
+                if g.Unique == nil || !g.Unique.KeepOriginalDetails {
                         continue
                 }
-                seen[g.FromUserID] = struct{}{}
-                ids = append(ids, g.FromUserID)
+                if g.Unique.OriginalFromUserID != 0 && !g.Unique.OriginalNameHidden {
+                        add(g.Unique.OriginalFromUserID)
+                }
+                if g.Unique.OriginalOwner.Type == domain.PeerTypeUser {
+                        add(g.Unique.OriginalOwner.ID)
+                }
         }
         return ids
 }

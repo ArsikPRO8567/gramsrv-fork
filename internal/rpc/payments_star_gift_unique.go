@@ -327,85 +327,24 @@ func (r *Router) onPaymentsGetUniqueStarGift(ctx context.Context, slug string) (
                 Chats: []tg.ChatClass{},
                 Users: []tg.UserClass{},
         }
-        uniqueGift, _ := out.Gift.(*tg.StarGiftUnique)
-        // Раунд 25: подарок, скрытый из профиля владельца (unsaved), не открывает
-        // доступ к профилю владельца. Сервер отдаёт только имя владельца
-        // (owner_name) вместо owner_id и исключает владельца из users/chats —
-        // у клиента не остаётся ни peer, ни access_hash для перехода в профиль.
-        // released_by и оригинальные детали (keep_original_details) не трогаем.
-        if unique.Unsaved && uniqueGift != nil {
-                hideUniqueGiftOwner(uniqueGift)
-                switch unique.Owner.Type {
-                case domain.PeerTypeUser:
-                        displayName := ""
-                        for _, owner := range r.domainUsersForIDs(ctx, viewerUserID, []int64{unique.Owner.ID}) {
-                                if owner.ID != unique.Owner.ID {
-                                        continue
-                                }
-                                displayName = starGiftOwnerDisplayName(owner.FirstName, owner.LastName)
-                                break
-                        }
-                        if displayName == "" {
-                                displayName = "Deleted Account"
-                        }
-                        uniqueGift.SetOwnerName(displayName)
-                        // Владелец исключён из users[], но отправитель оригинальных
-                        // деталей остаётся: без него клиент не отрисует блок details.
-                        if unique.KeepOriginalDetails && !unique.OriginalNameHidden && unique.OriginalFromUserID != 0 && unique.OriginalFromUserID != unique.Owner.ID {
-                                out.Users = tgUsersForViewer(viewerUserID, r.domainUsersForIDs(ctx, viewerUserID, []int64{unique.OriginalFromUserID}))
-                        }
-                case domain.PeerTypeChannel:
-                        // Владелец-канал исключён из chats[]; других пиров у канальной
-                        // копии ответ не содержит.
-                        if r.deps.Channels != nil {
-                                if views, viewsErr := r.deps.Channels.GetChannels(ctx, viewerUserID, []int64{unique.Owner.ID}); viewsErr == nil {
-                                        for _, view := range views {
-                                                if view.Channel.ID != unique.Owner.ID {
-                                                        continue
-                                                }
-                                                if title := strings.TrimSpace(view.Channel.Title); title != "" {
-                                                        uniqueGift.SetOwnerName(title)
-                                                }
-                                                break
-                                        }
-                                }
-                        }
-                }
-                return out, nil
-        }
         switch unique.Owner.Type {
         case domain.PeerTypeUser:
                 ids := []int64{unique.Owner.ID}
                 if unique.KeepOriginalDetails && !unique.OriginalNameHidden && unique.OriginalFromUserID != 0 && unique.OriginalFromUserID != unique.Owner.ID {
                         ids = append(ids, unique.OriginalFromUserID)
                 }
+                // Раунд 28: original_details.recipient_id сериализуется без флага, клиент
+                // разрешает его через users-вектор; после перепродажи оригинальный
+                // получатель — третье лицо, отличное от текущего владельца.
+                if unique.KeepOriginalDetails && unique.OriginalOwner.Type == domain.PeerTypeUser &&
+                        unique.OriginalOwner.ID != 0 && unique.OriginalOwner.ID != unique.Owner.ID {
+                        ids = append(ids, unique.OriginalOwner.ID)
+                }
                 out.Users = tgUsersForViewer(viewerUserID, r.domainUsersForIDs(ctx, viewerUserID, ids))
         case domain.PeerTypeChannel:
                 out.Chats = r.tgChatsForChannelIDs(ctx, viewerUserID, []int64{unique.Owner.ID})
         }
         return out, nil
-}
-
-// hideUniqueGiftOwner заменяет owner_id скрытого из профиля подарка на
-// owner_name: клиент рисует имя текстом, без кнопки перехода в профиль.
-func hideUniqueGiftOwner(out *tg.StarGiftUnique) {
-        if out == nil {
-                return
-        }
-        out.OwnerID = nil
-        out.Flags.Unset(0)
-        out.OwnerName = ""
-        out.Flags.Unset(1)
-}
-
-// starGiftOwnerDisplayName строит отображаемое имя пользователя для
-// owner_name скрытых подарков (как клиент строит имя в списке пиров).
-func starGiftOwnerDisplayName(firstName, lastName string) string {
-        name := strings.TrimSpace(strings.TrimSpace(firstName) + " " + strings.TrimSpace(lastName))
-        if name == "" {
-                return "Deleted Account"
-        }
-        return name
 }
 
 func tgStarGiftPreviewAttributes(preview domain.StarGiftUpgradePreview) []tg.StarGiftAttributeClass {

@@ -602,6 +602,19 @@ func (r *Router) onPaymentsGetResaleStarGifts(ctx context.Context, req *tg.Payme
                 } else if gift.Owner.Type == domain.PeerTypeChannel {
                         channelIDs = append(channelIDs, gift.Owner.ID)
                 }
+                // Раунд 28: карточка маркета несёт starGiftAttributeOriginalDetails с
+                // recipient_id (всегда) и sender_id (если оригинальное имя не скрыто).
+                // Клиент разрешает эти peer'ы через users-вектор этого ответа: без них
+                // в сетке маркета у каждого экземпляра «Аноним» и нет иконки
+                // оригинального отправителя.
+                if gift.KeepOriginalDetails {
+                        if gift.OriginalFromUserID != 0 && !gift.OriginalNameHidden {
+                                userIDs = append(userIDs, gift.OriginalFromUserID)
+                        }
+                        if gift.OriginalOwner.Type == domain.PeerTypeUser && gift.OriginalOwner.ID != 0 {
+                                userIDs = append(userIDs, gift.OriginalOwner.ID)
+                        }
+                }
         }
         if page.NextOffset != "" {
                 out.SetNextOffset(page.NextOffset)
