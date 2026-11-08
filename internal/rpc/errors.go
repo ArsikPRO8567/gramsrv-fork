@@ -158,6 +158,10 @@ func starsAmountInvalidErr() error { return tgerr.New(400, "STARS_AMOUNT_INVALID
 
 func subscriptionIDInvalidErr() error { return tgerr.New(400, "SUBSCRIPTION_ID_INVALID") }
 
+// transactionIDInvalidErr 映射官方 payments.getStarsTransactionsByID 的
+// TRANSACTION_ID_INVALID（空/超长等畸形公开交易 ID）。
+func transactionIDInvalidErr() error { return tgerr.New(400, "TRANSACTION_ID_INVALID") }
+
 func starsFormAmountMismatchErr() error { return tgerr.New(406, "STARS_FORM_AMOUNT_MISMATCH") }
 
 func formIDEmptyErr() error { return tgerr.New(400, "FORM_ID_EMPTY") }

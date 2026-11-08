@@ -152,8 +152,10 @@ func (r *Router) onMessagesSendPaidReaction(ctx context.Context, req *tg.Message
 		return nil, notImplementedErr()
 	}
 	channelPeer := domain.Peer{Type: domain.PeerTypeChannel, ID: peer.ID}
-	// 1. 先从账本 Debit（余额不足→真实 BALANCE_TOO_LOW）。
-	balance, err := r.deps.Stars.Debit(ctx, userID, int64(req.Count), domain.StarsReasonReaction, channelPeer, "Paid reaction", "")
+	// 1. 先从账本 Debit（余额不足→真实 BALANCE_TOO_LOW）。无英文文案：
+	// 客户端按 reaction 标志本地化。
+	balance, err := r.deps.Stars.DebitFlags(ctx, userID, int64(req.Count), domain.StarsReasonReaction, channelPeer,
+		domain.StarsLedgerFlags{}, "", "")
 	if err != nil {
 		return nil, starsErr(err)
 	}
@@ -167,7 +169,8 @@ func (r *Router) onMessagesSendPaidReaction(ctx context.Context, req *tg.Message
 		Date:      int(r.clock.Now().Unix()),
 	})
 	if err != nil {
-		if _, refundErr := r.deps.Stars.Credit(ctx, userID, int64(req.Count), domain.StarsReasonReaction, channelPeer, "Paid reaction refund", ""); refundErr != nil {
+		if _, refundErr := r.deps.Stars.CreditFlags(ctx, userID, int64(req.Count), domain.StarsReasonReaction, channelPeer,
+			domain.StarsLedgerFlags{Refunded: true}); refundErr != nil {
 			r.log.Error("paid reaction refund failed after record error",
 				zap.Int64("user_id", userID), zap.Int64("channel_id", peer.ID), zap.Int("msg_id", req.MsgID), zap.Error(refundErr))
 		}

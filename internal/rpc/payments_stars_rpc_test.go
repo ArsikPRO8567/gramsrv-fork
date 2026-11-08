@@ -181,7 +181,7 @@ func TestTGStarsTransactionsPaidMessage(t *testing.T) {
 	out := tgStarsTransactions([]domain.StarsTransaction{{
 		ID: 1, UserID: 42, Peer: domain.Peer{Type: domain.PeerTypeChannel, ID: 50},
 		Amount: -10, Date: 1700002002, Reason: domain.StarsReasonPaidMessage, Title: "Paid message",
-	}})
+	}}, starsGiftPayloads{uniques: map[int64]domain.UniqueStarGift{}, catalog: map[int64]domain.StarGift{}})
 	if len(out) != 1 {
 		t.Fatalf("paid-message transactions = %d, want 1", len(out))
 	}
@@ -199,7 +199,7 @@ func TestTGStarsTransactionsDoesNotPromiseMissingUniqueGiftPayload(t *testing.T)
 		ID: 2, UserID: 42, Peer: domain.Peer{Type: domain.PeerTypeUser, ID: 50},
 		Amount: -25, Date: 1700002003, Reason: domain.StarsReasonGiftUpgrade,
 		Title: "Star gift upgrade",
-	}})
+	}}, starsGiftPayloads{uniques: map[int64]domain.UniqueStarGift{}, catalog: map[int64]domain.StarGift{}})
 	if len(out) != 1 {
 		t.Fatalf("gift-upgrade transactions = %d, want 1", len(out))
 	}
@@ -232,6 +232,14 @@ type channelLedgerGifts struct {
 	tonPage      domain.TonTransactionPage
 }
 
+func (s *channelLedgerGifts) GiftByID(context.Context, int64) (domain.StarGift, bool, error) {
+	return domain.StarGift{}, false, nil
+}
+
+func (s *channelLedgerGifts) UniqueByIDs(context.Context, []int64) (map[int64]domain.UniqueStarGift, error) {
+	return map[int64]domain.UniqueStarGift{}, nil
+}
+
 func (s *channelLedgerGifts) ChannelStarsBalance(context.Context, int64) (int64, error) {
 	return s.starsBalance, nil
 }
@@ -240,12 +248,20 @@ func (s *channelLedgerGifts) ChannelStarsTransactions(context.Context, int64, do
 	return s.starsPage, nil
 }
 
+func (s *channelLedgerGifts) ChannelStarsTransactionsByID(context.Context, int64, []string) ([]domain.StarsTransaction, error) {
+	return nil, nil
+}
+
 func (s *channelLedgerGifts) ChannelTonBalance(context.Context, int64) (int64, error) {
 	return s.tonBalance, nil
 }
 
 func (s *channelLedgerGifts) ChannelTonTransactions(context.Context, int64, domain.StarsTransactionQuery) (domain.TonTransactionPage, error) {
 	return s.tonPage, nil
+}
+
+func (s *channelLedgerGifts) ChannelTonTransactionsByID(context.Context, int64, []string) ([]domain.TonTransaction, error) {
+	return nil, nil
 }
 
 type channelLedgerChannels struct {

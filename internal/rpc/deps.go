@@ -1182,6 +1182,8 @@ type GiftsService interface {
 	Withdraw(ctx context.Context, req domain.StarGiftWithdrawalRequest) (domain.StarGiftWithdrawal, error)
 	TonBalance(ctx context.Context, userID int64) (int64, error)
 	TonTransactions(ctx context.Context, userID int64, query domain.StarsTransactionQuery) (domain.TonTransactionPage, error)
+	// TonTransactionsByID 按公开交易 ID 批量读取本人 TON 流水（ByID RPC）。
+	TonTransactionsByID(ctx context.Context, userID int64, ids []string) ([]domain.TonTransaction, error)
 	IssuePurchaseForm(ctx context.Context, form domain.StarGiftPurchaseForm) (domain.StarGiftPurchaseForm, error)
 	ValidatePurchaseForm(ctx context.Context, req domain.StarGiftPurchaseRequest) error
 	Purchase(ctx context.Context, req domain.StarGiftPurchaseRequest) (domain.StarGiftPurchaseResult, error)
@@ -1190,11 +1192,16 @@ type GiftsService interface {
 // StarsService 抽象 Stars 本地账本（app/stars）：余额查询、贷记/借记、流水分页。
 // 借记原子且永不为负；余额不足返回 domain.ErrStarsInsufficient（rpc 经 starsErr
 // 映射为 BALANCE_TOO_LOW）。getStarsStatus 首读时惰性授予起始余额。
+// Flags 变体携带官方投影属性（礼物载荷/退款标志）；ByID 变体服务
+// payments.getStarsTransactionsByID。
 type StarsService interface {
 	GetBalance(ctx context.Context, userID int64) (domain.StarsBalance, error)
 	Credit(ctx context.Context, userID, amount int64, reason domain.StarsTransactionReason, peer domain.Peer, title, desc string) (domain.StarsBalance, error)
 	Debit(ctx context.Context, userID, amount int64, reason domain.StarsTransactionReason, peer domain.Peer, title, desc string) (domain.StarsBalance, error)
+	CreditFlags(ctx context.Context, userID, amount int64, reason domain.StarsTransactionReason, peer domain.Peer, flags domain.StarsLedgerFlags) (domain.StarsBalance, error)
+	DebitFlags(ctx context.Context, userID, amount int64, reason domain.StarsTransactionReason, peer domain.Peer, flags domain.StarsLedgerFlags, title, desc string) (domain.StarsBalance, error)
 	ListTransactions(ctx context.Context, userID int64, query domain.StarsTransactionQuery) (domain.StarsTransactionPage, error)
+	ListTransactionsByID(ctx context.Context, userID int64, ids []string) ([]domain.StarsTransaction, error)
 }
 
 // PremiumService is the domain-only boundary for catalog reads, payment form

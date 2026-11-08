@@ -3,7 +3,6 @@ package rpc
 import (
 	"context"
 	"errors"
-	"strconv"
 
 	"github.com/iamxvbaba/td/tg"
 	"github.com/iamxvbaba/td/tgerr"
@@ -49,6 +48,9 @@ func (r *Router) registerPayments(d *tlprofile.Dispatcher) {
 	})
 	registerRPC[*tg.PaymentsGetStarsTransactionsRequest](d, tlprofile.SemanticMethodPaymentsGetStarsTransactions, func(ctx context.Context, layerRequest *tg.PaymentsGetStarsTransactionsRequest) (any, error) {
 		return r.onPaymentsGetStarsTransactions(ctx, layerRequest)
+	})
+	registerRPC[*tg.PaymentsGetStarsTransactionsByIDRequest](d, tlprofile.SemanticMethodPaymentsGetStarsTransactionsByID, func(ctx context.Context, layerRequest *tg.PaymentsGetStarsTransactionsByIDRequest) (any, error) {
+		return r.onPaymentsGetStarsTransactionsByID(ctx, layerRequest)
 	})
 	registerRPC[*tg.PaymentsCheckCanSendGiftRequest](d, tlprofile.SemanticMethodPaymentsCheckCanSendGift, func(ctx context.Context, req *tg.PaymentsCheckCanSendGiftRequest) (any, error) {
 		return r.onPaymentsCheckCanSendGift(ctx, req)
@@ -245,8 +247,10 @@ func (r *Router) onPaymentsGetStarsRevenueStats(ctx context.Context, req *tg.Pay
 type channelGiftLedgerReader interface {
 	ChannelStarsBalance(ctx context.Context, channelID int64) (int64, error)
 	ChannelStarsTransactions(ctx context.Context, channelID int64, query domain.StarsTransactionQuery) (domain.StarsTransactionPage, error)
+	ChannelStarsTransactionsByID(ctx context.Context, channelID int64, ids []string) ([]domain.StarsTransaction, error)
 	ChannelTonBalance(ctx context.Context, channelID int64) (int64, error)
 	ChannelTonTransactions(ctx context.Context, channelID int64, query domain.StarsTransactionQuery) (domain.TonTransactionPage, error)
+	ChannelTonTransactionsByID(ctx context.Context, channelID int64, ids []string) ([]domain.TonTransaction, error)
 }
 
 // onPaymentsGetStarsStatus 返回请求 peer 的 Stars/本地 TON 余额。个人与频道账本
@@ -355,7 +359,7 @@ func (r *Router) onPaymentsGetStarsTransactions(ctx context.Context, req *tg.Pay
 				return nil, internalErr()
 			}
 			out := emptyStarsStatus(&tg.StarsTonAmount{Amount: page.Balance})
-			if txns := tgTonTransactions(page.Transactions); len(txns) > 0 {
+			if txns := tgTonTransactions(page.Transactions, r.loadStarsGiftPayloads(ctx, starsTonTransactionGiftRefs(page.Transactions))); len(txns) > 0 {
 				out.SetHistory(txns)
 			}
 			if page.NextOffset != "" {
@@ -369,7 +373,7 @@ func (r *Router) onPaymentsGetStarsTransactions(ctx context.Context, req *tg.Pay
 			return nil, internalErr()
 		}
 		out := emptyStarsStatus(&tg.StarsAmount{Amount: page.Balance})
-		if txns := tgStarsTransactions(page.Transactions); len(txns) > 0 {
+		if txns := tgStarsTransactions(page.Transactions, r.loadStarsGiftPayloads(ctx, starsTransactionGiftRefs(page.Transactions))); len(txns) > 0 {
 			out.SetHistory(txns)
 		}
 		if page.NextOffset != "" {
@@ -387,7 +391,7 @@ func (r *Router) onPaymentsGetStarsTransactions(ctx context.Context, req *tg.Pay
 			return nil, internalErr()
 		}
 		out := emptyStarsStatus(&tg.StarsTonAmount{Amount: page.Balance})
-		if txns := tgTonTransactions(page.Transactions); len(txns) > 0 {
+		if txns := tgTonTransactions(page.Transactions, r.loadStarsGiftPayloads(ctx, starsTonTransactionGiftRefs(page.Transactions))); len(txns) > 0 {
 			out.SetHistory(txns)
 		}
 		if page.NextOffset != "" {
@@ -410,7 +414,7 @@ func (r *Router) onPaymentsGetStarsTransactions(ctx context.Context, req *tg.Pay
 		return nil, starsErr(err)
 	}
 	out := emptyStarsStatus(&tg.StarsAmount{Amount: page.Balance})
-	if txns := tgStarsTransactions(page.Transactions); len(txns) > 0 {
+	if txns := tgStarsTransactions(page.Transactions, r.loadStarsGiftPayloads(ctx, starsTransactionGiftRefs(page.Transactions))); len(txns) > 0 {
 		out.SetHistory(txns)
 	}
 	if page.NextOffset != "" {
@@ -421,6 +425,125 @@ func (r *Router) onPaymentsGetStarsTransactions(ctx context.Context, req *tg.Pay
 		out.Users = tgUsersForViewer(userID, r.domainUsersForIDs(ctx, userID, ids))
 	}
 	return out, nil
+}
+
+// maxStarsTransactionIDLen ограничивает длину запрошенного публичного id
+// (stars_/ton_ + 60 символов; исторические строки — identity как текст).
+const maxStarsTransactionIDLen = 128
+
+// onPaymentsGetStarsTransactionsByID 返回按公开交易 ID 选中的流水
+// （payments.getStarsTransactionsByID）。scope 由 peer 决定（本人/频道），ton
+// 标志切换 Stars/TON 账本；历史行的 transaction_id 是旧行 id 的十进制串，
+// 新行是 stars_/ton_ + 60 位随机串 — 两种形状都按字符串精确匹配。未知 ID
+// 静默跳过（批量语义：返回已找到的子集），畸形 ID 报 TRANSACTION_ID_INVALID。
+func (r *Router) onPaymentsGetStarsTransactionsByID(ctx context.Context, req *tg.PaymentsGetStarsTransactionsByIDRequest) (*tg.PaymentsStarsStatus, error) {
+	if req == nil || len(req.ID) == 0 {
+		return nil, inputRequestInvalidErr()
+	}
+	userID, owner, err := r.starGiftLedgerOwnerForPeer(ctx, req.Peer)
+	if err != nil {
+		return nil, err
+	}
+	ids := make([]string, 0, len(req.ID))
+	for _, input := range req.ID {
+		// inputStarsTransaction.refund 选中「该交易的退款」；退款事务在本
+		// 账本中是独立行，与原交易同 ID 形状，这里按 id 直接匹配即可。
+		if input.ID == "" {
+			return nil, transactionIDInvalidErr()
+		}
+		if len(input.ID) > maxStarsTransactionIDLen {
+			return nil, transactionIDInvalidErr()
+		}
+		ids = append(ids, input.ID)
+	}
+	ton := req.GetTon()
+	if owner.Type == domain.PeerTypeChannel {
+		ledger, ok := r.deps.Gifts.(channelGiftLedgerReader)
+		if !ok {
+			if ton {
+				return emptyStarsStatus(&tg.StarsTonAmount{}), nil
+			}
+			return emptyStarsStatus(&tg.StarsAmount{}), nil
+		}
+		if ton {
+			txns, err := ledger.ChannelTonTransactionsByID(ctx, owner.ID, ids)
+			if err != nil {
+				return nil, internalErr()
+			}
+			return r.starsStatusFromTonTxns(ctx, userID, owner.ID, txns, 0), nil
+		}
+		txns, err := ledger.ChannelStarsTransactionsByID(ctx, owner.ID, ids)
+		if err != nil {
+			return nil, internalErr()
+		}
+		return r.starsStatusFromStarsTxns(ctx, userID, owner.ID, txns, 0), nil
+	}
+	if ton {
+		if r.deps.Gifts == nil {
+			return emptyStarsStatus(&tg.StarsTonAmount{}), nil
+		}
+		txns, err := r.deps.Gifts.TonTransactionsByID(ctx, userID, ids)
+		if err != nil {
+			return nil, internalErr()
+		}
+		balance, err := r.deps.Gifts.TonBalance(ctx, userID)
+		if err != nil {
+			return nil, internalErr()
+		}
+		return r.starsStatusFromTonTxns(ctx, userID, owner.ID, txns, balance), nil
+	}
+	if r.deps.Stars == nil {
+		return emptyStarsStatus(&tg.StarsAmount{}), nil
+	}
+	txns, err := r.deps.Stars.ListTransactionsByID(ctx, userID, ids)
+	if err != nil {
+		return nil, starsErr(err)
+	}
+	balance, err := r.deps.Stars.GetBalance(ctx, userID)
+	if err != nil {
+		return nil, starsErr(err)
+	}
+	return r.starsStatusFromStarsTxns(ctx, userID, owner.ID, txns, balance.Balance), nil
+}
+
+// starsStatusFromStarsTxns 构造 ByID 响应：投影 + balance + 对手方富化（同
+// getStarsTransactions 信封，无分页游标）。
+func (r *Router) starsStatusFromStarsTxns(ctx context.Context, viewerUserID, ownerChannelID int64, txns []domain.StarsTransaction, balance int64) *tg.PaymentsStarsStatus {
+	out := emptyStarsStatus(&tg.StarsAmount{Amount: balance})
+	if txns2 := tgStarsTransactions(txns, r.loadStarsGiftPayloads(ctx, starsTransactionGiftRefs(txns))); len(txns2) > 0 {
+		out.SetHistory(txns2)
+	}
+	if ownerChannelID > 0 {
+		r.enrichChannelStarsLedgerStatus(ctx, viewerUserID, ownerChannelID, txns, out)
+	} else if ids := starsTransactionUserIDs(txns); len(ids) > 0 {
+		out.Users = tgUsersForViewer(viewerUserID, r.domainUsersForIDs(ctx, viewerUserID, ids))
+	} else {
+		out.Users = []tg.UserClass{}
+	}
+	return out
+}
+
+func (r *Router) starsStatusFromTonTxns(ctx context.Context, viewerUserID, ownerChannelID int64, txns []domain.TonTransaction, balance int64) *tg.PaymentsStarsStatus {
+	out := emptyStarsStatus(&tg.StarsTonAmount{Amount: balance})
+	if txns2 := tgTonTransactions(txns, r.loadStarsGiftPayloads(ctx, starsTonTransactionGiftRefs(txns))); len(txns2) > 0 {
+		out.SetHistory(txns2)
+	}
+	if ownerChannelID > 0 {
+		r.enrichChannelTonLedgerStatus(ctx, viewerUserID, ownerChannelID, txns, out)
+	} else {
+		ids := make([]int64, 0)
+		for _, txn := range txns {
+			if txn.Peer.Type == domain.PeerTypeUser {
+				ids = append(ids, txn.Peer.ID)
+			}
+		}
+		if uids := uniqueInt64(ids); len(uids) > 0 {
+			out.Users = tgUsersForViewer(viewerUserID, r.domainUsersForIDs(ctx, viewerUserID, uids))
+		} else {
+			out.Users = []tg.UserClass{}
+		}
+	}
+	return out
 }
 
 func starsTransactionQuery(req *tg.PaymentsGetStarsTransactionsRequest) (domain.StarsTransactionQuery, error) {
@@ -528,15 +651,114 @@ func emptyStarsStatus(balance tg.StarsAmountClass) *tg.PaymentsStarsStatus {
 	}
 }
 
+// starsGiftPayloads 缓存一页流水涉及的礼物载荷：唯一礼物（预览/动画源）与
+// 目录礼物（普通礼物的贴纸动画源）。历史行没有礼物关联，载荷缺失时退回
+// 纯文本/标志渲染，绝不携带空 stargift（客户端会按标志解引用崩溃）。
+type starsGiftPayloads struct {
+	uniques map[int64]domain.UniqueStarGift
+	catalog map[int64]domain.StarGift
+}
+
+type starsGiftRef struct {
+	id     int64
+	unique bool
+}
+
+func starsTransactionGiftRefs(in []domain.StarsTransaction) []starsGiftRef {
+	refs := make([]starsGiftRef, 0, len(in))
+	for _, t := range in {
+		if t.GiftID > 0 {
+			refs = append(refs, starsGiftRef{id: t.GiftID, unique: t.GiftIsUnique})
+		}
+	}
+	return refs
+}
+
+func starsTonTransactionGiftRefs(in []domain.TonTransaction) []starsGiftRef {
+	refs := make([]starsGiftRef, 0, len(in))
+	for _, t := range in {
+		if t.GiftID > 0 {
+			refs = append(refs, starsGiftRef{id: t.GiftID, unique: t.GiftIsUnique})
+		}
+	}
+	return refs
+}
+
+// loadStarsGiftPayloads 批量装载一页流水的礼物载荷。读取失败按缺载荷处理
+// （客户端退回文本渲染），不因装饰性载荷失败整个历史页。
+func (r *Router) loadStarsGiftPayloads(ctx context.Context, refs []starsGiftRef) starsGiftPayloads {
+	payloads := starsGiftPayloads{
+		uniques: map[int64]domain.UniqueStarGift{},
+		catalog: map[int64]domain.StarGift{},
+	}
+	if r.deps.Gifts == nil || len(refs) == 0 {
+		return payloads
+	}
+	uniqueIDs := make([]int64, 0, len(refs))
+	seenUnique := make(map[int64]struct{}, len(refs))
+	catalogIDs := make([]int64, 0, len(refs))
+	seenCatalog := make(map[int64]struct{}, len(refs))
+	for _, ref := range refs {
+		if ref.unique {
+			if _, ok := seenUnique[ref.id]; ok {
+				continue
+			}
+			seenUnique[ref.id] = struct{}{}
+			uniqueIDs = append(uniqueIDs, ref.id)
+			continue
+		}
+		if _, ok := seenCatalog[ref.id]; ok {
+			continue
+		}
+		seenCatalog[ref.id] = struct{}{}
+		catalogIDs = append(catalogIDs, ref.id)
+	}
+	if len(uniqueIDs) > 0 {
+		if uniques, err := r.deps.Gifts.UniqueByIDs(ctx, uniqueIDs); err == nil {
+			payloads.uniques = uniques
+		}
+	}
+	for _, id := range catalogIDs {
+		if gift, ok, err := r.deps.Gifts.GiftByID(ctx, id); err == nil && ok {
+			payloads.catalog[id] = gift
+		}
+	}
+	return payloads
+}
+
+// tgStarsTransactionGift 返回该流水行的 stargift 载荷；无关联/载荷缺失返回 nil。
+func tgStarsTransactionGift(payloads starsGiftPayloads, giftID int64, giftIsUnique bool) tg.StarGiftClass {
+	if giftID <= 0 {
+		return nil
+	}
+	if giftIsUnique {
+		if unique, ok := payloads.uniques[giftID]; ok {
+			return tgUniqueStarGift(unique)
+		}
+		return nil
+	}
+	if gift, ok := payloads.catalog[giftID]; ok {
+		return tgStarGift(gift)
+	}
+	return nil
+}
+
 // tgStarsTransactions 把账本流水投影为 tg.StarsTransaction（amount 带符号：借记为负）。
-func tgStarsTransactions(in []domain.StarsTransaction) []tg.StarsTransaction {
+// Раунд 30: id 用公开 transaction_id（stars_…/ton_…，旧行回退账本 id 十进制串，
+// 客户端已记住的 id 继续可解析）；refund 只按 refunded 标志（与方向无关）；
+// 礼物类 reason 携带 stargift 载荷并按官方语义设置类型标志（gift 只属于
+// 「来自 peer 的礼物」入账侧），文本由客户端本地化——服务器不再下发英文文案。
+func tgStarsTransactions(in []domain.StarsTransaction, payloads starsGiftPayloads) []tg.StarsTransaction {
 	out := make([]tg.StarsTransaction, 0, len(in))
 	for _, t := range in {
 		item := tg.StarsTransaction{
-			ID:     strconv.FormatInt(t.ID, 10),
+			ID:     t.PublicID(),
 			Amount: &tg.StarsAmount{Amount: t.Amount},
 			Date:   t.Date,
 			Peer:   tgStarsTransactionPeer(t),
+		}
+		if t.Refunded {
+			item.Refund = true
 		}
 		if t.Title != "" {
 			item.SetTitle(t.Title)
@@ -550,25 +772,54 @@ func tgStarsTransactions(in []domain.StarsTransaction) []tg.StarsTransaction {
 		case domain.StarsReasonPaidMessage:
 			item.SetPaidMessages(1)
 		case domain.StarsReasonGift:
-			item.Gift = true
+			// 官方语义：gift=「这笔交易是 peer 发来的礼物」，只属于入账；
+			// 发送侧/退款行不置标志（退款按 refund 渲染）。
+			if t.Amount > 0 && !t.Refunded {
+				item.Gift = true
+			}
+			if gift := tgStarsTransactionGift(payloads, t.GiftID, t.GiftIsUnique); gift != nil {
+				item.SetStargift(gift)
+			}
+		case domain.StarsReasonGiftConvert:
+			// 礼物转星是「出售」：stargift 渲染礼物本体，不置 gift 标志。
+			if gift := tgStarsTransactionGift(payloads, t.GiftID, t.GiftIsUnique); gift != nil {
+				item.SetStargift(gift)
+			}
 		case domain.StarsReasonGiftUpgrade:
 			// Telegram Desktop treats stargift_upgrade as a promise that the
 			// optional stargift field contains a unique gift and immediately
 			// dereferences its model document while building the history row.
-			// The compact ledger projection currently has no StarGift payload,
-			// so advertising the flag produces a client-side access violation.
-			// Keep the transaction visible through its title/description and only
-			// restore this flag together with a complete unique-gift projection.
+			// The flag is advertised only together with a complete
+			// unique-gift projection (legacy rows keep title rendering).
+			if unique, ok := payloads.uniques[t.GiftID]; t.GiftIsUnique && ok {
+				item.StargiftUpgrade = true
+				item.SetStargift(tgUniqueStarGift(unique))
+			}
 		case domain.StarsReasonGiftResale:
 			item.StargiftResale = true
+			if gift := tgStarsTransactionGift(payloads, t.GiftID, t.GiftIsUnique); gift != nil {
+				item.SetStargift(gift)
+			}
 		case domain.StarsReasonGiftPrepaid:
 			item.StargiftPrepaidUpgrade = true
+			if gift := tgStarsTransactionGift(payloads, t.GiftID, t.GiftIsUnique); gift != nil {
+				item.SetStargift(gift)
+			}
 		case domain.StarsReasonGiftDrop:
 			item.StargiftDropOriginalDetails = true
+			if gift := tgStarsTransactionGift(payloads, t.GiftID, t.GiftIsUnique); gift != nil {
+				item.SetStargift(gift)
+			}
 		case domain.StarsReasonGiftAuction:
 			item.StargiftAuctionBid = true
+			if gift := tgStarsTransactionGift(payloads, t.GiftID, t.GiftIsUnique); gift != nil {
+				item.SetStargift(gift)
+			}
 		case domain.StarsReasonGiftOffer:
 			item.Offer = true
+			if gift := tgStarsTransactionGift(payloads, t.GiftID, t.GiftIsUnique); gift != nil {
+				item.SetStargift(gift)
+			}
 		case domain.StarsReasonPremium:
 			if t.PremiumMonths > 0 {
 				item.SetPremiumGiftMonths(t.PremiumMonths)
@@ -579,12 +830,12 @@ func tgStarsTransactions(in []domain.StarsTransaction) []tg.StarsTransaction {
 	return out
 }
 
-func tgTonTransactions(in []domain.TonTransaction) []tg.StarsTransaction {
+func tgTonTransactions(in []domain.TonTransaction, payloads starsGiftPayloads) []tg.StarsTransaction {
 	out := make([]tg.StarsTransaction, 0, len(in))
 	for _, t := range in {
-		item := tg.StarsTransaction{ID: strconv.FormatInt(t.ID, 10), Amount: &tg.StarsTonAmount{Amount: t.Amount},
+		item := tg.StarsTransaction{ID: t.PublicID(), Amount: &tg.StarsTonAmount{Amount: t.Amount},
 			Date: t.Date, Peer: tgStarsTransactionPeer(domain.StarsTransaction{Peer: t.Peer, Reason: t.Reason})}
-		if t.Amount > 0 {
+		if t.Refunded {
 			item.Refund = true
 		}
 		if t.Title != "" {
@@ -594,16 +845,42 @@ func tgTonTransactions(in []domain.TonTransaction) []tg.StarsTransaction {
 			item.SetDescription(t.Description)
 		}
 		switch t.Reason {
+		case domain.StarsReasonGift:
+			if t.Amount > 0 && !t.Refunded {
+				item.Gift = true
+			}
+			if gift := tgStarsTransactionGift(payloads, t.GiftID, t.GiftIsUnique); gift != nil {
+				item.SetStargift(gift)
+			}
+		case domain.StarsReasonGiftConvert:
+			if gift := tgStarsTransactionGift(payloads, t.GiftID, t.GiftIsUnique); gift != nil {
+				item.SetStargift(gift)
+			}
 		case domain.StarsReasonGiftResale:
 			item.StargiftResale = true
+			if gift := tgStarsTransactionGift(payloads, t.GiftID, t.GiftIsUnique); gift != nil {
+				item.SetStargift(gift)
+			}
 		case domain.StarsReasonGiftOffer:
 			item.Offer = true
+			if gift := tgStarsTransactionGift(payloads, t.GiftID, t.GiftIsUnique); gift != nil {
+				item.SetStargift(gift)
+			}
 		case domain.StarsReasonGiftAuction:
 			item.StargiftAuctionBid = true
+			if gift := tgStarsTransactionGift(payloads, t.GiftID, t.GiftIsUnique); gift != nil {
+				item.SetStargift(gift)
+			}
 		case domain.StarsReasonGiftPrepaid:
 			item.StargiftPrepaidUpgrade = true
+			if gift := tgStarsTransactionGift(payloads, t.GiftID, t.GiftIsUnique); gift != nil {
+				item.SetStargift(gift)
+			}
 		case domain.StarsReasonGiftDrop:
 			item.StargiftDropOriginalDetails = true
+			if gift := tgStarsTransactionGift(payloads, t.GiftID, t.GiftIsUnique); gift != nil {
+				item.SetStargift(gift)
+			}
 		}
 		out = append(out, item)
 	}
