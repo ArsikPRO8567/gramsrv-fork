@@ -72,16 +72,42 @@ func (s *Service) Credit(ctx context.Context, userID, amount int64, reason domai
 	return s.store.Credit(ctx, userID, amount, reason, peer, int(s.now().Unix()), title, desc)
 }
 
+// CreditFlags 贷记并携带官方投影属性（礼物载荷/退款标志）。
+func (s *Service) CreditFlags(ctx context.Context, userID, amount int64, reason domain.StarsTransactionReason, peer domain.Peer, flags domain.StarsLedgerFlags) (domain.StarsBalance, error) {
+	if amount <= 0 {
+		return domain.StarsBalance{}, domain.ErrStarsInvalidAmount
+	}
+	// 无对手方文本：礼物/退款由客户端按 flags 与 stargift 本地化渲染。
+	return s.store.CreditFlags(ctx, userID, amount, reason, peer, int(s.now().Unix()), "", "", flags)
+}
+
 // Debit 从账号扣款（amount>0），余额不足返回 domain.ErrStarsInsufficient。
 // 先确保起始授予已应用，避免新账号在尚未首读余额前借记被误判余额不足。
 func (s *Service) Debit(ctx context.Context, userID, amount int64, reason domain.StarsTransactionReason, peer domain.Peer, title, desc string) (domain.StarsBalance, error) {
+	return s.DebitFlags(ctx, userID, amount, reason, peer, domain.StarsLedgerFlags{}, title, desc)
+}
+
+// DebitFlags 借记并携带官方投影属性（礼物载荷/退款标志）。无文本变体由
+// flags 驱动客户端本地化（title/desc 留空即不携带英文文案）。
+func (s *Service) DebitFlags(ctx context.Context, userID, amount int64, reason domain.StarsTransactionReason, peer domain.Peer, flags domain.StarsLedgerFlags, title, desc string) (domain.StarsBalance, error) {
 	if amount <= 0 {
 		return domain.StarsBalance{}, domain.ErrStarsInvalidAmount
 	}
 	if _, err := s.ensureGranted(ctx, userID); err != nil {
 		return domain.StarsBalance{}, err
 	}
-	return s.store.Debit(ctx, userID, amount, reason, peer, int(s.now().Unix()), title, desc)
+	return s.store.DebitFlags(ctx, userID, amount, reason, peer, int(s.now().Unix()), title, desc, flags)
+}
+
+// ListTransactionsByID 按公开交易 ID 批量读取本人流水（ByID RPC）。首读时惰性授予。
+func (s *Service) ListTransactionsByID(ctx context.Context, userID int64, ids []string) ([]domain.StarsTransaction, error) {
+	if userID <= 0 || len(ids) == 0 {
+		return nil, nil
+	}
+	if _, err := s.ensureGranted(ctx, userID); err != nil {
+		return nil, err
+	}
+	return s.store.ListTransactionsByID(ctx, userID, ids)
 }
 
 // ListTransactions 按方向与顺序做 keyset 分页，首读时惰性授予。
