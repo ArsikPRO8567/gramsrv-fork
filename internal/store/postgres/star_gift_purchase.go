@@ -319,11 +319,14 @@ func (s *StarGiftLifecycleStore) purchaseStarGiftToChannel(ctx context.Context, 
 				NameHidden:      saved.NameHidden,
 				Saved:           true,
 				CanUpgrade:      canUpgrade,
-				// PrepaidUpgradeHash сознательно не включается: hash — это инвойс
-				// «оплатить улучшение чужого подарка», он привязан к приватному диалогу
-				// плательщика. В канальном действии он заставляет клиентов отправлять
-				// prepay invoice с peer = сервисный аккаунт/канал (STARGIFT_INVALID
-				// либо нежелательную предоплату вместо обычного улучшения).
+				// Раунд 25: канальные действия покупки несут полные prepaid-маркеры
+				// (как на официальном сервере): prepaid_upgrade=true у оплаченной
+				// предоплаты и prepaid_upgrade_hash у «покупки-цели» отдельной
+				// предоплаты (авто-хэш). Без них admin log и уведомление владельцу
+				// теряли снимок предоплаты (интеграционный тест round25:
+				// «до раунда 25 его снимок терялся»).
+				PrepaidUpgrade:    saved.PrepaidUpgradeStars > 0,
+				PrepaidUpgradeHash: saved.PrepaidUpgradeHash,
 				UpgradePriceStars: gift.UpgradeStars,
 				UpgradeStars:      saved.PrepaidUpgradeStars,
 				GiftNum:           saved.GiftNum,

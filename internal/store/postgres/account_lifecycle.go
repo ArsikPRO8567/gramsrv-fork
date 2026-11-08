@@ -696,6 +696,27 @@ SET status = 'failed', completed_at = $2 WHERE owner_user_id = $1 AND status = '
 WHERE bidder_user_id = $1 AND active = true`, userID); err != nil {
 		return fmt.Errorf("deactivate deleted account auction bids: %w", err)
 	}
+	// Раунд 28: при удалении аккаунта его уникальные подарки сгорают — их
+	// листинги маркета обязаны уйти ВМЕСТЕ с подарком. Раньше строки
+	// star_gift_listings оставались осиротевшими: маркет их отфильтровывал
+	// (NOT u.burned), а каталоговый счётчик availability_resale считал и их —
+	// счётчик на странице подарка расходился с маркетом до следующего
+	// листинга этого типа подарков.
+	if _, err := tx.Exec(ctx, `DELETE FROM star_gift_listings
+WHERE unique_gift_id IN (SELECT id FROM unique_star_gifts
+                         WHERE owner_peer_type = 'user' AND owner_peer_id = $1)`, userID); err != nil {
+		return fmt.Errorf("delete deleted account market listings: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `UPDATE star_gift_catalog c SET
+ availability_resale=(SELECT COUNT(*) FROM star_gift_listings l JOIN unique_star_gifts u ON u.id=l.unique_gift_id
+                     WHERE u.gift_id=c.gift_id AND NOT u.burned AND u.owner_address=''),
+ resell_min_stars=COALESCE((SELECT MIN(l.amount) FROM star_gift_listings l JOIN unique_star_gifts u ON u.id=l.unique_gift_id
+                     WHERE u.gift_id=c.gift_id AND l.currency='XTR' AND NOT u.burned AND u.owner_address=''),0),
+ updated_at=now()
+WHERE c.gift_id IN (SELECT DISTINCT gift_id FROM unique_star_gifts
+                    WHERE owner_peer_type = 'user' AND owner_peer_id = $1 AND gift_id IS NOT NULL)`, userID); err != nil {
+		return fmt.Errorf("refresh deleted account resale projection: %w", err)
+	}
 	if _, err := tx.Exec(ctx, `UPDATE unique_star_gifts
 SET burned = true, owner_name = '', updated_at = $2
 WHERE owner_peer_type = 'user' AND owner_peer_id = $1`, userID, now); err != nil {
