@@ -1611,6 +1611,29 @@ func (r *Router) invalidateStarGiftOwnerProjection(owner domain.Peer) {
 }
 
 func (r *Router) tgSavedStarGiftsResponse(ctx context.Context, viewerUserID int64, gifts []domain.SavedStarGift, count int, nextOffset string) (*tg.PaymentsSavedStarGifts, error) {
+        // Раунд 25: приватность оригинальных деталей в профиле — в канальных
+        // списках подпись отправителя и 附言 получает только тот, кто управляет
+        // профилем канала (администрация). Право вычисляется здесь, у чистой
+        // проекции tgSavedStarGifts нет доступа к проверке админства.
+        // Личные профили определяются чисто (viewer==owner), поэтому проверка
+        // каналов запускается только для канальных владельцев. Раунд 28 сохранил
+        // это правило для каналов: на личных профилях отправитель неанонимных
+        // подарков публичен (иконка отправителя в сетке чужого профиля).
+        manageCache := make(map[domain.Peer]bool)
+        for i := range gifts {
+                if gifts[i].Owner.Type != domain.PeerTypeChannel {
+                        continue
+                }
+                owner := gifts[i].Owner
+                can, ok := manageCache[owner]
+                if !ok {
+                        can = r.ensureCanManageStarGiftOwner(ctx, viewerUserID, owner) == nil
+                        manageCache[owner] = can
+                }
+                if can {
+                        gifts[i].ViewerCanManage = true
+                }
+        }
         uniqueIDs := make([]int64, 0)
         seenUnique := make(map[int64]struct{})
         for _, gift := range gifts {
@@ -1864,6 +1887,32 @@ func tgMessageActionStarGift(in *domain.MessageStarGiftAction) tg.MessageActionC
         }
         if in.LockedUntilDate > 0 {
                 gift.SetLockedUntilDate(in.LockedUntilDate)
+        }
+        // Раунд 23 (дамп 185743): аукционный контекст блока StarGift.
+        if in.Auction {
+                gift.Auction = true
+                if in.AuctionSlug != "" {
+                        gift.SetAuctionSlug(in.AuctionSlug)
+                }
+                if in.GiftsPerRound > 0 {
+                        gift.SetGiftsPerRound(in.GiftsPerRound)
+                }
+                if in.AuctionStartDate > 0 {
+                        gift.SetAuctionStartDate(in.AuctionStartDate)
+                }
+                if in.Background != nil {
+                        gift.Background = tg.StarGiftBackground{
+                                CenterColor: in.Background.CenterColor,
+                                EdgeColor:   in.Background.EdgeColor,
+                                TextColor:   in.Background.TextColor,
+                        }
+                }
+        }
+        // gift.convert_stars переопределяется отдельно от action.convert_stars:
+        // копия о выигрыше аукциона несёт 85% выигрышной ставки в блоке подарка
+        // и пустой convert_stars на самом action (дамп 185743).
+        if in.GiftConvertStars > 0 {
+                gift.ConvertStars = in.GiftConvertStars
         }
         if in.ReleasedBy != nil {
                 if releasedBy := tgPeer(*in.ReleasedBy); releasedBy != nil {
@@ -2161,11 +2210,28 @@ func tgSavedStarGiftGift(g domain.SavedStarGift, viewerUserID int64, catalog map
         }
 }
 
+// savedStarGiftOriginalDetailsVisible — видны ли получателю-зрителю
+// «оригинальные детали» подарка в профиле: отправитель (savedStarGift.from_id,
+// подпись «{отправитель} отправил(а) Вам этот подарок {дата}») и 附言.
+//
+// Раунд 25: в канальных списках подарков подпись отправителя и附言 видит
+// только администрация канала — право проставляют RPC-хендлеры в
+// SavedStarGift.ViewerCanManage (см. tgSavedStarGiftsResponse).
+//
+// Раунд 28: на личных профилях отправитель НЕанонимных подарков публичен —
+// официальная сетка профиля рисует имя/иконку отправителя у каждого зрителя
+// (фикс «на чужом профиле все подарки от анонима»). Анонимные подарки
+// (name_hidden) как и раньше раскрывают отправителя только
+// получателю-пользователю: iOS строит InputSavedStarGiftUser по msg_id из
+// этого peer (см. тест миграции 0181).
 func savedStarGiftOriginalDetailsVisible(viewerUserID int64, gift domain.SavedStarGift) bool {
-        if !gift.NameHidden {
-                return true
+        if gift.Owner.Type == domain.PeerTypeChannel {
+                return gift.ViewerCanManage
         }
-        return gift.Owner.Type == domain.PeerTypeUser && gift.Owner.ID == viewerUserID
+        if gift.NameHidden {
+                return gift.Owner.ID == viewerUserID
+        }
+        return true
 }
 
 func savedStarGiftUserIDs(viewerUserID int64, gifts []domain.SavedStarGift) []int64 {

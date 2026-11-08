@@ -2143,10 +2143,12 @@ func TestSavedStarGiftAnonymousDetailsVisibleOnlyToReceiver(t *testing.T) {
 	}
 }
 
-// Раунд 25: приватность оригинальных деталей профиля — подпись отправителя
-// («{отправитель} отправил(а) Вам этот подарок {дата}») и附言 видит только
-// тот, кто управляет профилем: владелец (личный профиль) или администрация
-// канала (профиль канала).
+// Раунд 25 + раунд 28 (слияние контрактов): в канальных списках подарков
+// подпись отправителя и附言 видит только администрация канала
+// (ViewerCanManage проставляют RPC-хендлеры). На личных профилях отправитель
+// НЕанонимных подарков публичен каждому зрителю (фикс раунда 28 «на чужом
+// профиле все подарки от анонима»), а анонимные подарки раскрывают
+// отправителя только получателю-пользователю.
 func TestSavedStarGiftOriginalDetailsAreManageScoped(t *testing.T) {
 	const (
 		senderID = int64(7301)
@@ -2162,12 +2164,13 @@ func TestSavedStarGiftOriginalDetailsAreManageScoped(t *testing.T) {
 		GiftID: 7101, RevisionID: 8101, SavedID: 52, Date: 100, Message: "channel note",
 	}
 
-	// Личный профиль: подпись видит только владелец.
+	// Личный профиль, неанонимный подарок (раунд 28): подпись публична —
+	// её видит и владелец, и посторонний зритель.
 	if !savedStarGiftOriginalDetailsVisible(ownerID, userGift) {
 		t.Fatal("owner must see original details of own gift")
 	}
-	if savedStarGiftOriginalDetailsVisible(stranger, userGift) {
-		t.Fatal("stranger must not see original details of a user gift")
+	if !savedStarGiftOriginalDetailsVisible(stranger, userGift) {
+		t.Fatal("stranger must see sender caption of a non-hidden user gift (round 28)")
 	}
 	// Профиль канала: право управления проставляется RPC-хендлером.
 	if savedStarGiftOriginalDetailsVisible(stranger, channelGift) {
@@ -2197,15 +2200,17 @@ func TestSavedStarGiftOriginalDetailsAreManageScoped(t *testing.T) {
 	if _, ok := ownerProjection.GetMessage(); !ok {
 		t.Fatal("owner projection lost gift note")
 	}
+	// Раунд 28: неанонимные отправители на личных профилях публичны —
+	// посторонний зритель видит from_id, подпись и отправителя в users[].
 	strangerProjection := tgSavedStarGifts(stranger, []domain.SavedStarGift{userGift}, catalog, nil)[0]
-	if _, ok := strangerProjection.GetFromID(); ok {
-		t.Fatal("stranger projection leaked from_id")
+	if _, ok := strangerProjection.GetFromID(); !ok {
+		t.Fatal("stranger projection lost from_id of a non-hidden user gift (round 28)")
 	}
-	if _, ok := strangerProjection.GetMessage(); ok {
-		t.Fatal("stranger projection leaked gift note")
+	if _, ok := strangerProjection.GetMessage(); !ok {
+		t.Fatal("stranger projection lost gift note of a non-hidden user gift (round 28)")
 	}
-	if ids := savedStarGiftUserIDs(stranger, []domain.SavedStarGift{userGift}); len(ids) != 0 {
-		t.Fatalf("stranger user ids = %v, want empty", ids)
+	if ids := savedStarGiftUserIDs(stranger, []domain.SavedStarGift{userGift}); !reflect.DeepEqual(ids, []int64{senderID}) {
+		t.Fatalf("stranger user ids = %v, want sender %d (round 28)", ids, senderID)
 	}
 	if ids := savedStarGiftUserIDs(ownerID, []domain.SavedStarGift{userGift}); !reflect.DeepEqual(ids, []int64{senderID}) {
 		t.Fatalf("owner user ids = %v, want sender %d", ids, senderID)
