@@ -660,8 +660,9 @@ RETURNING balance`, o.buyer, o.amount).Scan(&balance); err != nil {
 				return fmt.Errorf("refund deleted account stars offer: %w", err)
 			}
 			if _, err := tx.Exec(ctx, `INSERT INTO stars_transactions
-(user_id, peer_type, peer_id, amount, reason, title, description, date)
-VALUES ($1, 'user', $2, $3, 'gift_offer_refund_account_deleted', 'Gift offer refunded', '', $4)`, o.buyer, userID, o.amount, nowUnix); err != nil {
+(user_id, peer_type, peer_id, amount, reason, title, description, date, transaction_id, refunded)
+VALUES ($1, 'user', $2, $3, 'gift_offer_refund_account_deleted', 'Gift offer refunded', '', $4, $5, true)`,
+				o.buyer, userID, o.amount, nowUnix, domain.NewStarsTransactionID(false)); err != nil {
 				return fmt.Errorf("record deleted account stars refund: %w", err)
 			}
 		} else {
@@ -672,8 +673,8 @@ RETURNING balance_nanoton`, o.buyer, o.amount).Scan(&balance); err != nil {
 				return fmt.Errorf("refund deleted account TON offer: %w", err)
 			}
 			if _, err := tx.Exec(ctx, `INSERT INTO ton_transactions
-(user_id, amount_nanoton, reason, peer_type, peer_id, date)
-VALUES ($1, $2, 'gift_offer_refund_account_deleted', 'user', $3, $4)`, o.buyer, o.amount, userID, nowUnix); err != nil {
+(user_id, amount_nanoton, reason, peer_type, peer_id, date, transaction_id, refunded)
+VALUES ($1, $2, 'gift_offer_refund_account_deleted', 'user', $3, $4, $5, true)`, o.buyer, o.amount, userID, nowUnix, domain.NewStarsTransactionID(true)); err != nil {
 				return fmt.Errorf("record deleted account TON refund: %w", err)
 			}
 		}
@@ -740,8 +741,8 @@ WHERE owner_peer_type = 'user' AND owner_peer_id = $1 AND unique_gift_id IS NULL
 			return fmt.Errorf("zero deleted account stars: %w", err)
 		}
 		if _, err := tx.Exec(ctx, `INSERT INTO stars_transactions
-(user_id, peer_type, peer_id, amount, reason, title, description, date)
-VALUES ($1, 'user', $1, $2, 'account_deleted', 'Account deleted', '', $3)`, userID, -stars, nowUnix); err != nil {
+(user_id, peer_type, peer_id, amount, reason, title, description, date, transaction_id)
+VALUES ($1, 'user', $1, $2, 'account_deleted', 'Account deleted', '', $3, $4)`, userID, -stars, nowUnix, domain.NewStarsTransactionID(false)); err != nil {
 			return fmt.Errorf("record deleted account stars clearing: %w", err)
 		}
 	}
@@ -754,7 +755,7 @@ VALUES ($1, 'user', $1, $2, 'account_deleted', 'Account deleted', '', $3)`, user
 			return fmt.Errorf("zero deleted account TON: %w", err)
 		}
 		if _, err := tx.Exec(ctx, `INSERT INTO ton_transactions
-(user_id, amount_nanoton, reason, date) VALUES ($1, $2, 'account_deleted', $3)`, userID, -ton, nowUnix); err != nil {
+(user_id, amount_nanoton, reason, date, transaction_id) VALUES ($1, $2, 'account_deleted', $3, $4)`, userID, -ton, nowUnix, domain.NewStarsTransactionID(true)); err != nil {
 			return fmt.Errorf("record deleted account TON clearing: %w", err)
 		}
 	}

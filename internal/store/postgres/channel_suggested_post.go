@@ -343,7 +343,7 @@ func reserveSuggestedPostPaymentTx(ctx context.Context, tx pgx.Tx, payerID, pare
 		if err := tx.QueryRow(ctx, `UPDATE ton_balances SET balance_nanoton=balance_nanoton-$2,updated_at=now() WHERE user_id=$1 RETURNING balance_nanoton`, payerID, price.Amount).Scan(&balance); err != nil {
 			return nil, nil, false, err
 		}
-		if _, err := tx.Exec(ctx, `INSERT INTO ton_transactions(user_id,amount_nanoton,reason,peer_type,peer_id,date) VALUES($1,$2,$3,'channel',$4,$5)`, payerID, -price.Amount, string(domain.StarsReasonSuggestedPost), parentID, date); err != nil {
+		if _, err := tx.Exec(ctx, `INSERT INTO ton_transactions(user_id,amount_nanoton,reason,peer_type,peer_id,date,transaction_id) VALUES($1,$2,$3,'channel',$4,$5,$6)`, payerID, -price.Amount, string(domain.StarsReasonSuggestedPost), parentID, date, domain.NewStarsTransactionID(true)); err != nil {
 			return nil, nil, false, err
 		}
 		return nil, &balance, true, nil
@@ -470,10 +470,10 @@ func (s *ChannelStore) ProcessSuggestedPostLifecycle(ctx context.Context, req do
 SELECT monoforum_id,suggestion_message_id
 FROM suggested_post_approvals a
 WHERE (a.state='scheduled' AND a.schedule_date <= $1)
-	   OR (a.state='scheduled' AND EXISTS (
-	        SELECT 1 FROM channel_messages sm
-	        WHERE sm.channel_id=a.monoforum_id AND sm.id=a.suggestion_message_id AND sm.deleted))
-	   OR (a.state='published' AND (a.settlement_due <= $1 OR EXISTS (
+           OR (a.state='scheduled' AND EXISTS (
+                SELECT 1 FROM channel_messages sm
+                WHERE sm.channel_id=a.monoforum_id AND sm.id=a.suggestion_message_id AND sm.deleted))
+           OR (a.state='published' AND (a.settlement_due <= $1 OR EXISTS (
         SELECT 1 FROM channel_messages m
         WHERE m.channel_id=a.parent_channel_id AND m.id=a.published_message_id AND m.deleted)))
 ORDER BY CASE WHEN a.state='scheduled' THEN a.schedule_date ELSE a.settlement_due END,
@@ -662,7 +662,8 @@ func refundSuggestedPostPaymentTx(ctx context.Context, tx pgx.Tx, payerID, paren
 		if err := tx.QueryRow(ctx, `INSERT INTO stars_balances(user_id,balance,granted) VALUES($1,$2,true) ON CONFLICT(user_id) DO UPDATE SET balance=stars_balances.balance+EXCLUDED.balance,updated_at=now() RETURNING balance,granted`, payerID, price.Amount).Scan(&balance.Balance, &balance.Granted); err != nil {
 			return nil, nil, err
 		}
-		if err := insertStarsTxn(ctx, tx, payerID, price.Amount, domain.StarsReasonSuggestedPost, domain.Peer{Type: domain.PeerTypeChannel, ID: parentID}, date, "Suggested post refund", ""); err != nil {
+		if _, err := insertStarsTxnFull(ctx, tx, payerID, price.Amount, domain.StarsReasonSuggestedPost, domain.Peer{Type: domain.PeerTypeChannel, ID: parentID}, date, "Suggested post refund", "",
+			domain.StarsLedgerFlags{Refunded: true}); err != nil {
 			return nil, nil, err
 		}
 		return &balance, nil, nil
@@ -671,7 +672,7 @@ func refundSuggestedPostPaymentTx(ctx context.Context, tx pgx.Tx, payerID, paren
 		if err := tx.QueryRow(ctx, `INSERT INTO ton_balances(user_id,balance_nanoton,granted) VALUES($1,$2,true) ON CONFLICT(user_id) DO UPDATE SET balance_nanoton=ton_balances.balance_nanoton+EXCLUDED.balance_nanoton,updated_at=now() RETURNING balance_nanoton`, payerID, price.Amount).Scan(&balance); err != nil {
 			return nil, nil, err
 		}
-		if _, err := tx.Exec(ctx, `INSERT INTO ton_transactions(user_id,amount_nanoton,reason,peer_type,peer_id,date) VALUES($1,$2,$3,'channel',$4,$5)`, payerID, price.Amount, string(domain.StarsReasonSuggestedPost), parentID, date); err != nil {
+		if _, err := tx.Exec(ctx, `INSERT INTO ton_transactions(user_id,amount_nanoton,reason,peer_type,peer_id,date,transaction_id,refunded) VALUES($1,$2,$3,'channel',$4,$5,$6,true)`, payerID, price.Amount, string(domain.StarsReasonSuggestedPost), parentID, date, domain.NewStarsTransactionID(true)); err != nil {
 			return nil, nil, err
 		}
 		return nil, &balance, nil
@@ -693,13 +694,13 @@ func settleSuggestedPostPaymentTx(ctx context.Context, tx pgx.Tx, actorID, payer
 		if _, err := tx.Exec(ctx, `INSERT INTO channel_stars_balances(channel_id,balance) VALUES($1,$2) ON CONFLICT(channel_id) DO UPDATE SET balance=channel_stars_balances.balance+EXCLUDED.balance,updated_at=now()`, parentID, credit); err != nil {
 			return err
 		}
-		_, err := tx.Exec(ctx, `INSERT INTO channel_stars_transactions(channel_id,actor_user_id,amount,reason,peer_type,peer_id,date) VALUES($1,$2,$3,$4,'user',$5,$6)`, parentID, actorID, credit, string(domain.StarsReasonSuggestedPost), payerID, date)
+		_, err := tx.Exec(ctx, `INSERT INTO channel_stars_transactions(channel_id,actor_user_id,amount,reason,peer_type,peer_id,date,transaction_id) VALUES($1,$2,$3,$4,'user',$5,$6,$7)`, parentID, actorID, credit, string(domain.StarsReasonSuggestedPost), payerID, date, domain.NewStarsTransactionID(false))
 		return err
 	case domain.SuggestedPostPriceTON:
 		if _, err := tx.Exec(ctx, `INSERT INTO channel_ton_balances(channel_id,balance_nanoton) VALUES($1,$2) ON CONFLICT(channel_id) DO UPDATE SET balance_nanoton=channel_ton_balances.balance_nanoton+EXCLUDED.balance_nanoton,updated_at=now()`, parentID, credit); err != nil {
 			return err
 		}
-		_, err := tx.Exec(ctx, `INSERT INTO channel_ton_transactions(channel_id,actor_user_id,amount_nanoton,reason,peer_type,peer_id,date) VALUES($1,$2,$3,$4,'user',$5,$6)`, parentID, actorID, credit, string(domain.StarsReasonSuggestedPost), payerID, date)
+		_, err := tx.Exec(ctx, `INSERT INTO channel_ton_transactions(channel_id,actor_user_id,amount_nanoton,reason,peer_type,peer_id,date,transaction_id) VALUES($1,$2,$3,$4,'user',$5,$6,$7)`, parentID, actorID, credit, string(domain.StarsReasonSuggestedPost), payerID, date, domain.NewStarsTransactionID(true))
 		return err
 	default:
 		return domain.ErrSuggestedPostInvalid

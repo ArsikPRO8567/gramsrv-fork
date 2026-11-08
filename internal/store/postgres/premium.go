@@ -387,7 +387,7 @@ EXTRACT(EPOCH FROM updated_at)::bigint`,
 		if _, err := tx.Exec(ctx, `INSERT INTO premium_audit_events
 (actor_user_id,target_user_id,action,command_key,reason,metadata)
 VALUES($1,0,$2,$3,$4,jsonb_build_object(
-	'months',$5::integer,'before',$6::jsonb,'after',$7::jsonb))`,
+        'months',$5::integer,'before',$6::jsonb,'after',$7::jsonb))`,
 			req.ActorUserID, map[bool]string{true: "plan_update", false: "plan_create"}[found],
 			req.CommandKey, req.Reason, req.Months, beforeJSON, afterJSON); err != nil {
 			return fmt.Errorf("audit premium plan: %w", err)
@@ -769,11 +769,11 @@ WHERE user_id=$1 RETURNING balance`, form.BuyerUserID, form.AmountStars).Scan(&b
 		}
 		if err := tx.QueryRow(ctx, `INSERT INTO stars_transactions
 (user_id,peer_type,peer_id,amount,reason,title,description,date,premium_payment_intent_id,
-premium_recipient_user_id,premium_months)
-VALUES($1,'user',$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING id`,
+premium_recipient_user_id,premium_months,transaction_id)
+VALUES($1,'user',$2,$3,$4,'','',$5,$6,$7,$8,$9) RETURNING id`,
 			form.BuyerUserID, s.botID, -form.AmountStars, string(domain.StarsReasonPremium),
-			"Telegram Premium", domain.PremiumPurchaseDescription(form.Kind, form.Months, form.RecipientUserID),
-			req.Date, intentID, form.RecipientUserID, form.Months).Scan(&starsTransactionID); err != nil {
+			req.Date, intentID, form.RecipientUserID, form.Months,
+			domain.NewStarsTransactionID(false)).Scan(&starsTransactionID); err != nil {
 			return domain.PremiumPaymentForm{}, domain.PremiumEntitlement{}, domain.User{}, domain.StarsBalance{}, fmt.Errorf("insert premium stars transaction: %w", err)
 		}
 	}
@@ -818,8 +818,8 @@ stars_transaction_id=$3,updated_at=now() WHERE id=$1 AND status='pending'`,
 	if _, err := tx.Exec(ctx, `INSERT INTO premium_audit_events
 (actor_user_id,target_user_id,payment_intent_id,entitlement_id,action,metadata)
 VALUES($1,$2,$3,$4,'purchase',jsonb_build_object(
-	'kind',$5::text,'months',$6::integer,'amount_stars',$7::bigint,
-	'currency',$8::text,'payment_amount',$9::bigint,'debit_stars',$10::boolean))`,
+        'kind',$5::text,'months',$6::integer,'amount_stars',$7::bigint,
+        'currency',$8::text,'payment_amount',$9::bigint,'debit_stars',$10::boolean))`,
 		form.BuyerUserID, form.RecipientUserID, intentID, entitlement.ID, string(form.Kind),
 		form.Months, form.AmountStars, form.EffectivePaymentCurrency(), form.EffectivePaymentAmount(),
 		form.EffectiveDebitStars()); err != nil {
@@ -1267,7 +1267,7 @@ premium_updated_at=to_timestamp($3),updated_at=now() WHERE id=$1`,
 		if _, err := tx.Exec(ctx, `INSERT INTO premium_audit_events
 (actor_user_id,target_user_id,entitlement_id,action,command_key,reason,metadata)
 VALUES($1,$2,$3,'admin_grant',$4,$5,jsonb_build_object(
-	'months',$6::integer,'duration_days',$7::integer))`,
+        'months',$6::integer,'duration_days',$7::integer))`,
 			req.ActorUserID, req.UserID, entitlement.ID, req.CommandKey, req.Reason,
 			req.Months, req.DurationDays); err != nil {
 			return err
@@ -1447,10 +1447,10 @@ RETURNING balance,granted`, buyerID, amount).Scan(&balance, &granted); err != ni
 		}
 		var refundTransactionID int64
 		if err := tx.QueryRow(ctx, `INSERT INTO stars_transactions
-(user_id,peer_type,peer_id,amount,reason,title,description,date,premium_recipient_user_id,premium_months)
-VALUES($1,'user',$2,$3,$4,'Telegram Premium refund',$5,$6,$7,$8) RETURNING id`,
-			buyerID, s.botID, amount, string(domain.StarsReasonPremium), req.Reason,
-			req.Date, recipientID, months).Scan(&refundTransactionID); err != nil {
+(user_id,peer_type,peer_id,amount,reason,title,description,date,premium_recipient_user_id,premium_months,transaction_id,refunded)
+VALUES($1,'user',$2,$3,$4,'','',$5,$6,$7,$8,true) RETURNING id`,
+			buyerID, s.botID, amount, string(domain.StarsReasonPremium),
+			req.Date, recipientID, months, domain.NewStarsTransactionID(false)).Scan(&refundTransactionID); err != nil {
 			return err
 		}
 		if _, err := tx.Exec(ctx, `UPDATE premium_entitlements
@@ -1469,7 +1469,7 @@ SET status='refunded',refunded_at=to_timestamp($2),updated_at=now() WHERE id=$1`
 		if _, err := tx.Exec(ctx, `INSERT INTO premium_audit_events
 (actor_user_id,target_user_id,payment_intent_id,entitlement_id,action,command_key,reason,
 metadata) VALUES($1,$2,$3,$4,'refund',$5,$6,jsonb_build_object(
-	'amount_stars',$7::bigint,'refund_transaction_id',$8::bigint))`,
+        'amount_stars',$7::bigint,'refund_transaction_id',$8::bigint))`,
 			req.ActorUserID, recipientID, req.PaymentIntentID, entitlement.ID,
 			req.CommandKey, req.Reason, amount, refundTransactionID); err != nil {
 			return err

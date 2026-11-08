@@ -103,7 +103,8 @@ func (s *StarGiftLifecycleStore) PrepayStarGiftUpgrade(ctx context.Context, req 
 		}
 		balance, err := s.debitLifecycleAmount(ctx, tx, req.PayerUserID,
 			domain.StarGiftAmount{Currency: domain.StarGiftCurrencyStars, Amount: req.ChargeStars},
-			domain.StarsReasonGiftPrepaid, req.Owner, req.Date, "Prepaid star gift upgrade")
+			domain.StarsReasonGiftPrepaid, req.Owner, req.Date, "",
+			starsLedgerExtra{giftID: locked.GiftID})
 		if err != nil {
 			return err
 		}
@@ -250,7 +251,8 @@ func (s *StarGiftLifecycleStore) DropStarGiftOriginalDetails(ctx context.Context
 		}
 		balance, err := s.debitLifecycleAmount(ctx, tx, req.UserID,
 			domain.StarGiftAmount{Currency: domain.StarGiftCurrencyStars, Amount: req.ChargeStars},
-			domain.StarsReasonGiftDrop, saved.Owner, req.Date, "Drop star gift original details")
+			domain.StarsReasonGiftDrop, saved.Owner, req.Date, "",
+			starsLedgerExtra{giftID: unique.ID, giftIsUnique: true})
 		if err != nil {
 			return err
 		}

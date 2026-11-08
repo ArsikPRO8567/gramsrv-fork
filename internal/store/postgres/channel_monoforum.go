@@ -129,7 +129,7 @@ RETURNING balance`, req.SenderUserID, paidMessageStars).Scan(&balance.Balance); 
 			return domain.SendChannelMessageResult{}, fmt.Errorf("debit paid-message sender balance: %w", err)
 		}
 		if err := insertStarsTxn(ctx, tx, req.SenderUserID, -paidMessageStars, domain.StarsReasonPaidMessage,
-			domain.Peer{Type: domain.PeerTypeChannel, ID: parent.ID}, req.Date, "Paid message", ""); err != nil {
+			domain.Peer{Type: domain.PeerTypeChannel, ID: parent.ID}, req.Date, "", ""); err != nil {
 			return domain.SendChannelMessageResult{}, err
 		}
 		channelCredit := paidMessageStars * paidMessageChannelCommissionPermille / 1000

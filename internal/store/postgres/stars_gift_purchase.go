@@ -54,7 +54,7 @@ func (s *StarsPurchaseStore) IssueStarsPurchaseForm(ctx context.Context, form do
 		}
 		tag, err := s.db.Exec(ctx, `
 INSERT INTO stars_purchase_forms
-	(buyer_user_id,form_id,kind,recipient_user_id,spend_peer_type,spend_peer_id,purpose_json,stars,currency,amount,issued_at,expires_at)
+        (buyer_user_id,form_id,kind,recipient_user_id,spend_peer_type,spend_peer_id,purpose_json,stars,currency,amount,issued_at,expires_at)
 VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
 ON CONFLICT DO NOTHING`, form.BuyerUserID, formID, string(form.Kind), starsPurchaseRecipientValue(form.RecipientUserID),
 			starsPurchasePeerTypeValue(form.SpendPurposePeer), starsPurchasePeerIDValue(form.SpendPurposePeer),
@@ -129,9 +129,11 @@ SET balance=stars_balances.balance+EXCLUDED.balance, updated_at=now()
 RETURNING balance,granted`, req.RecipientUserID, req.Stars).Scan(&balance.Balance, &balance.Granted); err != nil {
 				return fmt.Errorf("credit stars gift recipient: %w", err)
 			}
+			// Раунд 30: без английского текста — клиент по gift-флагу и
+			// peer рисует «подарок от пользователя» самостоятельно.
 			if err := insertStarsTxn(ctx, tx, req.RecipientUserID, req.Stars, domain.StarsReasonGift,
 				domain.Peer{Type: domain.PeerTypeUser, ID: req.BuyerUserID}, req.Date,
-				"Stars gift", fmt.Sprintf("%d Stars", req.Stars)); err != nil {
+				"", ""); err != nil {
 				return err
 			}
 			result.Balance = balance
@@ -144,8 +146,8 @@ RETURNING balance,granted`, req.RecipientUserID, req.Stars).Scan(&balance.Balanc
 		after: func(ctx context.Context, tx pgx.Tx, sent domain.SendPrivateTextResult) error {
 			_, err := tx.Exec(ctx, `
 INSERT INTO stars_purchase_commands
-	(buyer_user_id,form_id,kind,request_fingerprint,recipient_user_id,spend_peer_type,spend_peer_id,purpose_json,stars,currency,amount,
-	 balance_after,transaction_id,created_at)
+        (buyer_user_id,form_id,kind,request_fingerprint,recipient_user_id,spend_peer_type,spend_peer_id,purpose_json,stars,currency,amount,
+         balance_after,transaction_id,created_at)
 VALUES($1,$2,$3,$4,$5,NULL,NULL,'{}'::jsonb,$6,$7,$8,$9,$10,$11)`, req.BuyerUserID, req.FormID, string(req.Kind), fingerprint[:],
 				req.RecipientUserID, req.Stars, req.Currency, req.Amount, result.Balance.Balance, transactionID, req.Date)
 			if err != nil {
@@ -188,14 +190,16 @@ SET balance=stars_balances.balance+EXCLUDED.balance, updated_at=now()
 RETURNING balance,granted`, req.BuyerUserID, req.Stars).Scan(&result.Balance.Balance, &result.Balance.Granted); err != nil {
 			return fmt.Errorf("credit stars topup buyer: %w", err)
 		}
+		// Раунд 30: без английского текста — клиент рисует Fragment-начисление
+		// по starsTransactionPeerFragment (peer выбирается в rpc-проекции).
 		if err := insertStarsTxn(ctx, tx, req.BuyerUserID, req.Stars, domain.StarsReasonTopup,
-			req.SpendPurposePeer, req.Date, "Stars top-up", "telesrv dev purchase"); err != nil {
+			req.SpendPurposePeer, req.Date, "", ""); err != nil {
 			return err
 		}
 		_, err := tx.Exec(ctx, `
 INSERT INTO stars_purchase_commands
-	(buyer_user_id,form_id,kind,request_fingerprint,recipient_user_id,spend_peer_type,spend_peer_id,purpose_json,stars,currency,amount,
-	 balance_after,transaction_id,created_at)
+        (buyer_user_id,form_id,kind,request_fingerprint,recipient_user_id,spend_peer_type,spend_peer_id,purpose_json,stars,currency,amount,
+         balance_after,transaction_id,created_at)
 VALUES($1,$2,$3,$4,NULL,$5,$6,'{}'::jsonb,$7,$8,$9,$10,$11,$12)`, req.BuyerUserID, req.FormID, string(req.Kind), fingerprint[:],
 			starsPurchasePeerTypeValue(req.SpendPurposePeer), starsPurchasePeerIDValue(req.SpendPurposePeer),
 			req.Stars, req.Currency, req.Amount, result.Balance.Balance, transactionID, req.Date)
@@ -254,8 +258,8 @@ func (s *StarsPurchaseStore) purchaseStarsGiveaway(ctx context.Context, req doma
 			}
 			if _, err := tx.Exec(ctx, `
 INSERT INTO stars_giveaways
-	(buyer_user_id,form_id,channel_id,launch_message_id,random_id,stars,users,per_user_stars,yearly_boosts,
-	 until_date,purpose_json,state,created_at)
+        (buyer_user_id,form_id,channel_id,launch_message_id,random_id,stars,users,per_user_stars,yearly_boosts,
+         until_date,purpose_json,state,created_at)
 VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'active',$12)`,
 				req.BuyerUserID, req.FormID, giveaway.BoostPeer.ID, sent.Message.ID, giveaway.RandomID,
 				req.Stars, giveaway.Users, giveaway.PerUserStars, giveaway.YearlyBoosts, giveaway.UntilDate, purposeJSON, req.Date); err != nil {
@@ -263,8 +267,8 @@ VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'active',$12)`,
 			}
 			if _, err := tx.Exec(ctx, `
 INSERT INTO stars_purchase_commands
-	(buyer_user_id,form_id,kind,request_fingerprint,recipient_user_id,spend_peer_type,spend_peer_id,purpose_json,stars,currency,amount,
-	 balance_after,transaction_id,created_at)
+        (buyer_user_id,form_id,kind,request_fingerprint,recipient_user_id,spend_peer_type,spend_peer_id,purpose_json,stars,currency,amount,
+         balance_after,transaction_id,created_at)
 VALUES($1,$2,$3,$4,NULL,NULL,NULL,$5,$6,$7,$8,0,$9,$10)`,
 				req.BuyerUserID, req.FormID, string(req.Kind), fingerprint[:], purposeJSON,
 				req.Stars, req.Currency, req.Amount, transactionID, req.Date); err != nil {

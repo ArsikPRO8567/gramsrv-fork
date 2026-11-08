@@ -73,7 +73,10 @@ func (s *StarsStore) EnsureGrant(ctx context.Context, userID, amount int64, date
 			}
 			out.Granted, applied = true, true
 		}
-		return insertStarsTxn(ctx, tx, userID, amount, domain.StarsReasonGrant, domain.Peer{}, date, "", "")
+		if _, err := insertStarsTxnFull(ctx, tx, userID, amount, domain.StarsReasonGrant, domain.Peer{}, date, "", "", domain.StarsLedgerFlags{}); err != nil {
+			return err
+		}
+		return nil
 	})
 	if err != nil {
 		return domain.StarsBalance{}, false, err
@@ -93,7 +96,31 @@ ON CONFLICT (user_id) DO UPDATE SET balance = stars_balances.balance + EXCLUDED.
 RETURNING balance, granted`, userID, amount).Scan(&out.Balance, &out.Granted); err != nil {
 			return fmt.Errorf("credit stars balance: %w", err)
 		}
-		return insertStarsTxn(ctx, tx, userID, amount, reason, peer, date, title, desc)
+		_, err := insertStarsTxnFull(ctx, tx, userID, amount, reason, peer, date, title, desc, domain.StarsLedgerFlags{})
+		return err
+	})
+	if err != nil {
+		return domain.StarsBalance{}, err
+	}
+	return out, nil
+}
+
+// CreditFlags 贷记并写入官方投影属性（礼物载荷/退款标志）。amount>0；
+// 其余语义同 Credit。
+func (s *StarsStore) CreditFlags(ctx context.Context, userID, amount int64, reason domain.StarsTransactionReason, peer domain.Peer, date int, title, desc string, flags domain.StarsLedgerFlags) (domain.StarsBalance, error) {
+	if userID == 0 || amount <= 0 {
+		return domain.StarsBalance{}, domain.ErrStarsInvalidAmount
+	}
+	out := domain.StarsBalance{UserID: userID}
+	err := withTx(ctx, s.db, "credit stars with flags", func(tx pgx.Tx) error {
+		if err := tx.QueryRow(ctx, `
+INSERT INTO stars_balances (user_id, balance, updated_at) VALUES ($1, $2, now())
+ON CONFLICT (user_id) DO UPDATE SET balance = stars_balances.balance + EXCLUDED.balance, updated_at = now()
+RETURNING balance, granted`, userID, amount).Scan(&out.Balance, &out.Granted); err != nil {
+			return fmt.Errorf("credit stars balance: %w", err)
+		}
+		_, err := insertStarsTxnFull(ctx, tx, userID, amount, reason, peer, date, title, desc, flags)
+		return err
 	})
 	if err != nil {
 		return domain.StarsBalance{}, err
@@ -102,6 +129,12 @@ RETURNING balance, granted`, userID, amount).Scan(&out.Balance, &out.Granted); e
 }
 
 func (s *StarsStore) Debit(ctx context.Context, userID, amount int64, reason domain.StarsTransactionReason, peer domain.Peer, date int, title, desc string) (domain.StarsBalance, error) {
+	return s.DebitFlags(ctx, userID, amount, reason, peer, date, title, desc, domain.StarsLedgerFlags{})
+}
+
+// DebitFlags 借记并写入官方投影属性（礼物载荷/退款标志）。余额不足返回
+// domain.ErrStarsInsufficient；其余语义同 Debit。
+func (s *StarsStore) DebitFlags(ctx context.Context, userID, amount int64, reason domain.StarsTransactionReason, peer domain.Peer, date int, title, desc string, flags domain.StarsLedgerFlags) (domain.StarsBalance, error) {
 	if userID == 0 || amount <= 0 {
 		return domain.StarsBalance{}, domain.ErrStarsInvalidAmount
 	}
@@ -122,7 +155,10 @@ func (s *StarsStore) Debit(ctx context.Context, userID, amount int64, reason dom
 			return fmt.Errorf("update stars balance debit: %w", err)
 		}
 		out.Granted = granted
-		return insertStarsTxn(ctx, tx, userID, -amount, reason, peer, date, title, desc)
+		if _, err := insertStarsTxnFull(ctx, tx, userID, -amount, reason, peer, date, title, desc, flags); err != nil {
+			return err
+		}
+		return nil
 	})
 	if err != nil {
 		return domain.StarsBalance{}, err
@@ -147,9 +183,9 @@ func (s *StarsStore) ListTransactions(ctx context.Context, userID int64, query d
 	// keyset：方向过滤先于 LIMIT，多取一条以探测同一视图是否还有下一页。
 	where, order, args := starsTransactionQueryParts("user_id", "amount", userID, query)
 	rows, err := s.db.Query(ctx, `
-SELECT id, peer_type, peer_id, amount, reason, title, description, date,
+SELECT id, COALESCE(transaction_id, ''), peer_type, peer_id, amount, reason, title, description, date,
        COALESCE(premium_payment_intent_id, 0), COALESCE(premium_recipient_user_id, 0),
-       COALESCE(premium_months, 0)
+       COALESCE(premium_months, 0), refunded, COALESCE(gift_id, 0), gift_is_unique
 FROM stars_transactions
 WHERE `+where+`
 ORDER BY id `+order+`
@@ -166,8 +202,8 @@ LIMIT $2`, args...)
 			peerID   int64
 			reason   string
 		)
-		if err := rows.Scan(&t.ID, &peerType, &peerID, &t.Amount, &reason, &t.Title, &t.Description, &t.Date,
-			&t.PaymentID, &t.RecipientUserID, &t.PremiumMonths); err != nil {
+		if err := rows.Scan(&t.ID, &t.TransactionID, &peerType, &peerID, &t.Amount, &reason, &t.Title, &t.Description, &t.Date,
+			&t.PaymentID, &t.RecipientUserID, &t.PremiumMonths, &t.Refunded, &t.GiftID, &t.GiftIsUnique); err != nil {
 			return domain.StarsTransactionPage{}, fmt.Errorf("scan stars transaction: %w", err)
 		}
 		t.UserID = userID
@@ -211,13 +247,77 @@ func starsTransactionQueryParts(ownerColumn, amountColumn string, ownerID int64,
 	return where, order, args
 }
 
-// insertStarsTxn 在事务内写一条流水（amount 带符号）。
+// insertStarsTxn 在事务内写一条流水（amount 带符号），无礼物载荷/退款标志。
 func insertStarsTxn(ctx context.Context, tx pgx.Tx, userID, amount int64, reason domain.StarsTransactionReason, peer domain.Peer, date int, title, desc string) error {
-	if _, err := tx.Exec(ctx, `
-INSERT INTO stars_transactions (user_id, peer_type, peer_id, amount, reason, title, description, date)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
-		userID, string(peer.Type), peer.ID, amount, string(reason), title, desc, date); err != nil {
-		return fmt.Errorf("insert stars transaction: %w", err)
+	_, err := insertStarsTxnFull(ctx, tx, userID, amount, reason, peer, date, title, desc, domain.StarsLedgerFlags{})
+	return err
+}
+
+// insertStarsTxnFull 在事务内写一条带官方投影属性的流水，返回账本行 id
+// （礼物在写入点尚未定型时，调用方可随后 UPDATE gift_id/gift_is_unique —
+// 升级流就是这样把目录礼物替换为产出的唯一礼物的）。公开交易 ID 在此生成。
+func insertStarsTxnFull(ctx context.Context, tx pgx.Tx, userID, amount int64, reason domain.StarsTransactionReason, peer domain.Peer, date int, title, desc string, flags domain.StarsLedgerFlags) (int64, error) {
+	var giftID any
+	if flags.GiftID > 0 {
+		giftID = flags.GiftID
 	}
-	return nil
+	var rowID int64
+	if err := tx.QueryRow(ctx, `
+INSERT INTO stars_transactions (user_id, peer_type, peer_id, amount, reason, title, description, date,
+        transaction_id, refunded, gift_id, gift_is_unique)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+RETURNING id`,
+		userID, string(peer.Type), peer.ID, amount, string(reason), title, desc, date,
+		domain.NewStarsTransactionID(false), flags.Refunded, giftID, flags.GiftIsUnique).Scan(&rowID); err != nil {
+		return 0, fmt.Errorf("insert stars transaction: %w", err)
+	}
+	return rowID, nil
+}
+
+// ListTransactionsByID 按公开交易 ID 批量读取本人账本流水（
+// payments.getStarsTransactionsByID）。未知 ID 静默跳过：官方服务器对批量
+// 查询返回已找到的子集；畸形 ID 在 rpc 层拒绝。
+func (s *StarsStore) ListTransactionsByID(ctx context.Context, userID int64, ids []string) ([]domain.StarsTransaction, error) {
+	if userID == 0 || len(ids) == 0 {
+		return nil, nil
+	}
+	rows, err := s.db.Query(ctx, `
+SELECT id, COALESCE(transaction_id, ''), peer_type, peer_id, amount, reason, title, description, date,
+       COALESCE(premium_payment_intent_id, 0), COALESCE(premium_recipient_user_id, 0),
+       COALESCE(premium_months, 0), refunded, COALESCE(gift_id, 0), gift_is_unique
+FROM stars_transactions
+WHERE user_id = $1 AND transaction_id = ANY($2)`, userID, ids)
+	if err != nil {
+		return nil, fmt.Errorf("list stars transactions by id: %w", err)
+	}
+	defer rows.Close()
+	byID := make(map[string]domain.StarsTransaction, len(ids))
+	for rows.Next() {
+		var (
+			t        domain.StarsTransaction
+			peerType string
+			peerID   int64
+			reason   string
+		)
+		if err := rows.Scan(&t.ID, &t.TransactionID, &peerType, &peerID, &t.Amount, &reason, &t.Title, &t.Description, &t.Date,
+			&t.PaymentID, &t.RecipientUserID, &t.PremiumMonths, &t.Refunded, &t.GiftID, &t.GiftIsUnique); err != nil {
+			return nil, fmt.Errorf("scan stars transaction: %w", err)
+		}
+		t.UserID = userID
+		t.Reason = domain.StarsTransactionReason(reason)
+		if peerType != "" {
+			t.Peer = domain.Peer{Type: domain.PeerType(peerType), ID: peerID}
+		}
+		byID[t.TransactionID] = t
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate stars transactions by id: %w", err)
+	}
+	out := make([]domain.StarsTransaction, 0, len(ids))
+	for _, id := range ids {
+		if t, ok := byID[id]; ok {
+			out = append(out, t)
+		}
+	}
+	return out, nil
 }

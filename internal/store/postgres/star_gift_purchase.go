@@ -482,9 +482,11 @@ last_sale_date=$2,updated_at=now() WHERE gift_id=$1`, gift.ID, req.Date); err !=
 	}
 	gift.LastSaleDate = req.Date
 	charge := gift.Stars + upgradePrice
+	// Раунд 30: без английского текста — клиент рисует покупку подарка по
+	// stargift; строка транзакции сразу несёт id купленного каталогового подарка.
 	balance, err := s.debitLifecycleAmount(ctx, tx, req.BuyerUserID,
 		domain.StarGiftAmount{Currency: domain.StarGiftCurrencyStars, Amount: charge}, domain.StarsReasonGift,
-		req.To, req.Date, "Star gift")
+		req.To, req.Date, "", starsLedgerExtra{giftID: gift.ID})
 	if err != nil {
 		return domain.StarGift{}, domain.SavedStarGift{}, domain.StarsBalance{}, err
 	}
