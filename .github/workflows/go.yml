@@ -36,10 +36,6 @@ jobs:
         run: |
           CGO_ENABLED=1 go build -v -ldflags="-s -w" -o gramsrv-admin ./cmd/telesrv-admin
 
-      - name: Build Giftfetch Tool
-        run: |
-          go build -o giftfetch ./cmd/giftfetch
-
       - name: Upload Artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -47,5 +43,4 @@ jobs:
           path: |
             gramsrv
             gramsrv-admin
-            giftfetch
           retention-days: 1
