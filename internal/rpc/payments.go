@@ -892,7 +892,17 @@ func tgTonTransactions(in []domain.TonTransaction, payloads starsGiftPayloads) [
 func tgStarsTransactionPeer(t domain.StarsTransaction) tg.StarsTransactionPeerClass {
 	switch t.Reason {
 	case domain.StarsReasonGrant, domain.StarsReasonTopup:
+		// «Покупка на Fragment» (startBalance/dev-checkout desktop+web).
 		return &tg.StarsTransactionPeerFragment{}
+	case domain.StarsReasonTopupAppStore:
+		// Раунд 31: «Покупка в приложении» (iOS-сессия).
+		return &tg.StarsTransactionPeerAppStore{}
+	case domain.StarsReasonTopupPlayMarket:
+		// Раунд 31: «Покупка в приложении» (Android-сессия).
+		return &tg.StarsTransactionPeerPlayMarket{}
+	case domain.StarsReasonTopupBot:
+		// Раунд 31: «Бот для покупки звёзд» (начисления оператора).
+		return &tg.StarsTransactionPeerPremiumBot{}
 	case domain.StarsReasonPremium:
 		return &tg.StarsTransactionPeerPremiumBot{}
 	}
