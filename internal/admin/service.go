@@ -1658,7 +1658,10 @@ func (s *Service) GrantStars(ctx context.Context, req GrantStarsRequest) (Comman
 		if req.DryRun {
 			return CommandResult{Message: "dry-run completed", Details: details}, nil
 		}
-		balance, err := s.stars.Credit(ctx, req.UserID, req.Amount, domain.StarsReasonAdjust, domain.Peer{}, "Admin Stars grant", req.Reason)
+		// Раунд 31: начисления оператора помечаются каналом «бот продажи
+		// звёзд» (topup_bot) — клиент рисует «Бот для покупки звёзд»
+		// (starsTransactionPeerPremiumBot) вместо «Unsupported transaction».
+		balance, err := s.stars.Credit(ctx, req.UserID, req.Amount, domain.StarsReasonTopupBot, domain.Peer{}, "", req.Reason)
 		if err != nil {
 			return CommandResult{}, err
 		}

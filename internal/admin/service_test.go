@@ -390,7 +390,7 @@ func TestGrantStarsDryRunExecuteAndIdempotency(t *testing.T) {
 	if err != nil {
 		t.Fatalf("execute stars: %v", err)
 	}
-	if exec.Status != string(domain.AdminCommandCompleted) || stars.creditCalls != 1 || stars.lastAmount != 250 || stars.lastReason != domain.StarsReasonAdjust || len(notifier.balances) != 1 {
+	if exec.Status != string(domain.AdminCommandCompleted) || stars.creditCalls != 1 || stars.lastAmount != 250 || stars.lastReason != domain.StarsReasonTopupBot || len(notifier.balances) != 1 {
 		t.Fatalf("exec=%+v creditCalls=%d amount=%d reason=%s notified=%v", exec, stars.creditCalls, stars.lastAmount, stars.lastReason, notifier.balances)
 	}
 	if exec.Details["updated_balance"] != int64(1250) {
