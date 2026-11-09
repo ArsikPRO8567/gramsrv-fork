@@ -175,13 +175,24 @@ func TestStarGiftResaleTonEquivalentPostgres(t *testing.T) {
 	if err != nil || boughtStars.Unique.Owner.ID != buyer.ID {
 		t.Fatalf("ton payment on stars listing = %+v err %v", boughtStars, err)
 	}
-	// Продавец получает цену листинга в звёздах: 80 * 900/1000 = 72.
+	// Раунд 31: продавец получает валюту покупателя. Звёздный листинг,
+	// оплаченный TON, начисляет продавцу TON: tonPrice * 900/1000 нанотон;
+	// звёзды продавца не меняются.
 	var sellerStarsAfter int64
 	if err := pool.QueryRow(ctx, `SELECT balance FROM stars_balances WHERE user_id=$1`, seller.ID).Scan(&sellerStarsAfter); err != nil {
 		t.Fatalf("seller stars balance after: %v", err)
 	}
-	if want := starsPrice * 900 / 1000; sellerStarsAfter-sellerStarsBefore != want {
-		t.Fatalf("seller stars proceeds = %d, want %d", sellerStarsAfter-sellerStarsBefore, want)
+	if sellerStarsAfter != sellerStarsBefore {
+		t.Fatalf("seller stars delta = %d, want 0 (buyer paid TON)", sellerStarsAfter-sellerStarsBefore)
+	}
+	var sellerTonAfter int64
+	if err := pool.QueryRow(ctx, `SELECT balance_nanoton FROM ton_balances WHERE user_id=$1`, seller.ID).Scan(&sellerTonAfter); err != nil {
+		t.Fatalf("seller ton balance after: %v", err)
+	}
+	// Комиссия маркета считается как в creditPeerLifecycleAmount:
+	// amount/1000*permille + amount%1000*permille/1000.
+	if want := sellerTon + tonPrice/1000*900 + tonPrice%1000*900/1000; sellerTonAfter != want {
+		t.Fatalf("seller ton proceeds for ton-paid stars listing = %d, want %d", sellerTonAfter-sellerTon, want)
 	}
 	// Покупатель: стартовый грант 100 TON минус обе TON-оплаты.
 	var buyerTon int64

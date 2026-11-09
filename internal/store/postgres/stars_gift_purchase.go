@@ -190,9 +190,10 @@ SET balance=stars_balances.balance+EXCLUDED.balance, updated_at=now()
 RETURNING balance,granted`, req.BuyerUserID, req.Stars).Scan(&result.Balance.Balance, &result.Balance.Granted); err != nil {
 			return fmt.Errorf("credit stars topup buyer: %w", err)
 		}
-		// Раунд 30: без английского текста — клиент рисует Fragment-начисление
-		// по starsTransactionPeerFragment (peer выбирается в rpc-проекции).
-		if err := insertStarsTxn(ctx, tx, req.BuyerUserID, req.Stars, domain.StarsReasonTopup,
+		// Раунд 30: без английского текста. Раунд 31: reason фиксирует канал
+		// приобретения (Fragment / App Store / Google Play / бот) — rpc-проекция
+		// по нему ставит официальный peer транзакции начисления.
+		if err := insertStarsTxn(ctx, tx, req.BuyerUserID, req.Stars, req.Acquisition.StarsTopupReason(),
 			req.SpendPurposePeer, req.Date, "", ""); err != nil {
 			return err
 		}

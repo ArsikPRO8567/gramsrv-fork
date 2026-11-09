@@ -1398,11 +1398,18 @@ raise_min_bid,round_extends,round_extend_seconds,total_rounds,round_duration,rou
 			return err
 		}
 
+		// Раунд 31: получатель ставки (recipient_peer_*) обновляется из запроса
+		// всегда. При повышении ставки клиент может прислать peer (официальная
+		// документация не запрещает peer при update_bid) — он резолвится в RPC
+		// и приходит здесь; без peer в счёте RPC подставляет прежний bid_peer,
+		// поэтому значение не меняется. hide_name/message при АКТИВНОЙ ставке
+		// сохраняются: они «cannot be changed for existing bids» и в счёте
+		// обновления не передаются.
 		if _, err := tx.Exec(ctx, `INSERT INTO star_gift_auction_bids(gift_id,bidder_user_id,recipient_peer_type,recipient_peer_id,
 amount,bid_date,hide_name,message) VALUES($1,$2,$3,$4,$5,$6,$7,$8)
 ON CONFLICT(gift_id,bidder_user_id) DO UPDATE SET
-recipient_peer_type=CASE WHEN star_gift_auction_bids.active THEN star_gift_auction_bids.recipient_peer_type ELSE EXCLUDED.recipient_peer_type END,
-recipient_peer_id=CASE WHEN star_gift_auction_bids.active THEN star_gift_auction_bids.recipient_peer_id ELSE EXCLUDED.recipient_peer_id END,
+recipient_peer_type=EXCLUDED.recipient_peer_type,
+recipient_peer_id=EXCLUDED.recipient_peer_id,
 amount=EXCLUDED.amount,bid_date=EXCLUDED.bid_date,
 hide_name=CASE WHEN star_gift_auction_bids.active THEN star_gift_auction_bids.hide_name ELSE EXCLUDED.hide_name END,
 message=CASE WHEN star_gift_auction_bids.active THEN star_gift_auction_bids.message ELSE EXCLUDED.message END,

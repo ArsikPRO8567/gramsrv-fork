@@ -1225,10 +1225,13 @@ func (s *StarGiftLifecycleStore) PurchaseResaleStarGift(ctx context.Context, req
 			if err != nil {
 				return err
 			}
-			// Продавец получает цену листинга в валюте листинга (как на
-			// официальном сервере): оплату покупателя в TON по звёздному
-			// листингу конвертирует сервер по своему курсу.
-			proceeds := domain.StarGiftAmount{Currency: domain.StarGiftCurrency(listingCurrency), Amount: listingAmount}
+			// Раунд 31: продавец получает СТРОГО валюту, которой заплатил
+			// покупатель. Раньше начисление шло в валюте листинга: при покупке
+			// звёздного листинга за TON покупатель платил TON, а продавцу
+			// начислялись звёзды. Листинг «только TON» оплачивается только
+			// нанотонами (resalePaymentMatchesListing), поэтому начисление в
+			// этом случае тоже всегда TON.
+			proceeds := req.Amount
 			if _, commission, err := s.creditPeerLifecycleAmount(ctx, tx, seller, req.BuyerUserID, proceeds,
 				domain.StarsReasonGiftResale, domain.Peer{Type: domain.PeerTypeUser, ID: req.BuyerUserID},
 				gift.ID, req.Date, "", starsLedgerExtra{giftIsUnique: true}); err != nil {
@@ -1247,7 +1250,7 @@ func (s *StarGiftLifecycleStore) PurchaseResaleStarGift(ctx context.Context, req
 			}
 			if _, err := tx.Exec(ctx, `UPDATE unique_star_gifts SET owner_peer_type=$2,owner_peer_id=$3,
                          last_sale_date=$4,last_sale_currency=$5,last_sale_amount=$6,updated_at=now() WHERE id=$1`,
-				uniqueID, string(req.To.Type), req.To.ID, req.Date, listingCurrency, listingAmount); err != nil {
+				uniqueID, string(req.To.Type), req.To.ID, req.Date, string(req.Amount.Currency), req.Amount.Amount); err != nil {
 				return err
 			}
 			gift.Owner = req.To
@@ -1415,7 +1418,8 @@ WHERE actor_user_id=$1 AND command_key=$2`, req.BuyerUserID, strings.TrimSpace(r
 			return err
 		}
 		var commissionAmount int64
-		proceeds := domain.StarGiftAmount{Currency: domain.StarGiftCurrency(listingCurrency), Amount: listingAmount}
+		// Раунд 31: продавцу уходит валюта покупателя (см. PurchaseResaleStarGift).
+		proceeds := req.Amount
 		if _, commission, err := s.creditPeerLifecycleAmount(ctx, tx, seller, req.BuyerUserID, proceeds,
 			domain.StarsReasonGiftResale, domain.Peer{Type: domain.PeerTypeUser, ID: req.BuyerUserID},
 			gift.ID, req.Date, "", starsLedgerExtra{giftIsUnique: true}); err != nil {
@@ -1434,7 +1438,7 @@ WHERE actor_user_id=$1 AND command_key=$2`, req.BuyerUserID, strings.TrimSpace(r
 		}
 		if _, err := tx.Exec(ctx, `UPDATE unique_star_gifts SET owner_peer_type=$2,owner_peer_id=$3,
                  last_sale_date=$4,last_sale_currency=$5,last_sale_amount=$6,updated_at=now() WHERE id=$1`,
-			uniqueID, string(req.To.Type), req.To.ID, req.Date, listingCurrency, listingAmount); err != nil {
+			uniqueID, string(req.To.Type), req.To.ID, req.Date, string(req.Amount.Currency), req.Amount.Amount); err != nil {
 			return err
 		}
 		gift.Owner = req.To
