@@ -51,6 +51,18 @@ type StarsGiveawayPurchase struct {
 	WinnersAreVisible  bool     `json:"winners_are_visible,omitempty"`
 }
 
+// StarsTopupAcquisition помечает канал приобретения звёзд в dev-чекoutе:
+// rpc-проекция транзакции начисления выбирает по нему официальный peer
+// (Fragment / App Store / Google Play / бот продажи звёзд).
+type StarsTopupAcquisition string
+
+const (
+	StarsTopupFragment   StarsTopupAcquisition = ""           // «Покупка на Fragment» (по умолчанию)
+	StarsTopupAppStore   StarsTopupAcquisition = "appstore"   // «Покупка в приложении» (iOS)
+	StarsTopupPlayMarket StarsTopupAcquisition = "playmarket" // «Покупка в приложении» (Android)
+	StarsTopupBot        StarsTopupAcquisition = "bot"        // «Бот для покупки звёзд»
+)
+
 // StarsPurchaseForm binds one short-lived fiat Stars checkout to its
 // authenticated buyer, purpose and exact server-advertised package. Recipient
 // is zero for a self top-up and mandatory for a friend gift.
@@ -66,6 +78,25 @@ type StarsPurchaseForm struct {
 	Amount           int64
 	IssuedAt         int
 	ExpiresAt        int
+	// Acquisition — канал приобретения для Kind=StarsPurchaseTopup
+	// (раунд 31). Не входит в fingerprint и валидацию формы: влияет только
+	// на reason записываемой транзакции начисления.
+	Acquisition StarsTopupAcquisition
+}
+
+// StarsTopupReason сопоставляет канал приобретения reason транзакции
+// начисления (см. tgStarsTransactionPeer).
+func (a StarsTopupAcquisition) StarsTopupReason() StarsTransactionReason {
+	switch a {
+	case StarsTopupAppStore:
+		return StarsReasonTopupAppStore
+	case StarsTopupPlayMarket:
+		return StarsReasonTopupPlayMarket
+	case StarsTopupBot:
+		return StarsReasonTopupBot
+	default:
+		return StarsReasonTopup
+	}
 }
 
 // StarsPurchaseRequest is the immutable settlement command carried by
@@ -103,10 +134,19 @@ type StarsGiveawayInfo struct {
 type StarsTransactionReason string
 
 const (
-	StarsReasonGrant    StarsTransactionReason = "grant"    // 起始余额自动授予
-	StarsReasonTopup    StarsTransactionReason = "topup"    // 充值（本地铸造）
-	StarsReasonReaction StarsTransactionReason = "reaction" // 付费 reaction 花费
-	StarsReasonGift     StarsTransactionReason = "gift"     // 星礼花费/收取
+	StarsReasonGrant StarsTransactionReason = "grant" // 起始余额自动授予
+	StarsReasonTopup StarsTransactionReason = "topup" // 充值（本地铸造）
+	// Раунд 31: варианты начисления звёзд. Официальные клиенты локализуют
+	// counterpartа транзакции по типу peer: StarsTransactionPeerFragment —
+	// «Покупка на Fragment», StarsTransactionPeerAppStore/PlayMarket —
+	// «Покупка в приложении», StarsTransactionPeerPremiumBot — «Бот для
+	// покупки звёзд». reason фиксирует канал приобретения, rpc-проекция
+	// выбирает peer по нему.
+	StarsReasonTopupAppStore   StarsTransactionReason = "topup_appstore"   // in-app покупка (App Store)
+	StarsReasonTopupPlayMarket StarsTransactionReason = "topup_playmarket" // in-app покупка (Google Play)
+	StarsReasonTopupBot        StarsTransactionReason = "topup_bot"        // начисление через бота (@PremiumBot)
+	StarsReasonReaction        StarsTransactionReason = "reaction"         // 付费 reaction 花费
+	StarsReasonGift            StarsTransactionReason = "gift"             // 星礼花费/收取
 	// StarsReasonGiftConvert 是礼物转星（兑换回 Stars）的专用原因：官方客户端
 	// 对「出售礼物」不画 gift 标志的「来自用户的礼物」签名，只按 stargift
 	// 渲染礼物本体。
