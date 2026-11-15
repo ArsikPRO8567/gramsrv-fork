@@ -390,7 +390,7 @@ func TestGrantStarsDryRunExecuteAndIdempotency(t *testing.T) {
 	if err != nil {
 		t.Fatalf("execute stars: %v", err)
 	}
-	if exec.Status != string(domain.AdminCommandCompleted) || stars.creditCalls != 1 || stars.lastAmount != 250 || stars.lastReason != domain.StarsReasonTopupBot || len(notifier.balances) != 1 {
+	if exec.Status != string(domain.AdminCommandCompleted) || stars.creditCalls != 1 || stars.lastAmount != 250 || stars.lastReason != domain.StarsReasonAdjust || len(notifier.balances) != 1 {
 		t.Fatalf("exec=%+v creditCalls=%d amount=%d reason=%s notified=%v", exec, stars.creditCalls, stars.lastAmount, stars.lastReason, notifier.balances)
 	}
 	if exec.Details["updated_balance"] != int64(1250) {
@@ -1204,6 +1204,144 @@ func TestImportOfficialStarGiftPreservesCraftedRarityAndPublishesBundle(t *testi
 		t.Fatalf("official provenance was not preserved: %+v", catalog)
 	}
 }
+
+// Раунд 31: аукционный подарок из снимка должен импортироваться без нарушения
+// star_gift_catalog_revision_auction_check / supply_check: auction => limited,
+// slug, gifts_per_round, auction_start_date и положительная поставка.
+func TestImportOfficialStarGiftAuctionSnapshotFillsAuctionAttributes(t *testing.T) {
+	lottie := `{"v":"5.7.4","fr":30,"ip":0,"op":60,"w":512,"h":512,"layers":[{"ty":4}],"assets":[]}`
+	raw := []byte(lottie)
+	sum := sha256.Sum256(raw)
+	baseDocument := officialgifts.Document{ID: 1, FileName: "auction.json", SHA256: hex.EncodeToString(sum[:]), Data: raw}
+	source := &fakeOfficialGiftsSource{bundle: officialgifts.Bundle{
+		ManifestSHA256: bytesOf(0x31, sha256.Size),
+		SourceJSON:     []byte(`{"id":7770001,"auction":true}`),
+		Gift: officialgifts.Gift{
+			ID: 7770001, Title: "Auction Rose", Stars: 500, ConvertStars: 425, DocumentID: 1,
+			// Снимок помечает подарок аукционным, но не несёт round-атрибутов —
+			// ровно тот случай, который раньше падал на SQLSTATE 23514.
+			Auction: true,
+		},
+		BaseDocument: baseDocument,
+	}}
+	gifts := &fakeGiftsService{}
+	svc := NewService(Dependencies{Commands: newMemoryCommandRepo(), Gifts: gifts, OfficialGifts: source, Now: fixedNow})
+	req := ImportOfficialStarGiftRequest{SourceGiftID: "7770001", Enabled: true}
+	req.CommandMeta = CommandMeta{CommandID: "auction-import", Actor: "ops", Reason: "auction snapshot", DryRun: false}
+	result, err := svc.ImportOfficialStarGift(context.Background(), req)
+	if err != nil {
+		t.Fatalf("auction snapshot import: result=%+v err=%v", result, err)
+	}
+	catalog := gifts.lastBundle.Catalog
+	if !catalog.Auction || !catalog.Limited {
+		t.Fatalf("catalog must be a limited auction gift: %+v", catalog)
+	}
+	if catalog.AuctionSlug != "official-7770001" {
+		t.Fatalf("AuctionSlug = %q, want derived official-7770001", catalog.AuctionSlug)
+	}
+	if catalog.GiftsPerRound != 1 || catalog.AuctionStartDate != int(fixedNow().Unix()) {
+		t.Fatalf("GiftsPerRound=%d AuctionStartDate=%d, want 1 and %d", catalog.GiftsPerRound, catalog.AuctionStartDate, int(fixedNow().Unix()))
+	}
+	if catalog.AvailabilityTotal <= 0 || catalog.AvailabilityRemains <= 0 {
+		t.Fatalf("auction supply must be positive: total=%d remains=%d", catalog.AvailabilityTotal, catalog.AvailabilityRemains)
+	}
+}
+
+// Раунд 31: настройки выпуска и вайтлиста из админки применяются к импорту
+// из снимка (количество, «кем выпущено», лимит-на-пользователя, birthday,
+// премиум, дата разблокировки) и попадают в блок вайтлиста ревизии.
+func TestImportOfficialStarGiftIssueSettingsAndWhitelist(t *testing.T) {
+	lottie := `{"v":"5.7.4","fr":30,"ip":0,"op":60,"w":512,"h":512,"layers":[{"ty":4}],"assets":[]}`
+	raw := []byte(lottie)
+	sum := sha256.Sum256(raw)
+	baseDocument := officialgifts.Document{ID: 1, FileName: "gift.json", SHA256: hex.EncodeToString(sum[:]), Data: raw}
+	source := &fakeOfficialGiftsSource{bundle: officialgifts.Bundle{
+		ManifestSHA256: bytesOf(0x32, sha256.Size),
+		SourceJSON:     []byte(`{"id":7770002,"birthday":true,"require_premium":true}`),
+		Gift: officialgifts.Gift{
+			ID: 7770002, Title: "Settings Rose", Stars: 100, ConvertStars: 90, DocumentID: 1,
+			Birthday: true, RequirePremium: true,
+		},
+		BaseDocument: baseDocument,
+	}}
+	gifts := &fakeGiftsService{}
+	svc := NewService(Dependencies{Commands: newMemoryCommandRepo(), Gifts: gifts, OfficialGifts: source, Now: fixedNow})
+	total, remains, perUser, locked := 25, 20, 3, 1_800_000_000
+	req := ImportOfficialStarGiftRequest{
+		SourceGiftID: "7770002", Enabled: true,
+		AvailabilityTotal: &total, AvailabilityRemains: &remains, PerUserTotal: &perUser,
+		ReleasedByType: "channel", ReleasedByID: 777, Birthday: boolPtr(false),
+		RequirePremium: boolPtr(false), LockedUntilDate: &locked,
+		Whitelist: &StarGiftWhitelistSettings{
+			AllowedBuyers: []string{" 123 ", "", "123", "456"}, Hidden: true, Numbered: true,
+			DisallowUpgrades: true, DisallowResell: true, Apply: true,
+		},
+	}
+	req.CommandMeta = CommandMeta{CommandID: "settings-import", Actor: "ops", Reason: "settings", DryRun: false}
+	result, err := svc.ImportOfficialStarGift(context.Background(), req)
+	if err != nil {
+		t.Fatalf("import with issue settings: result=%+v err=%v", result, err)
+	}
+	catalog := gifts.lastBundle.Catalog
+	if !catalog.Limited || catalog.AvailabilityTotal != 25 || catalog.AvailabilityRemains != 20 {
+		t.Fatalf("availability settings not applied: limited=%v total=%d remains=%d", catalog.Limited, catalog.AvailabilityTotal, catalog.AvailabilityRemains)
+	}
+	if !catalog.LimitedPerUser || catalog.PerUserTotal != 3 {
+		t.Fatalf("per-user settings not applied: %+v", catalog)
+	}
+	if catalog.ReleasedBy != (domain.Peer{Type: domain.PeerTypeChannel, ID: 777}) {
+		t.Fatalf("released_by not applied: %+v", catalog.ReleasedBy)
+	}
+	if catalog.Birthday || catalog.RequirePremium || catalog.LockedUntilDate != locked {
+		t.Fatalf("flag settings not applied: birthday=%v premium=%v locked=%d", catalog.Birthday, catalog.RequirePremium, catalog.LockedUntilDate)
+	}
+	whitelist := catalog.Whitelist
+	if whitelist == nil {
+		t.Fatalf("whitelist settings missing")
+	}
+	if len(whitelist.AllowedBuyers) != 2 || whitelist.AllowedBuyers[0] != "123" || whitelist.AllowedBuyers[1] != "456" {
+		t.Fatalf("allowed_buyers not normalized: %q", whitelist.AllowedBuyers)
+	}
+	if !whitelist.Hidden || !whitelist.Numbered || !whitelist.DisallowUpgrades || !whitelist.DisallowResell || !whitelist.Apply {
+		t.Fatalf("whitelist flags not preserved: %+v", whitelist)
+	}
+}
+
+// Раунд 31: валидация настроек выпуска зеркалит SQL-констрейнты —
+// отрицательные/несогласованные значения отклоняются до записи в БД.
+func TestImportStarGiftIssueSettingsValidation(t *testing.T) {
+	total, remains := 10, 20
+	cases := []struct {
+		name string
+		mut  func(req *ImportStarGiftRequest)
+	}{
+		{"remains above total", func(req *ImportStarGiftRequest) { req.AvailabilityTotal, req.AvailabilityRemains = &total, &remains }},
+		{"negative total", func(req *ImportStarGiftRequest) { value := -1; req.AvailabilityTotal = &value }},
+		{"released type without id", func(req *ImportStarGiftRequest) { req.ReleasedByType = "user" }},
+		{"released id without type", func(req *ImportStarGiftRequest) { req.ReleasedByID = 42 }},
+		{"released chat type", func(req *ImportStarGiftRequest) { req.ReleasedByType = "chat"; req.ReleasedByID = 42 }},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			gifts := &fakeGiftsService{}
+			svc := NewService(Dependencies{Commands: newMemoryCommandRepo(), Gifts: gifts, Now: fixedNow})
+			req := ImportStarGiftRequest{Title: "Broken", Stars: 50, ConvertStars: 25, Enabled: true}
+			req.FileName = "gift.tgs"
+			req.Data = []byte("tgs")
+			req.CommandMeta = CommandMeta{CommandID: "invalid-" + testCase.name, Actor: "ops", Reason: "validation", DryRun: false}
+			testCase.mut(&req)
+			_, err := svc.ImportStarGift(context.Background(), req)
+			if !errors.Is(err, domain.ErrStarGiftInvalid) {
+				t.Fatalf("err=%v, want ErrStarGiftInvalid", err)
+			}
+			if gifts.createCalls != 0 {
+				t.Fatalf("invalid settings must not reach the store")
+			}
+		})
+	}
+}
+
+func boolPtr(value bool) *bool { return &value }
 
 func TestImportOfficialStarGiftPublishesThroughRealGiftService(t *testing.T) {
 	const lottie = `{"v":"5.7.4","fr":30,"ip":0,"op":60,"w":512,"h":512,"layers":[{"ty":4}],"assets":[]}`

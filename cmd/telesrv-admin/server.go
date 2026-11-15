@@ -2026,6 +2026,17 @@ func (s *server) handleDeleteHistoryAPI(w http.ResponseWriter, r *http.Request) 
 	writeCommandResultAPI(w, result, err)
 }
 
+// starGiftWhitelistAPISettings — блок настроек вайтлиста в API админки
+// (раунд 31); пробрасывается в adminapi без изменений.
+type starGiftWhitelistAPISettings struct {
+	AllowedBuyers    []string `json:"allowed_buyers"`
+	Hidden           bool     `json:"hidden"`
+	Numbered         bool     `json:"numbered"`
+	DisallowUpgrades bool     `json:"disallow_upgrades"`
+	DisallowResell   bool     `json:"disallow_resell"`
+	Apply            bool     `json:"apply"`
+}
+
 type importStarGiftAPIRequest struct {
 	CommandID    string `json:"command_id"`
 	Reason       string `json:"reason"`
@@ -2036,6 +2047,16 @@ type importStarGiftAPIRequest struct {
 	ConvertStars int64  `json:"convert_stars,string"`
 	Enabled      bool   `json:"enabled"`
 	SortOrder    int    `json:"sort_order"`
+	// Настройки выпуска (раунд 31).
+	AvailabilityTotal   *int                          `json:"availability_total,omitempty"`
+	AvailabilityRemains *int                          `json:"availability_remains,omitempty"`
+	ReleasedByType      string                        `json:"released_by_type,omitempty"`
+	ReleasedByID        int64                         `json:"released_by_id,string,omitempty"`
+	PerUserTotal        *int                          `json:"per_user_total,omitempty"`
+	Birthday            *bool                         `json:"birthday,omitempty"`
+	RequirePremium      *bool                         `json:"require_premium,omitempty"`
+	LockedUntilDate     *int                          `json:"locked_until_date,omitempty"`
+	Whitelist           *starGiftWhitelistAPISettings `json:"whitelist,omitempty"`
 }
 
 func (s *server) handleImportStarGiftAPI(w http.ResponseWriter, r *http.Request) {
@@ -2075,6 +2096,17 @@ func (s *server) handleImportStarGiftAPI(w http.ResponseWriter, r *http.Request)
 		Enabled:      body.Enabled,
 		SortOrder:    body.SortOrder,
 		FileName:     header.Filename,
+		// Раунд 31: настройки выпуска и вайтлиста пробрасываются как есть
+		// (nil = настройка не передана).
+		AvailabilityTotal:   body.AvailabilityTotal,
+		AvailabilityRemains: body.AvailabilityRemains,
+		ReleasedByType:      body.ReleasedByType,
+		ReleasedByID:        body.ReleasedByID,
+		PerUserTotal:        body.PerUserTotal,
+		Birthday:            body.Birthday,
+		RequirePremium:      body.RequirePremium,
+		LockedUntilDate:     body.LockedUntilDate,
+		Whitelist:           starGiftWhitelistFromAPI(body.Whitelist),
 	}
 	result, err := s.callAdminMultipart(r.Context(), "/v1/gifts/import", req, header.Filename, data)
 	writeCommandResultAPI(w, result, err)
@@ -2095,6 +2127,32 @@ type importOfficialStarGiftAPIRequest struct {
 	UpgradeStars       int64  `json:"upgrade_stars,string"`
 	SupplyTotal        int    `json:"supply_total"`
 	SlugPrefix         string `json:"slug_prefix"`
+	// Настройки выпуска (раунд 31); nil = не передано — сохраняются значения снимка.
+	AvailabilityTotal   *int                          `json:"availability_total,omitempty"`
+	AvailabilityRemains *int                          `json:"availability_remains,omitempty"`
+	ReleasedByType      string                        `json:"released_by_type,omitempty"`
+	ReleasedByID        int64                         `json:"released_by_id,string,omitempty"`
+	PerUserTotal        *int                          `json:"per_user_total,omitempty"`
+	Birthday            *bool                         `json:"birthday,omitempty"`
+	RequirePremium      *bool                         `json:"require_premium,omitempty"`
+	LockedUntilDate     *int                          `json:"locked_until_date,omitempty"`
+	Whitelist           *starGiftWhitelistAPISettings `json:"whitelist,omitempty"`
+}
+
+// starGiftWhitelistFromAPI конвертирует API-блок вайтлиста в доменную форму
+// (nil — блок не задан, psql-строка gift_whitelists не перезаписывается).
+func starGiftWhitelistFromAPI(settings *starGiftWhitelistAPISettings) *admin.StarGiftWhitelistSettings {
+	if settings == nil {
+		return nil
+	}
+	return &admin.StarGiftWhitelistSettings{
+		AllowedBuyers:    append([]string(nil), settings.AllowedBuyers...),
+		Hidden:           settings.Hidden,
+		Numbered:         settings.Numbered,
+		DisallowUpgrades: settings.DisallowUpgrades,
+		DisallowResell:   settings.DisallowResell,
+		Apply:            settings.Apply,
+	}
 }
 
 func (s *server) handleImportOfficialStarGiftAPI(w http.ResponseWriter, r *http.Request) {
@@ -2112,6 +2170,17 @@ func (s *server) handleImportOfficialStarGiftAPI(w http.ResponseWriter, r *http.
 		Stars: body.Stars, ConvertStars: body.ConvertStars, Enabled: body.Enabled, SortOrder: body.SortOrder,
 		IncludeCollectible: body.IncludeCollectible, UpgradeStars: body.UpgradeStars,
 		SupplyTotal: body.SupplyTotal, SlugPrefix: body.SlugPrefix,
+		// Раунд 31: настройки выпуска и вайтлиста пробрасываются как есть
+		// (nil = настройка не передана, значения снимка сохраняются).
+		AvailabilityTotal:   body.AvailabilityTotal,
+		AvailabilityRemains: body.AvailabilityRemains,
+		ReleasedByType:      body.ReleasedByType,
+		ReleasedByID:        body.ReleasedByID,
+		PerUserTotal:        body.PerUserTotal,
+		Birthday:            body.Birthday,
+		RequirePremium:      body.RequirePremium,
+		LockedUntilDate:     body.LockedUntilDate,
+		Whitelist:           starGiftWhitelistFromAPI(body.Whitelist),
 	}
 	result, err := s.callAdminAPI(r.Context(), "/v1/official-gifts/import", req)
 	writeCommandResultAPI(w, result, err)

@@ -1225,13 +1225,10 @@ func (s *StarGiftLifecycleStore) PurchaseResaleStarGift(ctx context.Context, req
 			if err != nil {
 				return err
 			}
-			// Раунд 31: продавец получает СТРОГО валюту, которой заплатил
-			// покупатель. Раньше начисление шло в валюте листинга: при покупке
-			// звёздного листинга за TON покупатель платил TON, а продавцу
-			// начислялись звёзды. Листинг «только TON» оплачивается только
-			// нанотонами (resalePaymentMatchesListing), поэтому начисление в
-			// этом случае тоже всегда TON.
-			proceeds := req.Amount
+			// Продавец получает цену листинга в валюте листинга (как на
+			// официальном сервере): оплату покупателя в TON по звёздному
+			// листингу конвертирует сервер по своему курсу.
+			proceeds := domain.StarGiftAmount{Currency: domain.StarGiftCurrency(listingCurrency), Amount: listingAmount}
 			if _, commission, err := s.creditPeerLifecycleAmount(ctx, tx, seller, req.BuyerUserID, proceeds,
 				domain.StarsReasonGiftResale, domain.Peer{Type: domain.PeerTypeUser, ID: req.BuyerUserID},
 				gift.ID, req.Date, "", starsLedgerExtra{giftIsUnique: true}); err != nil {
@@ -1250,7 +1247,7 @@ func (s *StarGiftLifecycleStore) PurchaseResaleStarGift(ctx context.Context, req
 			}
 			if _, err := tx.Exec(ctx, `UPDATE unique_star_gifts SET owner_peer_type=$2,owner_peer_id=$3,
                          last_sale_date=$4,last_sale_currency=$5,last_sale_amount=$6,updated_at=now() WHERE id=$1`,
-				uniqueID, string(req.To.Type), req.To.ID, req.Date, string(req.Amount.Currency), req.Amount.Amount); err != nil {
+				uniqueID, string(req.To.Type), req.To.ID, req.Date, listingCurrency, listingAmount); err != nil {
 				return err
 			}
 			gift.Owner = req.To
@@ -1418,8 +1415,7 @@ WHERE actor_user_id=$1 AND command_key=$2`, req.BuyerUserID, strings.TrimSpace(r
 			return err
 		}
 		var commissionAmount int64
-		// Раунд 31: продавцу уходит валюта покупателя (см. PurchaseResaleStarGift).
-		proceeds := req.Amount
+		proceeds := domain.StarGiftAmount{Currency: domain.StarGiftCurrency(listingCurrency), Amount: listingAmount}
 		if _, commission, err := s.creditPeerLifecycleAmount(ctx, tx, seller, req.BuyerUserID, proceeds,
 			domain.StarsReasonGiftResale, domain.Peer{Type: domain.PeerTypeUser, ID: req.BuyerUserID},
 			gift.ID, req.Date, "", starsLedgerExtra{giftIsUnique: true}); err != nil {
@@ -1438,7 +1434,7 @@ WHERE actor_user_id=$1 AND command_key=$2`, req.BuyerUserID, strings.TrimSpace(r
 		}
 		if _, err := tx.Exec(ctx, `UPDATE unique_star_gifts SET owner_peer_type=$2,owner_peer_id=$3,
                  last_sale_date=$4,last_sale_currency=$5,last_sale_amount=$6,updated_at=now() WHERE id=$1`,
-			uniqueID, string(req.To.Type), req.To.ID, req.Date, string(req.Amount.Currency), req.Amount.Amount); err != nil {
+			uniqueID, string(req.To.Type), req.To.ID, req.Date, listingCurrency, listingAmount); err != nil {
 			return err
 		}
 		gift.Owner = req.To
@@ -1512,7 +1508,7 @@ WHERE actor_user_id=$1 AND command_key=$2`, req.BuyerUserID, strings.TrimSpace(r
 
 func lockSavedStarGiftByUniqueID(ctx context.Context, tx pgx.Tx, uniqueID int64) (domain.SavedStarGift, bool, error) {
 	row := tx.QueryRow(ctx, `SELECT p.id,p.owner_peer_type,p.owner_peer_id,p.from_user_id,p.gift_id,p.catalog_revision_id,
-         p.msg_id,p.saved_id,p.gift_date,p.name_hidden,p.unsaved,p.converted,p.convert_stars,p.prepaid_upgrade_stars,p.prepaid_upgrade_hash,p.gift_num,
+         p.msg_id,p.saved_id,p.gift_date,p.name_hidden,p.unsaved,p.converted,p.convert_stars,p.prepaid_upgrade_stars,p.prepaid_upgrade_hash,p.gift_num,COALESCE(p.paid_stars,0),
          p.lifecycle_status,p.transfer_stars,p.can_export_at,p.can_transfer_at,p.can_resell_at,p.drop_original_details_stars,p.can_craft_at,
          p.message,COALESCE(p.message_entities,'[]'::jsonb)::text,COALESCE(p.unique_gift_id,0),p.upgrade_msg_id,p.pinned_order,
          COALESCE((SELECT array_agg(i.collection_id ORDER BY c.sort_order,i.collection_id) FROM star_gift_collection_items i
@@ -2381,7 +2377,7 @@ func (s *StarGiftLifecycleStore) loadTransferReplay(ctx context.Context, req dom
 
 func savedStarGiftByUniqueID(ctx context.Context, db sqlcgen.DBTX, uniqueID int64) (domain.SavedStarGift, bool, error) {
 	row := db.QueryRow(ctx, `SELECT p.id,p.owner_peer_type,p.owner_peer_id,p.from_user_id,p.gift_id,p.catalog_revision_id,
-         p.msg_id,p.saved_id,p.gift_date,p.name_hidden,p.unsaved,p.converted,p.convert_stars,p.prepaid_upgrade_stars,p.prepaid_upgrade_hash,p.gift_num,
+         p.msg_id,p.saved_id,p.gift_date,p.name_hidden,p.unsaved,p.converted,p.convert_stars,p.prepaid_upgrade_stars,p.prepaid_upgrade_hash,p.gift_num,COALESCE(p.paid_stars,0),
          p.lifecycle_status,p.transfer_stars,p.can_export_at,p.can_transfer_at,p.can_resell_at,p.drop_original_details_stars,p.can_craft_at,
          p.message,COALESCE(p.message_entities,'[]'::jsonb)::text,COALESCE(p.unique_gift_id,0),p.upgrade_msg_id,p.pinned_order,
          COALESCE((SELECT array_agg(i.collection_id ORDER BY c.sort_order,i.collection_id) FROM star_gift_collection_items i

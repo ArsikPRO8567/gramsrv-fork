@@ -30,12 +30,12 @@ type Config struct {
 	// The shape mirrors config.AdminScopedToken without importing the loader --
 	// only the main packages depend on internal/config -- so the caller converts:
 	//
-	//	scoped := make([]adminapi.ScopedToken, 0, len(cfg.AdminScopedTokens))
-	//	for _, item := range cfg.AdminScopedTokens {
-	//		scoped = append(scoped, adminapi.ScopedToken{
-	//			Name: item.Name, Token: item.Token, Permissions: item.Permissions,
-	//		})
-	//	}
+	//      scoped := make([]adminapi.ScopedToken, 0, len(cfg.AdminScopedTokens))
+	//      for _, item := range cfg.AdminScopedTokens {
+	//              scoped = append(scoped, adminapi.ScopedToken{
+	//                      Name: item.Name, Token: item.Token, Permissions: item.Permissions,
+	//              })
+	//      }
 	ScopedTokens []ScopedToken
 }
 
@@ -955,6 +955,10 @@ func officialStarGiftListItem(item officialgifts.GiftSummary) map[string]any {
 		"upgrade_stars":      strconv.FormatInt(item.UpgradeStars, 10),
 		"availability_total": item.AvailabilityTotal, "upgrade_variants": item.UpgradeVariants,
 		"limited": item.Limited, "sold_out": item.SoldOut,
+		// Раунд 31: данные для предзаполнения настроек выпуска в форме импорта.
+		"birthday": item.Birthday, "require_premium": item.RequirePremium,
+		"limited_per_user": item.LimitedPerUser, "per_user_total": item.PerUserTotal,
+		"locked_until_date": item.LockedUntilDate, "auction": item.Auction,
 		"model_count": item.ModelCount, "pattern_count": item.PatternCount, "backdrop_count": item.BackdropCount,
 		"crafted_model_count": item.CraftedModelCount, "can_upgrade": item.CanUpgrade(), "can_craft": item.CanCraft(),
 		"document_id": strconv.FormatInt(item.DocumentID, 10), "animation_validated": item.AnimationValidated,

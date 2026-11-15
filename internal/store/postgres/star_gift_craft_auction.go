@@ -396,7 +396,7 @@ func (s *StarGiftLifecycleStore) ListCraftStarGifts(ctx context.Context, userID,
 	}
 	args = append(args, limit+1)
 	rows, err := s.db.Query(ctx, `SELECT p.id,p.owner_peer_type,p.owner_peer_id,p.from_user_id,p.gift_id,p.catalog_revision_id,
-p.msg_id,p.saved_id,p.gift_date,p.name_hidden,p.unsaved,p.converted,p.convert_stars,p.prepaid_upgrade_stars,p.prepaid_upgrade_hash,p.gift_num,
+p.msg_id,p.saved_id,p.gift_date,p.name_hidden,p.unsaved,p.converted,p.convert_stars,p.prepaid_upgrade_stars,p.prepaid_upgrade_hash,p.gift_num,COALESCE(p.paid_stars,0),
 p.lifecycle_status,p.transfer_stars,p.can_export_at,p.can_transfer_at,p.can_resell_at,p.drop_original_details_stars,p.can_craft_at,
 p.message,COALESCE(p.message_entities,'[]'::jsonb)::text,COALESCE(p.unique_gift_id,0),p.upgrade_msg_id,p.pinned_order,
 COALESCE((SELECT array_agg(i.collection_id ORDER BY c.sort_order,i.collection_id) FROM star_gift_collection_items i
@@ -1181,7 +1181,10 @@ WHERE gift_id=$1 AND saved_gift_id IS NULL ORDER BY id LIMIT 100`, giftID)
 				}
 				id, err := NewStarGiftStore(tx).Create(ctx, domain.SavedStarGift{Owner: owner, FromUserID: item.bidder,
 					GiftID: gift.ID, RevisionID: gift.RevisionID, MsgID: msgID, Date: item.date, NameHidden: item.hide,
-					ConvertStars: 0, Message: item.message, GiftNum: item.giftNum})
+					ConvertStars: 0, Message: item.message, GiftNum: item.giftNum,
+					// Раунд 31: paid_stars = выигрышная ставка — проекция
+					// профиля показывает её на карточке вместо цены каталога.
+					PaidStars: item.amount})
 				if err != nil {
 					return err
 				}
@@ -1398,18 +1401,11 @@ raise_min_bid,round_extends,round_extend_seconds,total_rounds,round_duration,rou
 			return err
 		}
 
-		// Раунд 31: получатель ставки (recipient_peer_*) обновляется из запроса
-		// всегда. При повышении ставки клиент может прислать peer (официальная
-		// документация не запрещает peer при update_bid) — он резолвится в RPC
-		// и приходит здесь; без peer в счёте RPC подставляет прежний bid_peer,
-		// поэтому значение не меняется. hide_name/message при АКТИВНОЙ ставке
-		// сохраняются: они «cannot be changed for existing bids» и в счёте
-		// обновления не передаются.
 		if _, err := tx.Exec(ctx, `INSERT INTO star_gift_auction_bids(gift_id,bidder_user_id,recipient_peer_type,recipient_peer_id,
 amount,bid_date,hide_name,message) VALUES($1,$2,$3,$4,$5,$6,$7,$8)
 ON CONFLICT(gift_id,bidder_user_id) DO UPDATE SET
-recipient_peer_type=EXCLUDED.recipient_peer_type,
-recipient_peer_id=EXCLUDED.recipient_peer_id,
+recipient_peer_type=CASE WHEN star_gift_auction_bids.active THEN star_gift_auction_bids.recipient_peer_type ELSE EXCLUDED.recipient_peer_type END,
+recipient_peer_id=CASE WHEN star_gift_auction_bids.active THEN star_gift_auction_bids.recipient_peer_id ELSE EXCLUDED.recipient_peer_id END,
 amount=EXCLUDED.amount,bid_date=EXCLUDED.bid_date,
 hide_name=CASE WHEN star_gift_auction_bids.active THEN star_gift_auction_bids.hide_name ELSE EXCLUDED.hide_name END,
 message=CASE WHEN star_gift_auction_bids.active THEN star_gift_auction_bids.message ELSE EXCLUDED.message END,

@@ -260,6 +260,13 @@ export type OfficialStarGiftRow = {
   upgrade_variants: number;
   limited: boolean;
   sold_out: boolean;
+  // Раунд 31: данные для предзаполнения настроек выпуска в форме импорта.
+  birthday: boolean;
+  require_premium: boolean;
+  limited_per_user: boolean;
+  per_user_total: number;
+  locked_until_date: number;
+  auction: boolean;
   model_count: number;
   pattern_count: number;
   backdrop_count: number;

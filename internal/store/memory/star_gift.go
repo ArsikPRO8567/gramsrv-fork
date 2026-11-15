@@ -4,6 +4,7 @@ import (
         "context"
         "math/rand/v2"
         "sort"
+        "strconv"
         "strings"
         "sync"
 
@@ -26,6 +27,7 @@ type StarGiftStore struct {
         uniqueByID       map[int64]domain.UniqueStarGift
         uniqueBySlug     map[string]int64
         collections      map[domain.Peer][]domain.StarGiftCollection
+        whitelists       map[int64]domain.GiftWhitelistWrite
         nextAttributeID  int64
         nextCollectionID int
 }
@@ -38,6 +40,7 @@ func NewStarGiftStore() *StarGiftStore {
                 collectibles: make(map[int64]domain.StarGiftCollectibleRevision),
                 uniqueByID:   make(map[int64]domain.UniqueStarGift), uniqueBySlug: make(map[string]int64),
                 collections: make(map[domain.Peer][]domain.StarGiftCollection),
+                whitelists:  make(map[int64]domain.GiftWhitelistWrite),
         }
 }
 
@@ -129,7 +132,18 @@ func (s *StarGiftStore) createCatalogRevisionLocked(write domain.StarGiftCatalog
         s.enabled[giftID] = write.Enabled
         s.sortOrder[giftID] = write.SortOrder
         s.animations[giftID] = append([]byte(nil), write.Animation.JSON...)
+        // Раунд 31: настройки вайтлиста пишутся вместе с ревизией, как в postgres-
+        // адаптере (апсерт строки gift_whitelists в транзакции ревизии).
+        if write.Whitelist != nil {
+                s.whitelists[giftID] = cloneWhitelistWrite(write.Whitelist)
+        }
         return domain.StarGiftCatalogEntry{Gift: gift, Enabled: write.Enabled, SortOrder: write.SortOrder}, nil
+}
+
+func cloneWhitelistWrite(value *domain.GiftWhitelistWrite) domain.GiftWhitelistWrite {
+        cloned := *value
+        cloned.AllowedBuyers = append([]string(nil), value.AllowedBuyers...)
+        return cloned
 }
 
 func cloneStarGiftBackground(value *domain.StarGiftBackground) *domain.StarGiftBackground {
@@ -1026,14 +1040,54 @@ func (s *StarGiftStore) savedStarGiftMatchesRef(g domain.SavedStarGift, ref doma
 
 // GetWhitelistInfo mirrors the postgres whitelist projection: gifts without a
 // whitelist record are allowed, not hidden and not numbered for everyone.
-func (s *StarGiftStore) GetWhitelistInfo(_ context.Context, giftID, _ int64) (domain.GiftWhitelistInfo, error) {
-        return domain.NoWhitelist, nil
+// Раунд 31: записи, созданные вместе с ревизией из админки, проецируются так же,
+// как в postgres (allowed/hidden/disallow-флаги прогейтятся по apply_whitelist,
+// numbered действует независимо).
+func (s *StarGiftStore) GetWhitelistInfo(_ context.Context, giftID, userID int64) (domain.GiftWhitelistInfo, error) {
+        s.mu.Lock()
+        defer s.mu.Unlock()
+        return s.whitelistInfoLocked(giftID, userID), nil
 }
 
-// GetWhitelistInfos — батч-вариант memory-адаптера: вайтлисты в памяти не
-// моделируются, все подарки трактуются как domain.NoWhitelist.
-func (s *StarGiftStore) GetWhitelistInfos(_ context.Context, _ []int64, _ int64) (map[int64]domain.GiftWhitelistInfo, error) {
-        return map[int64]domain.GiftWhitelistInfo{}, nil
+// GetWhitelistInfos — батч-вариант проекции вайтлистов для страницы подарков.
+func (s *StarGiftStore) GetWhitelistInfos(_ context.Context, giftIDs []int64, userID int64) (map[int64]domain.GiftWhitelistInfo, error) {
+        s.mu.Lock()
+        defer s.mu.Unlock()
+        out := make(map[int64]domain.GiftWhitelistInfo, len(giftIDs))
+        for _, giftID := range giftIDs {
+                if _, ok := s.whitelists[giftID]; ok {
+                        out[giftID] = s.whitelistInfoLocked(giftID, userID)
+                }
+        }
+        return out, nil
+}
+
+// whitelistInfoLocked вычисляет спроецированное состояние строки вайтлиста для
+// зрителя. Вызывается под s.mu; отсутствие строки — domain.NoWhitelist.
+func (s *StarGiftStore) whitelistInfoLocked(giftID, userID int64) domain.GiftWhitelistInfo {
+        row, ok := s.whitelists[giftID]
+        if !ok {
+                return domain.NoWhitelist
+        }
+        allowed := !row.Apply
+        if row.Apply {
+                id := strconv.FormatInt(userID, 10)
+                for _, buyer := range row.AllowedBuyers {
+                        if buyer == id {
+                                allowed = true
+                                break
+                        }
+                }
+        }
+        return domain.GiftWhitelistInfo{
+                Allowed:          allowed,
+                Hidden:           row.Apply && row.Hidden,
+                Numbered:         row.Numbered,
+                HasWhitelist:     true,
+                DisallowUpgrades: row.Apply && row.DisallowUpgrades,
+                DisallowResell:   row.Apply && row.DisallowResell,
+                ApplyWhitelist:   row.Apply,
+        }
 }
 
 // BurnAuctionGifts is a no-op in the in-memory adapter; auction supply is

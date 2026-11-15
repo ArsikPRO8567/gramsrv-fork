@@ -17,10 +17,10 @@ function officialGiftAttributeCount(gift: OfficialStarGiftRow) {
 }
 
 function formatBytes(value: number | string) {
-	const bytes = Number(value);
-	if (bytes < 1024) return `${bytes} B`;
-	if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-	return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+        const bytes = Number(value);
+        if (bytes < 1024) return `${bytes} B`;
+        if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+        return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 export function LottiePreview({ giftID, revision, compact = false }: { giftID: string; revision: number; compact?: boolean }) {
@@ -96,12 +96,30 @@ export function GiftsPage() {
   const [upgradeStars, setUpgradeStars] = useState("0");
   const [supplyTotal, setSupplyTotal] = useState("0");
   const [slugPrefix, setSlugPrefix] = useState("");
-	const [giftID, setGiftID] = useState("0");
+  const [giftID, setGiftID] = useState("0");
   const [title, setTitle] = useState("");
   const [stars, setStars] = useState("50");
   const [convertStars, setConvertStars] = useState("50");
   const [sortOrder, setSortOrder] = useState("0");
   const [enabled, setEnabled] = useState(true);
+  // Раунд 31: настройки выпуска (количество, «кем выпущено», лимит на
+  // пользователя, birthday, премиум, дата разблокировки покупки).
+  const [availabilityTotal, setAvailabilityTotal] = useState("0");
+  const [availabilityRemains, setAvailabilityRemains] = useState("0");
+  const [releasedByType, setReleasedByType] = useState<"" | "user" | "channel">("");
+  const [releasedByID, setReleasedByID] = useState("");
+  const [perUserTotal, setPerUserTotal] = useState("0");
+  const [birthday, setBirthday] = useState(false);
+  const [requirePremium, setRequirePremium] = useState(false);
+  const [lockedUntilDate, setLockedUntilDate] = useState("");
+  // Раунд 31: блок настроек вайтлиста (gift_whitelists).
+  const [whitelistOpen, setWhitelistOpen] = useState(false);
+  const [whitelistBuyers, setWhitelistBuyers] = useState("");
+  const [whitelistHidden, setWhitelistHidden] = useState(false);
+  const [whitelistNumbered, setWhitelistNumbered] = useState(false);
+  const [whitelistDisallowUpgrades, setWhitelistDisallowUpgrades] = useState(false);
+  const [whitelistDisallowResell, setWhitelistDisallowResell] = useState(false);
+  const [whitelistApply, setWhitelistApply] = useState(true);
   const [reason, setReason] = useState("");
   const [preview, setPreview] = useState<CommandResult | null>(null);
   const [busy, setBusy] = useState(false);
@@ -152,6 +170,47 @@ export function GiftsPage() {
     );
   }, [gifts, query]);
 
+  // Раунд 31: настройки выпуска и вайтлиста — общий блок для обеих вкладок
+  // (копия из снимка / загрузка своего файла). Дата разблокировки вводится
+  // календарём и уходит на сервер unix-секундами.
+  function lockedUntilUnix() {
+    const value = lockedUntilDate.trim();
+    if (!value) return 0;
+    const parsed = Date.parse(value + "T00:00:00Z");
+    return Number.isFinite(parsed) ? Math.floor(parsed / 1000) : 0;
+  }
+
+  function issueSettings() {
+    const buyers = whitelistBuyers.split(/[\s,;]+/).map((value) => value.trim()).filter(Boolean);
+    return {
+      availability_total: Math.max(0, Math.floor(Number(availabilityTotal) || 0)),
+      availability_remains: Math.max(0, Math.floor(Number(availabilityRemains) || 0)),
+      released_by_type: releasedByType,
+      released_by_id: releasedByID.trim() ? String(BigInt(releasedByID.trim())) : "0",
+      per_user_total: Math.max(0, Math.floor(Number(perUserTotal) || 0)),
+      birthday,
+      require_premium: requirePremium,
+      locked_until_date: lockedUntilUnix(),
+      whitelist: whitelistOpen ? {
+        allowed_buyers: buyers,
+        hidden: whitelistHidden,
+        numbered: whitelistNumbered,
+        disallow_upgrades: whitelistDisallowUpgrades,
+        disallow_resell: whitelistDisallowResell,
+        apply: whitelistApply
+      } : null
+    };
+  }
+
+  function resetIssueSettings() {
+    setAvailabilityTotal("0"); setAvailabilityRemains("0");
+    setReleasedByType(""); setReleasedByID(""); setPerUserTotal("0");
+    setBirthday(false); setRequirePremium(false); setLockedUntilDate("");
+    setWhitelistOpen(false); setWhitelistBuyers(""); setWhitelistHidden(false);
+    setWhitelistNumbered(false); setWhitelistDisallowUpgrades(false);
+    setWhitelistDisallowResell(false); setWhitelistApply(true);
+  }
+
   function uploadForm(confirm: boolean, commandID = "") {
     if (!file) throw new Error(t("gifts.fileRequired"));
     if (!reason.trim()) throw new Error(t("action.reasonRequired"));
@@ -160,12 +219,13 @@ export function GiftsPage() {
       command_id: commandID,
       reason: reason.trim(),
       confirm,
-			gift_id: giftID,
-			title: title.trim(),
-			stars,
-			convert_stars: convertStars,
+                        gift_id: giftID,
+                        title: title.trim(),
+                        stars,
+                        convert_stars: convertStars,
       enabled,
-      sort_order: Number(sortOrder)
+      sort_order: Number(sortOrder),
+      ...issueSettings()
     }));
     form.set("file", file, file.name);
     return form;
@@ -176,10 +236,11 @@ export function GiftsPage() {
     if (!reason.trim()) throw new Error(t("action.reasonRequired"));
     return {
       command_id: commandID, reason: reason.trim(), confirm,
-		source_gift_id: sourceGiftID, gift_id: giftID, title: title.trim(),
-		stars, convert_stars: convertStars, enabled, sort_order: Number(sortOrder),
-		include_collectible: includeCollectible, upgrade_stars: upgradeStars,
-      supply_total: Number(supplyTotal), slug_prefix: slugPrefix.trim().toLowerCase()
+                source_gift_id: sourceGiftID, gift_id: giftID, title: title.trim(),
+                stars, convert_stars: convertStars, enabled, sort_order: Number(sortOrder),
+                include_collectible: includeCollectible, upgrade_stars: upgradeStars,
+      supply_total: Number(supplyTotal), slug_prefix: slugPrefix.trim().toLowerCase(),
+      ...issueSettings()
     };
   }
 
@@ -189,9 +250,18 @@ export function GiftsPage() {
     setStars(String(gift.stars));
     setConvertStars(String(gift.convert_stars));
     setIncludeCollectible(gift.can_upgrade);
-		setUpgradeStars(gift.upgrade_stars);
-		setSupplyTotal(String(gift.availability_total > 0 ? gift.availability_total : Math.max(gift.upgrade_variants, 1)));
+                setUpgradeStars(gift.upgrade_stars);
+                setSupplyTotal(String(gift.availability_total > 0 ? gift.availability_total : Math.max(gift.upgrade_variants, 1)));
     setSlugPrefix(`official-${gift.source_gift_id}`);
+    // Раунд 31: предзаполнение настроек выпуска данными снимка, чтобы
+    // нетронутая форма импортировала подарок с исходными характеристиками.
+    setAvailabilityTotal(String(gift.availability_total > 0 ? gift.availability_total : 0));
+    setAvailabilityRemains(String(gift.availability_total > 0 ? gift.availability_total : 0));
+    setPerUserTotal(String(gift.per_user_total > 0 ? gift.per_user_total : 0));
+    setBirthday(gift.birthday);
+    setRequirePremium(gift.require_premium);
+    setLockedUntilDate(gift.locked_until_date > 0 ? new Date(gift.locked_until_date * 1000).toISOString().slice(0, 10) : "");
+    setReleasedByType(""); setReleasedByID("");
     setPreview(null);
   }
 
@@ -210,7 +280,7 @@ export function GiftsPage() {
     try {
       if (importSource === "official") await api.importOfficialGift(officialPayload(true, preview.command_id));
       else await api.importGift(uploadForm(true, preview.command_id));
-		setPreview(null); setFile(null); setGiftID("0"); setTitle(""); setSourceGiftID("");
+                setPreview(null); setFile(null); setGiftID("0"); setTitle(""); setSourceGiftID("");
       await load();
       setImportOpen(false);
     } catch (err) {
@@ -219,8 +289,9 @@ export function GiftsPage() {
   }
 
   function startImport() {
-	setGiftID("0"); setTitle(""); setStars("50"); setConvertStars("50"); setSortOrder("0");
+        setGiftID("0"); setTitle(""); setStars("50"); setConvertStars("50"); setSortOrder("0");
     setEnabled(true); setReason(""); setFile(null); setPreview(null); setImportError("");
+    resetIssueSettings();
     setImportSource("official"); setSourceGiftID(""); setOfficialQuery(""); setOfficialCategory("all"); setImportOpen(true);
   }
 
@@ -228,6 +299,7 @@ export function GiftsPage() {
     setGiftID(gift.GiftID); setTitle(gift.Title); setStars(String(gift.Stars));
     setConvertStars(String(gift.ConvertStars)); setSortOrder(String(gift.SortOrder)); setEnabled(gift.Enabled);
     setReason(""); setFile(null); setPreview(null); setImportError("");
+    resetIssueSettings();
     setImportSource("official"); setSourceGiftID(""); setOfficialQuery(""); setOfficialCategory("all"); setImportOpen(true);
   }
 
@@ -240,7 +312,7 @@ export function GiftsPage() {
       <div className="metric-row gift-metrics">
         <Metric label={t("gifts.total")} value={String(gifts.length)} />
         <Metric label={t("gifts.enabled")} value={String(gifts.filter((gift) => gift.Enabled).length)} tone="good" />
-		<Metric label={t("gifts.received")} value={gifts.reduce((sum, gift) => sum + BigInt(gift.ReceivedCount), 0n).toString()} />
+                <Metric label={t("gifts.received")} value={gifts.reduce((sum, gift) => sum + BigInt(gift.ReceivedCount), 0n).toString()} />
         <Metric label={t("gifts.formats")} value="TGS / Lottie" />
       </div>
       <QueryPanel>
@@ -273,9 +345,9 @@ export function GiftsPage() {
 
       {importOpen && createPortal(
         <div className="modal-backdrop" role="presentation">
-			<section className="modal command-modal gift-import-modal" role="dialog" aria-modal="true" aria-label={giftID !== "0" ? t("gifts.newRevision", { id: giftID }) : t("gifts.importTitle")}>
+                        <section className="modal command-modal gift-import-modal" role="dialog" aria-modal="true" aria-label={giftID !== "0" ? t("gifts.newRevision", { id: giftID }) : t("gifts.importTitle")}>
             <div className="modal-head">
-				<div><div className="eyebrow">{t("gifts.importEyebrow")}</div><h2>{giftID !== "0" ? t("gifts.newRevision", { id: giftID }) : t("gifts.importTitle")}</h2></div>
+                                <div><div className="eyebrow">{t("gifts.importEyebrow")}</div><h2>{giftID !== "0" ? t("gifts.newRevision", { id: giftID }) : t("gifts.importTitle")}</h2></div>
               <button className="icon-btn" type="button" onClick={() => setImportOpen(false)} disabled={busy} aria-label={t("action.close")}><X size={15} /></button>
             </div>
             <div className="command-body gift-import-modal-body">
@@ -349,6 +421,46 @@ export function GiftsPage() {
                 <label><span>{t("gifts.stars")}</span><input type="number" min="1" value={stars} onChange={(e) => { setStars(e.target.value); setPreview(null); }} /></label>
                 <label><span>{t("gifts.convertStars")}</span><input type="number" min="0" value={convertStars} onChange={(e) => { setConvertStars(e.target.value); setPreview(null); }} /></label>
                 <label><span>{t("gifts.sortOrder")}</span><input type="number" value={sortOrder} onChange={(e) => { setSortOrder(e.target.value); setPreview(null); }} /></label>
+              </div>
+              {/* Раунд 31: настройки выпуска — общие для копии из снимка и загрузки своего файла */}
+              <div className="gift-settings-block">
+                <div className="gift-settings-head">
+                  <strong>{t("gifts.issueSettings")}</strong>
+                  <span>{t("gifts.issueHint")}</span>
+                </div>
+                <div className="gift-fields-grid gift-fields-grid-wide">
+                  <label><span>{t("gifts.availabilityTotal")}</span><input type="number" min="0" value={availabilityTotal} onChange={(e) => { setAvailabilityTotal(e.target.value); setPreview(null); }} /></label>
+                  <label><span>{t("gifts.availabilityRemains")}</span><input type="number" min="0" value={availabilityRemains} onChange={(e) => { setAvailabilityRemains(e.target.value); setPreview(null); }} /></label>
+                  <label><span>{t("gifts.perUserTotal")}</span><input type="number" min="0" value={perUserTotal} onChange={(e) => { setPerUserTotal(e.target.value); setPreview(null); }} /></label>
+                  <label><span>{t("gifts.lockedUntilDate")}</span><input type="date" value={lockedUntilDate} onChange={(e) => { setLockedUntilDate(e.target.value); setPreview(null); }} /></label>
+                  <label><span>{t("gifts.releasedByType")}</span>
+                    <select value={releasedByType} onChange={(e) => { setReleasedByType(e.target.value as "" | "user" | "channel"); setPreview(null); }}>
+                      <option value="">{t("gifts.releasedByNone")}</option>
+                      <option value="user">{t("gifts.releasedByUser")}</option>
+                      <option value="channel">{t("gifts.releasedByChannel")}</option>
+                    </select>
+                  </label>
+                  <label><span>{t("gifts.releasedByID")}</span><input type="number" min="0" value={releasedByID} disabled={releasedByType === ""} onChange={(e) => { setReleasedByID(e.target.value); setPreview(null); }} /></label>
+                </div>
+                <div className="gift-settings-switches">
+                  <label className="gift-switch"><input type="checkbox" checked={birthday} onChange={(e) => { setBirthday(e.target.checked); setPreview(null); }} /><span className="gift-switch-track" aria-hidden="true"><span /></span><span>{t("gifts.birthday")}</span></label>
+                  <label className="gift-switch"><input type="checkbox" checked={requirePremium} onChange={(e) => { setRequirePremium(e.target.checked); setPreview(null); }} /><span className="gift-switch-track" aria-hidden="true"><span /></span><span>{t("gifts.requirePremium")}</span></label>
+                </div>
+                <div className="gift-whitelist-block">
+                  <label className="gift-switch"><input type="checkbox" checked={whitelistOpen} onChange={(e) => { setWhitelistOpen(e.target.checked); setPreview(null); }} /><span className="gift-switch-track" aria-hidden="true"><span /></span><span>{t("gifts.whitelistConfigure")}</span></label>
+                  {whitelistOpen && <>
+                    <label className="gift-reason-field"><span>{t("gifts.whitelistBuyers")}</span>
+                      <textarea rows={3} value={whitelistBuyers} placeholder={t("gifts.whitelistBuyersPlaceholder")} onChange={(e) => { setWhitelistBuyers(e.target.value); setPreview(null); }} />
+                    </label>
+                    <div className="gift-settings-switches">
+                      <label className="gift-switch"><input type="checkbox" checked={whitelistHidden} onChange={(e) => { setWhitelistHidden(e.target.checked); setPreview(null); }} /><span className="gift-switch-track" aria-hidden="true"><span /></span><span>{t("gifts.whitelistHidden")}</span></label>
+                      <label className="gift-switch"><input type="checkbox" checked={whitelistNumbered} onChange={(e) => { setWhitelistNumbered(e.target.checked); setPreview(null); }} /><span className="gift-switch-track" aria-hidden="true"><span /></span><span>{t("gifts.whitelistNumbered")}</span></label>
+                      <label className="gift-switch"><input type="checkbox" checked={whitelistDisallowUpgrades} onChange={(e) => { setWhitelistDisallowUpgrades(e.target.checked); setPreview(null); }} /><span className="gift-switch-track" aria-hidden="true"><span /></span><span>{t("gifts.whitelistDisallowUpgrades")}</span></label>
+                      <label className="gift-switch"><input type="checkbox" checked={whitelistDisallowResell} onChange={(e) => { setWhitelistDisallowResell(e.target.checked); setPreview(null); }} /><span className="gift-switch-track" aria-hidden="true"><span /></span><span>{t("gifts.whitelistDisallowResell")}</span></label>
+                      <label className="gift-switch"><input type="checkbox" checked={whitelistApply} onChange={(e) => { setWhitelistApply(e.target.checked); setPreview(null); }} /><span className="gift-switch-track" aria-hidden="true"><span /></span><span>{t("gifts.whitelistApply")}</span></label>
+                    </div>
+                  </>}
+                </div>
               </div>
               <label className="gift-reason-field"><span>{t("gifts.reason")}</span><input value={reason} placeholder={t("gifts.reasonPlaceholder")} onChange={(e) => setReason(e.target.value)} /></label>
               <label className="gift-switch"><input type="checkbox" checked={enabled} onChange={(e) => { setEnabled(e.target.checked); setPreview(null); }} /><span className="gift-switch-track" aria-hidden="true"><span /></span><span>{t("gifts.enableAfterImport")}</span></label>

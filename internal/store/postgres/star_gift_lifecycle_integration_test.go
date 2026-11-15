@@ -1134,14 +1134,11 @@ WHERE channel_id=$1 AND event_type='send_message' AND message::text LIKE '%star_
 		t.Fatalf("channel stars balance projection = %d err %v", balance, err)
 	}
 	starsPage, err := lifecycle.ChannelStarsTransactions(ctx, created.Channel.ID, domain.StarsTransactionQuery{Limit: 20})
+	// Раунд 30: конвертация подарка — продажа, reason='gift_convert'
+	// (stargift без флага gift в starsTransaction).
 	if err != nil || starsPage.Balance != 20 || len(starsPage.Transactions) != 1 ||
-		starsPage.Transactions[0].Amount != 20 {
+		starsPage.Transactions[0].Amount != 20 || starsPage.Transactions[0].Reason != domain.StarsReasonGiftConvert {
 		t.Fatalf("channel stars transaction projection = %+v err %v", starsPage, err)
-	}
-	// Раунд 30: конвертация — «продажа подарка» (gift_convert), а не «подарок
-	// от пользователя» (gift): клиент рисует stargift без gift-флага.
-	if starsPage.Transactions[0].Reason != domain.StarsReasonGiftConvert {
-		t.Fatalf("channel conversion reason = %s, want gift_convert", starsPage.Transactions[0].Reason)
 	}
 	if _, err := lifecycle.ConvertStarGift(ctx, domain.StarGiftConvertRequest{ActorUserID: actor.ID,
 		Ref: domain.SavedStarGiftRef{Owner: channelPeer, SavedID: purchased.Saved.SavedID}, Date: now + 3}); !errors.Is(err, domain.ErrStarGiftAlreadyConverted) {

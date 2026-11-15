@@ -974,22 +974,6 @@ func starsTopupPurpose(inv *tg.InputInvoiceStars) (*tg.InputStorePaymentStarsTop
 	return purpose, ok && purpose != nil
 }
 
-// starsTopupAcquisitionForClient определяет канал приобретения звёзд по
-// платформе сессии покупателя (раунд 31). iOS-сессия — App Store, Android —
-// Google Play («Покупка в приложении»), остальные клиенты (desktop/web) —
-// Fragment («Покупка на Fragment»). Это соответствует официальной проекции:
-// пользователь покупает через встроенный checkout своего клиента.
-func starsTopupAcquisitionForClient(r *Router, ctx context.Context) domain.StarsTopupAcquisition {
-	switch ClientTypeFrom(ctx) {
-	case ClientTypeIOS:
-		return domain.StarsTopupAppStore
-	case ClientTypeAndroid:
-		return domain.StarsTopupPlayMarket
-	default:
-		return domain.StarsTopupFragment
-	}
-}
-
 func (r *Router) validateStarsTopupPurpose(ctx context.Context, userID int64, purpose *tg.InputStorePaymentStarsTopup) (tg.StarsTopupOption, domain.Peer, error) {
 	if purpose == nil || purpose.Stars <= 0 || purpose.Amount <= 0 || purpose.Currency == "" {
 		return tg.StarsTopupOption{}, domain.Peer{}, starsAmountInvalidErr()
@@ -1032,10 +1016,6 @@ func (r *Router) starsTopupPaymentForm(ctx context.Context, userID int64, purpos
 		SpendPurposePeer: peer,
 		Stars:            purpose.Stars, Currency: purpose.Currency, Amount: purpose.Amount,
 		IssuedAt: now, ExpiresAt: now + 600,
-		// Раунд 31: канал приобретения — по платформе сессии покупателя.
-		// Официальные клиенты рисуют «Покупка в приложении» для
-		// AppStore/PlayMarket-пиров и «Покупка на Fragment» для остальных.
-		Acquisition: starsTopupAcquisitionForClient(r, ctx),
 	})
 	if err != nil {
 		return nil, starsPurchaseErr(err)
@@ -1066,7 +1046,6 @@ func (r *Router) sendStarsTopupForm(ctx context.Context, userID, formID int64, i
 			FormID: formID, Kind: domain.StarsPurchaseTopup, BuyerUserID: userID,
 			SpendPurposePeer: peer,
 			Stars:            purpose.Stars, Currency: purpose.Currency, Amount: purpose.Amount,
-			Acquisition: starsTopupAcquisitionForClient(r, ctx),
 		},
 		Date: int(r.clock.Now().Unix()), OriginAuthKeyID: rawAuthKeyIDForOrigin(ctx),
 		OriginSessionID: sessionIDOrZero(ctx),
@@ -2209,6 +2188,15 @@ func tgSavedStarGiftGift(g domain.SavedStarGift, viewerUserID int64, catalog map
 		}
 		out := tgStarGift(gift)
 		out.ConvertStars = g.ConvertStars
+		// Раунд 31: цена аукционного экземпляра на странице профиля —
+		// выигрышная ставка (paid_stars), а не фиксированная цена каталога.
+		// Та же цена уже показывается в сервисном сообщении победителя
+		// (dispatchStarGiftAuctionAwards кладёт item.amount в блок StarGift).
+		// Обычные покупки/подарки/переносы платный цену не пишут (0) и
+		// продолжают показывать цену ревизии, по которой подарок получен.
+		if g.PaidStars > 0 {
+			out.Stars = g.PaidStars
+		}
 		if gift.Limited {
 			out.SetAvailabilityRemains(gift.AvailabilityRemains)
 			out.SetAvailabilityTotal(gift.AvailabilityTotal)
@@ -2233,7 +2221,7 @@ func tgSavedStarGiftGift(g domain.SavedStarGift, viewerUserID int64, catalog map
 	return &tg.StarGift{
 		ID:           g.GiftID,
 		Sticker:      &tg.DocumentEmpty{},
-		Stars:        0,
+		Stars:        g.PaidStars,
 		ConvertStars: g.ConvertStars,
 	}
 }

@@ -566,7 +566,9 @@
 }
 
 .gift-fields-grid input,
-.gift-reason-field input {
+.gift-fields-grid select,
+.gift-reason-field input,
+.gift-reason-field textarea {
   width: 100%;
   min-width: 0;
   height: 38px;
@@ -575,10 +577,24 @@
   background: var(--input-bg);
   border: 1px solid var(--line);
   border-radius: var(--radius-sm);
+  font: inherit;
 }
 
+.gift-reason-field textarea { height: auto; padding: 8px 10px; resize: vertical; line-height: 1.45; }
+.gift-fields-grid input:disabled { opacity: .55; cursor: not-allowed; }
+
 .gift-fields-grid input:focus,
-.gift-reason-field input:focus { border-color: var(--brand); box-shadow: 0 0 0 3px var(--focus); outline: none; }
+.gift-fields-grid select:focus,
+.gift-reason-field input:focus,
+.gift-reason-field textarea:focus { border-color: var(--brand); box-shadow: 0 0 0 3px var(--focus); outline: none; }
+
+/* Раунд 31: блок настроек выпуска и вайтлиста в форме импорта подарка. */
+.gift-settings-block { display: grid; gap: 12px; }
+.gift-settings-head { display: grid; gap: 3px; color: var(--text); font-size: 12px; }
+.gift-settings-head span { color: var(--muted); font-size: 11px; font-weight: 600; line-height: 1.45; }
+.gift-fields-grid-wide { grid-template-columns: repeat(3, minmax(120px, 1fr)); }
+.gift-settings-switches { display: flex; flex-wrap: wrap; gap: 10px 18px; }
+.gift-whitelist-block { display: grid; gap: 10px; padding: 12px; border: 1px dashed var(--line); border-radius: var(--radius-sm); }
 
 .gift-switch { display: inline-flex; align-items: center; gap: 9px; color: var(--text-soft); font-size: 12px; font-weight: 700; cursor: pointer; }
 .gift-switch input { position: absolute; width: 1px; height: 1px; opacity: 0; }

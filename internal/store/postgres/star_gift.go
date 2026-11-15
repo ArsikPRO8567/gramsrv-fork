@@ -251,6 +251,11 @@ INSERT INTO star_gift_catalog_revisions (
 		); err != nil {
 			return fmt.Errorf("insert star gift revision: %w", err)
 		}
+		// Раунд 31: настройки вайтлиста из админки пишутся в той же
+		// транзакции, что и ревизия; nil — no-op (psql-строки сохраняются).
+		if err := upsertGiftWhitelistTx(ctx, tx, giftID, write.Whitelist); err != nil {
+			return fmt.Errorf("upsert gift whitelist: %w", err)
+		}
 		if write.GiftID != 0 {
 			if _, err := tx.Exec(ctx, `
 UPDATE star_gift_catalog
@@ -466,14 +471,14 @@ func (s *StarGiftStore) Create(ctx context.Context, gift domain.SavedStarGift) (
 WITH next_id AS (
     SELECT nextval(pg_get_serial_sequence('public.peer_star_gifts', 'id'))::bigint AS id
 )
-INSERT INTO peer_star_gifts (id, owner_peer_type, owner_peer_id, from_user_id, gift_id, catalog_revision_id, msg_id, saved_id, gift_date, name_hidden, unsaved, converted, convert_stars, prepaid_upgrade_stars, prepaid_upgrade_hash, gift_num, message, message_entities, refunded)
+INSERT INTO peer_star_gifts (id, owner_peer_type, owner_peer_id, from_user_id, gift_id, catalog_revision_id, msg_id, saved_id, gift_date, name_hidden, unsaved, converted, convert_stars, prepaid_upgrade_stars, prepaid_upgrade_hash, gift_num, paid_stars, message, message_entities, refunded)
 SELECT next_id.id, $1,$2,$3,$4,$5,$6,
        CASE WHEN $1 = 'channel' AND $7::bigint = 0 THEN next_id.id ELSE $7::bigint END,
-       $8,$9,$10,false,$11,$12,$13,$14,$15,$16::jsonb,$17
+       $8,$9,$10,false,$11,$12,$13,$14,$15,$16,$17::jsonb,$18
 FROM next_id
 RETURNING id`,
 		string(gift.Owner.Type), gift.Owner.ID, gift.FromUserID, gift.GiftID, gift.RevisionID, gift.MsgID, gift.SavedID, gift.Date,
-		gift.NameHidden, gift.Unsaved, gift.ConvertStars, gift.PrepaidUpgradeStars, gift.PrepaidUpgradeHash, gift.GiftNum, gift.Message,
+		gift.NameHidden, gift.Unsaved, gift.ConvertStars, gift.PrepaidUpgradeStars, gift.PrepaidUpgradeHash, gift.GiftNum, gift.PaidStars, gift.Message,
 		string(encodeStarGiftMessageEntities(gift.MessageEntities)), gift.Refunded).Scan(&id)
 	if err != nil {
 		return 0, fmt.Errorf("create star gift: %w", err)
@@ -630,7 +635,7 @@ WHERE ci.saved_gift_id = p.id AND ci.collection_id = $%d
 	limitPlaceholder := len(args)
 	rows, err := s.db.Query(ctx, `
 SELECT p.id, p.owner_peer_type, p.owner_peer_id, p.from_user_id, p.gift_id, p.catalog_revision_id,
-       p.msg_id, p.saved_id, p.gift_date, p.name_hidden, p.unsaved, p.converted, p.convert_stars, p.prepaid_upgrade_stars, p.prepaid_upgrade_hash, p.gift_num,
+       p.msg_id, p.saved_id, p.gift_date, p.name_hidden, p.unsaved, p.converted, p.convert_stars, p.prepaid_upgrade_stars, p.prepaid_upgrade_hash, p.gift_num, COALESCE(p.paid_stars, 0),
        p.lifecycle_status, p.transfer_stars, p.can_export_at, p.can_transfer_at, p.can_resell_at,
        p.drop_original_details_stars, p.can_craft_at,
        p.message, COALESCE(p.message_entities, '[]'::jsonb)::text, COALESCE(p.unique_gift_id, 0), p.upgrade_msg_id, p.pinned_order,
@@ -784,7 +789,7 @@ func (s *StarGiftStore) GetByRef(ctx context.Context, ref domain.SavedStarGiftRe
 	where, args := savedStarGiftRefWhere(ref)
 	row := s.db.QueryRow(ctx, `
 SELECT p.id, p.owner_peer_type, p.owner_peer_id, p.from_user_id, p.gift_id, p.catalog_revision_id,
-       p.msg_id, p.saved_id, p.gift_date, p.name_hidden, p.unsaved, p.converted, p.convert_stars, p.prepaid_upgrade_stars, p.prepaid_upgrade_hash, p.gift_num,
+       p.msg_id, p.saved_id, p.gift_date, p.name_hidden, p.unsaved, p.converted, p.convert_stars, p.prepaid_upgrade_stars, p.prepaid_upgrade_hash, p.gift_num, COALESCE(p.paid_stars, 0),
            p.lifecycle_status, p.transfer_stars, p.can_export_at, p.can_transfer_at, p.can_resell_at,
            p.drop_original_details_stars, p.can_craft_at,
        p.message, COALESCE(p.message_entities, '[]'::jsonb)::text, COALESCE(p.unique_gift_id, 0), p.upgrade_msg_id, p.pinned_order,
@@ -924,7 +929,7 @@ func (s *StarGiftStore) MarkConverted(ctx context.Context, ref domain.SavedStarG
 		where, args := savedStarGiftRefWhere(ref)
 		row := tx.QueryRow(ctx, `
 SELECT p.id, p.owner_peer_type, p.owner_peer_id, p.from_user_id, p.gift_id, p.catalog_revision_id,
-       p.msg_id, p.saved_id, p.gift_date, p.name_hidden, p.unsaved, p.converted, p.convert_stars, p.prepaid_upgrade_stars, p.prepaid_upgrade_hash, p.gift_num,
+       p.msg_id, p.saved_id, p.gift_date, p.name_hidden, p.unsaved, p.converted, p.convert_stars, p.prepaid_upgrade_stars, p.prepaid_upgrade_hash, p.gift_num, COALESCE(p.paid_stars, 0),
            p.lifecycle_status, p.transfer_stars, p.can_export_at, p.can_transfer_at, p.can_resell_at,
            p.drop_original_details_stars, p.can_craft_at,
        p.message, COALESCE(p.message_entities, '[]'::jsonb)::text, COALESCE(p.unique_gift_id, 0), p.upgrade_msg_id, p.pinned_order,
@@ -971,7 +976,7 @@ func scanSavedStarGift(row rowScanner) (domain.SavedStarGift, error) {
 	var g domain.SavedStarGift
 	var ownerType, messageEntitiesJSON string
 	if err := row.Scan(&g.ID, &ownerType, &g.Owner.ID, &g.FromUserID, &g.GiftID, &g.RevisionID, &g.MsgID, &g.SavedID, &g.Date,
-		&g.NameHidden, &g.Unsaved, &g.Converted, &g.ConvertStars, &g.PrepaidUpgradeStars, &g.PrepaidUpgradeHash, &g.GiftNum,
+		&g.NameHidden, &g.Unsaved, &g.Converted, &g.ConvertStars, &g.PrepaidUpgradeStars, &g.PrepaidUpgradeHash, &g.GiftNum, &g.PaidStars,
 		&g.LifecycleStatus, &g.TransferStars, &g.CanExportAt, &g.CanTransferAt, &g.CanResellAt,
 		&g.DropOriginalDetailsStars, &g.CanCraftAt, &g.Message, &messageEntitiesJSON, &g.UniqueGiftID,
 		&g.UpgradeMsgID, &g.PinnedOrder, &g.CollectionIDs, &g.Refunded); err != nil {
@@ -980,6 +985,55 @@ func scanSavedStarGift(row rowScanner) (domain.SavedStarGift, error) {
 	g.Owner.Type = domain.PeerType(ownerType)
 	g.MessageEntities = decodeStarGiftMessageEntities(messageEntitiesJSON)
 	return g, nil
+}
+
+// upsertGiftWhitelistTx записывает настройки вайтлиста подарка в той же
+// транзакции, что и ревизия каталога (раунд 31): управление gift_whitelists
+// из админки. nil-настройки — no-op (таблицу ранее вели вручную, psql-строки
+// не должны сбрасываться ревизиями без блока вайтлиста).
+func upsertGiftWhitelistTx(ctx context.Context, tx pgx.Tx, giftID int64, settings *domain.GiftWhitelistWrite) error {
+	if settings == nil {
+		return nil
+	}
+	buyers := normalizeWhitelistBuyers(settings.AllowedBuyers)
+	data, err := json.Marshal(buyers)
+	if err != nil {
+		data = []byte("[]")
+	}
+	if _, err := tx.Exec(ctx, `
+INSERT INTO gift_whitelists (gift_id, allowed_buyers, gift_hidden, numbered, disallow_upgrades, disallow_resell, apply_whitelist)
+VALUES ($1, $2::jsonb, $3, $4, $5, $6, $7)
+ON CONFLICT (gift_id) DO UPDATE SET
+    allowed_buyers = $2::jsonb,
+    gift_hidden = $3,
+    numbered = $4,
+    disallow_upgrades = $5,
+    disallow_resell = $6,
+    apply_whitelist = $7`,
+		giftID, string(data), settings.Hidden, settings.Numbered,
+		settings.DisallowUpgrades, settings.DisallowResell, settings.Apply); err != nil {
+		return err
+	}
+	return nil
+}
+
+// normalizeWhitelistBuyers приводит список allowed_buyers к канонической форме:
+// строки обрезаются, пустые и дубликаты отбрасываются, порядок — первый вход.
+func normalizeWhitelistBuyers(values []string) []string {
+	out := make([]string, 0, len(values))
+	seen := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if _, duplicate := seen[value]; duplicate {
+			continue
+		}
+		seen[value] = struct{}{}
+		out = append(out, value)
+	}
+	return out
 }
 
 func savedStarGiftRefWhere(ref domain.SavedStarGiftRef) (string, []any) {

@@ -131,6 +131,12 @@ type SavedStarGift struct {
         PrepaidUpgradeStars int64  // 送礼人随礼物预付的唯一礼物升级额
         PrepaidUpgradeHash  string // 第三方单独代付升级的一次性 entitlement
         GiftNum             int    // auction-acquired release number for regular gifts
+        // PaidStars — фактически уплаченная цена экземпляра: выигрышная ставка
+        // аукциона (раунд 31). 0 — обычное приобретение; проекция профиля тогда
+        // показывает цену ревизии каталога. Для аукционных экземпляров карточка
+        // профиля показывает именно ставку (та же цена, что в сервисном
+        // сообщении победителя), а не фиксированную цену каталога.
+        PaidStars           int64
         Message             string // 附言（可选）
         // MessageEntities — entity-разметка附言 (премиум-эмодзи и стиль); хранится
         // в peer_star_gifts.message_entities, отдаётся в savedStarGift.message.
@@ -1034,6 +1040,9 @@ type StarGiftCatalogWrite struct {
         AuctionStartDate     int
         UpgradeVariants      int
         Background           *StarGiftBackground
+        // Whitelist — не nil: в той же транзакции, что и ревизия, апсертится
+        // строка gift_whitelists (настройки вайтлиста из админки, раунд 31).
+        Whitelist            *GiftWhitelistWrite
 }
 
 // StarGiftCatalogBundleWrite atomically publishes one catalog revision and its optional
@@ -1228,6 +1237,26 @@ type GiftWhitelistInfo struct {
 // NoWhitelist — значение для подарков без строки в gift_whitelists: ограничения
 // не действуют, нумерация выключена.
 var NoWhitelist = GiftWhitelistInfo{Allowed: true}
+
+// GiftWhitelistWrite — административная запись gift_whitelists, создаваемая
+// вместе с подарком (импорт из снимка / загрузка своего подарка через админку,
+// раунд 31). Раньше таблица управлялась только вручную (psql); теперь она
+// заполняется в той же транзакции, что и ревизия каталога.
+//
+//      AllowedBuyers    — jsonb-массив текстовых user id (allowed_buyers);
+//      Hidden           — скрыть подарок от не-вайтлистных (gift_hidden);
+//      Numbered         — выдавать пронумерованные экземпляры (numbered);
+//      DisallowUpgrades — улучшать могут только вайтлистные (disallow_upgrades);
+//      DisallowResell   — офферы/покупки на маркете только вайтлистные (disallow_resell);
+//      Apply            — мастер-выключатель ограничений (apply_whitelist).
+type GiftWhitelistWrite struct {
+        AllowedBuyers    []string
+        Hidden           bool
+        Numbered         bool
+        DisallowUpgrades bool
+        DisallowResell   bool
+        Apply            bool
+}
 
 // StarGiftPriceLimits — серверные лимиты цены листинга и офферов на маркете
 // (раунд 20). Звёзды — целые; TON — нанотон. Граница 0 не проверяется.

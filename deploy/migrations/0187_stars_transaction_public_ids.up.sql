@@ -68,11 +68,13 @@ WHERE NOT refunded AND amount_nanoton > 0 AND (
 -- reason='gift' с зачислением рисуют подпись «подарок от пользователя», для
 -- конвертации выделен отдельный reason 'gift_convert' (stargift без флага
 -- gift). Исторические строки конвертации переименовываются по их маркеру.
--- ВАЖНО: только stars_transactions — конвертация начисляет звёзды и никогда
--- не создаёт строк в ton_transactions (там нет колонки title; ссылка на неё
--- в предыдущей редакции миграции ломала применение с SQLSTATE 42703).
 UPDATE public.stars_transactions SET reason = 'gift_convert'
 WHERE reason = 'gift' AND title = 'Star gift conversion';
+
+-- ton_transactions колонки title не имеет (см. выше): сервер никогда не пишет
+-- в неё конвертации (обмен подарка на звёзды начисляет stars_transactions),
+-- поэтому отдельный перенос reason для TON не нужен. Прежняя версия миграции
+-- падала здесь на свежей базе: "column \"title\" does not exist" (42703).
 
 CREATE UNIQUE INDEX IF NOT EXISTS stars_transactions_transaction_id_uidx
     ON public.stars_transactions(transaction_id) WHERE transaction_id <> '';
