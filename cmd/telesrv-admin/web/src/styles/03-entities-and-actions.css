@@ -698,13 +698,15 @@
 .collectible-row .icon-btn:disabled { opacity: .28; }
 
 /* Раунд 34: поблочное копирование из другой ревизии — выбор источника
-   (список ревизий подарка) + кнопка прямо в шапке секции. */
+   (список ревизий коллекции по slug) + кнопка прямо в шапке секции. */
 .collectible-copy-tools { display: flex; min-width: 0; align-items: center; gap: 6px; }
 .collectible-copy-select { height: 30px; max-width: 190px; padding: 0 8px; color: var(--text); background: var(--input-bg); border: 1px solid var(--line-strong); border-radius: var(--radius-sm); font: inherit; font-size: 11px; }
 .collectible-copy-select:focus { border-color: var(--purple); box-shadow: 0 0 0 3px var(--purple-tint); outline: none; }
 .collectible-copy-tools .btn { flex: 0 0 auto; }
 .collectible-copy-block .collectible-copy-tools-all { padding: 0; }
 .collectible-copy-block .collectible-copy-select { flex: 1 1 auto; max-width: 320px; height: 34px; }
+/* Раунд 35: пустой список ревизий / подсказка под выбором источника. */
+.collectible-copy-empty { display: block; color: var(--muted); font-size: 10px; }
 
 /* Раунд 34: лимит возможных улучшенных подарков опубликованной ревизии. */
 .collectible-supply-row { display: flex; flex-wrap: wrap; align-items: center; gap: 9px; padding: 10px 14px; border-bottom: 1px solid var(--purple-border); background: var(--panel-subtle); }

@@ -1495,7 +1495,8 @@ func (s *StarGiftLifecycleStore) SetStarGiftAuctionSettings(ctx context.Context,
 	if write.RoundDuration != nil && *write.RoundDuration <= 0 ||
 		write.MinBidAmount != nil && *write.MinBidAmount <= 0 ||
 		write.StartDate != nil && *write.StartDate <= 0 ||
-		write.EndDate != nil && *write.EndDate <= 0 {
+		write.EndDate != nil && *write.EndDate <= 0 ||
+		write.TotalRounds != nil && *write.TotalRounds <= 0 {
 		return domain.StarGiftAuction{}, domain.ErrStarGiftInvalid
 	}
 	status := strings.ToLower(strings.TrimSpace(write.Status))
@@ -1521,6 +1522,18 @@ func (s *StarGiftLifecycleStore) SetStarGiftAuctionSettings(ctx context.Context,
 		// активной ревизии, чтобы настройки всегда легли на реальную строку.
 		if _, err := ensureStarGiftAuctionDB(ctx, tx, write.GiftID, "", now); err != nil {
 			return err
+		}
+		// Раунд 35: количество раундов не может опуститься ниже уже
+		// идущего раунда (shape_check 0095: current_round BETWEEN
+		// 0 AND total_rounds) — чистая ошибка вместо SQLSTATE.
+		if write.TotalRounds != nil {
+			var currentRound int
+			if err := tx.QueryRow(ctx, `SELECT current_round FROM star_gift_auctions WHERE gift_id=$1`, write.GiftID).Scan(&currentRound); err != nil {
+				return fmt.Errorf("load star gift auction current round: %w", err)
+			}
+			if currentRound > *write.TotalRounds {
+				return domain.ErrStarGiftInvalid
+			}
 		}
 		sets := []string{"version=version+1", "updated_at=now()"}
 		args := []any{}
@@ -1557,6 +1570,12 @@ func (s *StarGiftLifecycleStore) SetStarGiftAuctionSettings(ctx context.Context,
 		if write.EndDate != nil {
 			sets = append(sets, "end_date="+appendArg(*write.EndDate))
 		}
+		// Раунд 35: явное количество раундов аукциона. shape_check (0095)
+		// требует current_round BETWEEN 0 AND total_rounds — значение ниже
+		// уже идущего раунда отклоняется с чистой ошибкой вместо SQLSTATE.
+		if write.TotalRounds != nil {
+			sets = append(sets, "total_rounds="+appendArg(*write.TotalRounds))
+		}
 		if status != "" {
 			sets = append(sets, "status="+appendArg(status))
 		}
@@ -1578,8 +1597,9 @@ func (s *StarGiftLifecycleStore) SetStarGiftAuctionSettings(ctx context.Context,
 		// тот же инвариант, что и у пошагового next_round_at += duration
 		// (settle), включая накопленное продление текущего раунда
 		// (round_extend_seconds) и отложенный старт. Явный end_date из
-		// той же команды имеет приоритет над производным.
-		if write.RoundDuration != nil || strings.TrimSpace(write.RoundDurationsJSON) != "" || write.StartDate != nil {
+		// той же команды имеет приоритет над производным. Раунд 35:
+		// смена количества раундов тоже пересчитывает границы.
+		if write.RoundDuration != nil || strings.TrimSpace(write.RoundDurationsJSON) != "" || write.StartDate != nil || write.TotalRounds != nil {
 			if err := recomputeAuctionBoundaries(ctx, tx, write.GiftID, write.EndDate != nil); err != nil {
 				return err
 			}

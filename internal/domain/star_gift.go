@@ -290,9 +290,12 @@ type StarGiftCollectibleSupplyWrite struct {
 // (раунд 34): выбор источника копирования атрибутов в админке без загрузки
 // полных метаданных всех ревизий.
 type StarGiftCollectibleRevisionSummary struct {
-	RevisionID    int64
-	GiftID        int64
-	Revision      int
+	RevisionID int64
+	GiftID     int64
+	Revision   int
+	// SlugPrefix — slug коллекции ревизии. Список источников копирования
+	// строится по slug (одна коллекция может публиковаться разными подарками).
+	SlugPrefix    string
 	Status        string
 	UpgradeStars  int64
 	SupplyTotal   int
@@ -1143,9 +1146,13 @@ type StarGiftAuctionRuntimeWrite struct {
 	MinBidAmount       *int64
 	StartDate          *int
 	EndDate            *int
-	Status             string
-	Actor              string
-	CommandID          string
+	// TotalRounds (раунд 35) — явное количество раундов аукциона; замещает
+	// значение, выведенное из supply/gifts_per_round при ленивом создании.
+	// nil = не менять.
+	TotalRounds *int
+	Status      string
+	Actor       string
+	CommandID   string
 }
 
 type StarGiftCatalogBundleResult struct {

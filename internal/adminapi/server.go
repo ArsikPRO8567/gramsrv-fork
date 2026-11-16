@@ -96,9 +96,10 @@ type Service interface {
 	GifCatalogDocumentPreview(ctx context.Context, documentID int64) ([]byte, string, bool, error)
 	StarGiftCollectibles(ctx context.Context, giftID int64) (domain.StarGiftUpgradePreview, bool, error)
 	StarGiftCollectibleRevision(ctx context.Context, revisionID int64) (domain.StarGiftCollectibleRevision, error)
-	// Раунд 34: список ревизий коллекции (выбор источника копирования) и
-	// лимит возможных улучшенных подарков опубликованной ревизии.
-	StarGiftCollectibleRevisionSummaries(ctx context.Context, giftID int64) ([]domain.StarGiftCollectibleRevisionSummary, error)
+	// Раунд 34/35: список ревизий коллекции (выбор источника копирования;
+	// slug — отбор по slug_prefix коллекции) и лимит возможных улучшенных
+	// подарков опубликованной ревизии.
+	StarGiftCollectibleRevisionSummaries(ctx context.Context, giftID int64, slug string) ([]domain.StarGiftCollectibleRevisionSummary, error)
 	SetStarGiftCollectibleSupply(ctx context.Context, req admin.SetStarGiftCollectibleSupplyRequest) (admin.CommandResult, error)
 	StarGiftCollectibleAnimation(ctx context.Context, giftID int64, kind domain.StarGiftCollectibleAttributeKind, attributeID int64) ([]byte, bool, error)
 	ModerationCases(ctx context.Context, filter domain.ModerationCaseFilter) ([]domain.ModerationCase, error)
@@ -1323,16 +1324,18 @@ func (s *Server) handleStarGiftCollectibleRevision(w http.ResponseWriter, r *htt
 	writeJSON(w, http.StatusOK, collectibleRevisionResponse(revision))
 }
 
-// handleStarGiftCollectibleRevisionSummaries (раунд 34) — список ревизий
-// коллекции подарка для выбора источника копирования блоками (модели/фоны/
-// узоры) в редакторе пула атрибутов.
+// handleStarGiftCollectibleRevisionSummaries (раунд 34/35) — список ревизий
+// коллекции для выбора источника копирования блоками (модели/фоны/узоры) в
+// редакторе пула атрибутов. Параметр ?slug= отбирает ревизии всей коллекции
+// по slug_prefix (новый подарок ещё не имеет собственных ревизий); без slug —
+// все ревизии gift_id.
 func (s *Server) handleStarGiftCollectibleRevisionSummaries(w http.ResponseWriter, r *http.Request) {
 	giftID, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	if err != nil || giftID <= 0 {
 		writeError(w, http.StatusBadRequest, "invalid gift id")
 		return
 	}
-	summaries, err := s.svc.StarGiftCollectibleRevisionSummaries(r.Context(), giftID)
+	summaries, err := s.svc.StarGiftCollectibleRevisionSummaries(r.Context(), giftID, r.URL.Query().Get("slug"))
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -1343,6 +1346,7 @@ func (s *Server) handleStarGiftCollectibleRevisionSummaries(w http.ResponseWrite
 			"revision_id":    strconv.FormatInt(summary.RevisionID, 10),
 			"gift_id":        strconv.FormatInt(summary.GiftID, 10),
 			"revision":       summary.Revision,
+			"slug_prefix":    summary.SlugPrefix,
 			"status":         summary.Status,
 			"upgrade_stars":  strconv.FormatInt(summary.UpgradeStars, 10),
 			"supply_total":   summary.SupplyTotal,

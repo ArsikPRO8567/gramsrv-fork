@@ -140,6 +140,8 @@ export function GiftsPage() {
   // Раунд 32: рабочая строка star_gift_auctions — правится из режима
   // редактирования существующего подарка; пустые поля = «не менять».
   const [auctionRoundDuration, setAuctionRoundDuration] = useState("");
+  // Раунд 35: количество раундов аукциона (total_rounds) — пустое = не менять.
+  const [auctionTotalRounds, setAuctionTotalRounds] = useState("");
   const [auctionRoundDurations, setAuctionRoundDurations] = useState("");
   const [auctionRaiseMinBid, setAuctionRaiseMinBid] = useState(false);
   const [auctionRoundExtends, setAuctionRoundExtends] = useState("");
@@ -208,26 +210,39 @@ export function GiftsPage() {
   // Раунд 31: настройки выпуска и вайтлиста — общий блок для обеих вкладок
   // (копия из снимка / загрузка своего файла). Дата разблокировки вводится
   // календарём и уходит на сервер unix-секундами. Раунд 32: старт аукциона
-  // вводится с точностью до минуты (datetime-local).
-  function lockedUntilUnix() {
-    const value = lockedUntilDate.trim();
-    if (!value) return 0;
-    const parsed = Date.parse(value + "T00:00:00Z");
+  // вводится с точностью до минуты (datetime-local). Раунд 35: значения
+  // интерпретируются в ЛОКАЛЬНОМ часовом поясе компьютера, с которого открыта
+  // админка: datetime-local не содержит смещения, поэтому и разбор, и обратное
+  // отображение unix-времени обязаны использовать одинаковые локальные части
+  // даты — иначе каждый цикл «открыть → сохранить» сдвигал время на смещение
+  // пояса (например, −8 часов в UTC+8).
+  function localInputValue(unix: number, withTime: boolean): string {
+    if (!Number.isFinite(unix) || unix <= 0) return "";
+    const date = new Date(unix * 1000);
+    const pad = (value: number) => String(value).padStart(2, "0");
+    const day = `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+    return withTime ? `${day}T${pad(date.getHours())}:${pad(date.getMinutes())}` : day;
+  }
+
+  function localInputUnix(value: string): number {
+    const trimmed = value.trim();
+    if (!trimmed) return 0;
+    // datetime-local ("YYYY-MM-DDTHH:mm") и date ("YYYY-MM-DD") разбираются
+    // как локальное время: Date.parse без смещения использует пояс браузера.
+    const parsed = Date.parse(trimmed.length > 10 ? trimmed : `${trimmed}T00:00:00`);
     return Number.isFinite(parsed) ? Math.floor(parsed / 1000) : 0;
+  }
+
+  function lockedUntilUnix() {
+    return localInputUnix(lockedUntilDate);
   }
 
   function auctionStartUnix() {
-    const value = auctionStartDate.trim();
-    if (!value) return 0;
-    const parsed = Date.parse(value.length > 10 ? value : value + "T00:00:00Z");
-    return Number.isFinite(parsed) ? Math.floor(parsed / 1000) : 0;
+    return localInputUnix(auctionStartDate);
   }
 
   function auctionEndUnix() {
-    const value = auctionEndDate.trim();
-    if (!value) return 0;
-    const parsed = Date.parse(value.length > 10 ? value : value + "T00:00:00Z");
-    return Number.isFinite(parsed) ? Math.floor(parsed / 1000) : 0;
+    return localInputUnix(auctionEndDate);
   }
 
   function auctionSettings() {
@@ -270,7 +285,7 @@ export function GiftsPage() {
     setWhitelistNumbered(false); setWhitelistDisallowUpgrades(false);
     setWhitelistDisallowResell(false); setWhitelistApply(true);
     setAuctionEnabled(false); setAuctionSlug(""); setAuctionGiftsPerRound("0"); setAuctionStartDate("");
-    setAuctionRoundDuration(""); setAuctionRoundDurations(""); setAuctionRaiseMinBid(false);
+    setAuctionRoundDuration(""); setAuctionTotalRounds(""); setAuctionRoundDurations(""); setAuctionRaiseMinBid(false);
     setAuctionRoundExtends(""); setAuctionMinBidAmount(""); setAuctionEndDate(""); setAuctionStatus("");
   }
 
@@ -326,13 +341,13 @@ export function GiftsPage() {
     setPerUserTotal(String(gift.per_user_total > 0 ? gift.per_user_total : 0));
     setBirthday(gift.birthday);
     setRequirePremium(gift.require_premium);
-    setLockedUntilDate(gift.locked_until_date > 0 ? new Date(gift.locked_until_date * 1000).toISOString().slice(0, 10) : "");
+    setLockedUntilDate(localInputValue(gift.locked_until_date, false));
     setReleasedByType(""); setReleasedByID("");
     // Раунд 32: предзаполнение аукционных настроек данными снимка.
     setAuctionEnabled(gift.auction);
     setAuctionSlug(gift.auction ? (gift.auction_slug || `official-${gift.source_gift_id}`) : "");
     setAuctionGiftsPerRound(String(gift.auction ? Math.max(gift.gifts_per_round, 1) : 0));
-    setAuctionStartDate(gift.auction_start_date > 0 ? new Date(gift.auction_start_date * 1000).toISOString().slice(0, 16) : "");
+    setAuctionStartDate(localInputValue(gift.auction_start_date, true));
     setPreview(null);
   }
 
@@ -378,10 +393,10 @@ export function GiftsPage() {
   // созданному подарку сразу после импорта.
   function auctionRuntimeDirty() {
     if (!editGift) {
-      return Boolean(auctionRoundDuration.trim() || auctionRoundDurations.trim() || auctionRoundExtends.trim() ||
+      return Boolean(auctionRoundDuration.trim() || auctionTotalRounds.trim() || auctionRoundDurations.trim() || auctionRoundExtends.trim() ||
         auctionMinBidAmount.trim() || auctionEndDate.trim() || auctionStatus.trim() || auctionRaiseMinBid);
     }
-    return Boolean(auctionRoundDuration.trim() || auctionRoundDurations.trim() || auctionRoundExtends.trim() ||
+    return Boolean(auctionRoundDuration.trim() || auctionTotalRounds.trim() || auctionRoundDurations.trim() || auctionRoundExtends.trim() ||
       auctionMinBidAmount.trim() || auctionEndDate.trim() || auctionStatus.trim() ||
       auctionRaiseMinBid !== editGift.AuctionRaiseMinBid);
   }
@@ -395,6 +410,7 @@ export function GiftsPage() {
       raise_min_bid: auctionRaiseMinBid
     };
     if (auctionRoundDuration.trim()) payload.round_duration = Math.max(1, Math.floor(Number(auctionRoundDuration) || 1));
+    if (auctionTotalRounds.trim()) payload.total_rounds = Math.max(1, Math.floor(Number(auctionTotalRounds) || 1));
     if (auctionRoundDurations.trim()) payload.round_durations = auctionRoundDurations.trim();
     if (auctionRoundExtends.trim()) payload.round_extends = auctionRoundExtends.trim();
     if (auctionMinBidAmount.trim()) payload.min_bid_amount = String(BigInt(auctionMinBidAmount.trim()));
@@ -482,7 +498,7 @@ export function GiftsPage() {
     setAvailabilityRemains(String(gift.AvailabilityRemains));
     setPerUserTotal(String(gift.PerUserTotal));
     setBirthday(gift.Birthday); setRequirePremium(gift.RequirePremium);
-    setLockedUntilDate(gift.LockedUntilDate > 0 ? new Date(gift.LockedUntilDate * 1000).toISOString().slice(0, 10) : "");
+    setLockedUntilDate(localInputValue(gift.LockedUntilDate, false));
     setReleasedByType(gift.ReleasedByType === "user" || gift.ReleasedByType === "channel" ? gift.ReleasedByType : "");
     setReleasedByID(gift.ReleasedByID && gift.ReleasedByID !== "0" ? String(gift.ReleasedByID) : "");
     setWhitelistOpen(gift.HasWhitelist);
@@ -498,13 +514,14 @@ export function GiftsPage() {
     setAuctionEnabled(gift.Auction);
     setAuctionSlug(gift.AuctionSlug);
     setAuctionGiftsPerRound(String(gift.GiftsPerRound));
-    setAuctionStartDate(gift.AuctionStartDate > 0 ? new Date(gift.AuctionStartDate * 1000).toISOString().slice(0, 16) : "");
+    setAuctionStartDate(localInputValue(gift.AuctionStartDate, true));
     setAuctionRoundDuration(gift.AuctionRoundDuration > 0 ? String(gift.AuctionRoundDuration) : "");
+    setAuctionTotalRounds(gift.AuctionStateTotalRounds > 0 ? String(gift.AuctionStateTotalRounds) : "");
     setAuctionRoundDurations(gift.AuctionRoundDurationsJSON || "");
     setAuctionRaiseMinBid(gift.AuctionRaiseMinBid);
     setAuctionRoundExtends(gift.AuctionRoundExtendsJSON || "");
     setAuctionMinBidAmount(gift.AuctionMinBidAmount && gift.AuctionMinBidAmount !== "0" ? gift.AuctionMinBidAmount : "");
-    setAuctionEndDate(gift.AuctionStateEnd > 0 ? new Date(gift.AuctionStateEnd * 1000).toISOString().slice(0, 16) : "");
+    setAuctionEndDate(localInputValue(gift.AuctionStateEnd, true));
     setAuctionStatus(gift.AuctionStateStatus || "");
     setReason(""); setFile(null); setPreview(null); setImportError("");
     setImportOpen(true);
@@ -722,6 +739,7 @@ export function GiftsPage() {
                   </div>
                   <div className="gift-fields-grid gift-fields-grid-wide">
                     <label><span>{t("gifts.auctionRoundDuration")}</span><input type="number" min="1" placeholder={t("gifts.keepUnchanged")} value={auctionRoundDuration} onChange={(e) => { setAuctionRoundDuration(e.target.value); setPreview(null); }} /></label>
+                    <label><span>{t("gifts.auctionTotalRounds")}</span><input type="number" min="1" placeholder={t("gifts.keepUnchanged")} value={auctionTotalRounds} onChange={(e) => { setAuctionTotalRounds(e.target.value); setPreview(null); }} /></label>
                     <label><span>{t("gifts.auctionMinBid")}</span><input type="number" min="1" placeholder={t("gifts.keepUnchanged")} value={auctionMinBidAmount} onChange={(e) => { setAuctionMinBidAmount(e.target.value); setPreview(null); }} /></label>
                     <label><span>{t("gifts.auctionEndDate")}</span><input type="datetime-local" value={auctionEndDate} onChange={(e) => { setAuctionEndDate(e.target.value); setPreview(null); }} /></label>
                     <label><span>{t("gifts.auctionStatus")}</span>

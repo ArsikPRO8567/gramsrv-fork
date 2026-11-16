@@ -108,7 +108,10 @@ function RemoteAnimation({ giftID, attribute }: { giftID: string; attribute: Sta
 export async function parseAnimationFile(file: File): Promise<AnimationData> {
   const bytes = new Uint8Array(await file.arrayBuffer());
   let raw: Uint8Array = bytes;
-  if (bytes.length >= 2 && bytes[0] === 0x1f && bytes[1] === 0x8f) {
+  // Валидный TGS — это gzip-поток (магия 0x1f 0x8b). Проверка байта должна
+  // совпадать с реальной магией gzip: ошибочный байт оставлял бинарный файл
+  // JSON.parse и падал «unexpected character at line 1 column 1».
+  if (bytes.length >= 2 && bytes[0] === 0x1f && bytes[1] === 0x8b) {
     if (!("DecompressionStream" in window)) throw new Error("This browser cannot preview TGS files");
     const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream("gzip"));
     raw = new Uint8Array(await new Response(stream).arrayBuffer());
@@ -142,9 +145,13 @@ export function GiftCollectiblesModal({ gift, onClose, onPublished }: { gift: St
   const [patterns, setPatterns] = useState<AnimatedDraft[]>(() => initialAnimated("pattern"));
   const [backdrops, setBackdrops] = useState<BackdropDraft[]>(initialBackdrops);
   // Раунд 33/34: копирование атрибутов из другой ревизии («правка
-  // существующей ревизии» = копия активной ревизии + правки поверх). Список
-  // ревизий загружается один раз; у каждого блока — свой выбор источника.
+  // существующей ревизии» = копия активной ревизии + правки поверх). Раунд 35:
+  // список ревизий строится по SLUG коллекции (один slug может публиковаться
+  // разными подарками — новый подарок ещё не имеет собственных ревизий);
+  // ошибки загрузки больше не глотаются молча.
   const [revisions, setRevisions] = useState<StarGiftCollectibleRevisionSummary[]>([]);
+  const [revisionsError, setRevisionsError] = useState("");
+  const [revisionsBusy, setRevisionsBusy] = useState(false);
   const [copyRevisionID, setCopyRevisionID] = useState("");
   const [blockCopySource, setBlockCopySource] = useState<Record<CopyBlockKind, string>>({ models: "", patterns: "", backdrops: "" });
   const [copyBusy, setCopyBusy] = useState<CopyBlockKind | "all" | "">("");
@@ -177,11 +184,26 @@ export function GiftCollectiblesModal({ gift, onClose, onPublished }: { gift: St
         setActiveSupply(String(value.supply_total ?? ""));
       }
     }).catch((err) => setError(errorMessage(err))).finally(() => { if (!cancelled) setLoading(false); });
-    api.giftCollectibleRevisions(gift.GiftID).then((value) => {
-      if (!cancelled) setRevisions(value.revisions ?? []);
-    }).catch(() => undefined);
     return () => { cancelled = true; };
   }, [gift.GiftID]);
+
+  // Раунд 35: список ревизий перезагружается при смене slug коллекции
+  // (с дебаунсом на ввод) — источник копирования ищется по slug_prefix,
+  // поэтому коллекция видна даже для подарка без собственных ревизий.
+  const loadRevisions = (slug: string) => {
+    setRevisionsBusy(true); setRevisionsError("");
+    api.giftCollectibleRevisions(gift.GiftID, slug).then((value) => {
+      setRevisions(value.revisions ?? []);
+    }).catch((err) => {
+      setRevisions([]);
+      setRevisionsError(errorMessage(err) || t("collectibles.copyLoadFailed"));
+    }).finally(() => setRevisionsBusy(false));
+  };
+
+  useEffect(() => {
+    const timer = setTimeout(() => loadRevisions(slugPrefix), 350);
+    return () => clearTimeout(timer);
+  }, [gift.GiftID, slugPrefix]);
 
   const rarityTotals = useMemo(() => ({
     models: models.reduce((sum, value) => sum + (value.rarityKind === "permille" ? Number(value.rarity || 0) : 0), 0),
@@ -377,11 +399,19 @@ export function GiftCollectiblesModal({ gift, onClose, onPublished }: { gift: St
     finally { setBusy(false); }
   }
 
+  // Раунд 35: в подписи источника показывается и подарок-владелец ревизии —
+  // одна коллекция (slug) может публиковаться разными подарками.
   const revisionOptions = revisions.map((revision) => (
     <option key={revision.revision_id} value={revision.revision_id}>
-      r{revision.revision} · {t(`collectibles.status.${revision.status === "published" ? "published" : "draft"}`)} · {revision.model_count}/{revision.pattern_count}/{revision.backdrop_count}
+      r{revision.revision} · #{revision.gift_id} · {t(`collectibles.status.${revision.status === "published" ? "published" : "draft"}`)} · {revision.model_count}/{revision.pattern_count}/{revision.backdrop_count}
     </option>
   ));
+
+  // Раунд 35: подсказка/ошибка списка ревизий под выбором источника.
+  const revisionListStatus = <>
+    {revisionsError && <Alert>{revisionsError}</Alert>}
+    {!revisionsError && !revisionsBusy && revisions.length === 0 && <span className="collectible-copy-empty">{t("collectibles.copyEmpty")}</span>}
+  </>;
 
   // Раунд 34: инструменты копирования в шапке блока — выбор ревизии + кнопка.
   const blockCopyTools = (kind: CopyBlockKind, disabled = false) => (
@@ -390,14 +420,14 @@ export function GiftCollectiblesModal({ gift, onClose, onPublished }: { gift: St
         className="collectible-copy-select"
         value={blockCopySource[kind]}
         onChange={(e) => setBlockCopySource((state) => ({ ...state, [kind]: e.target.value }))}
-        disabled={copyBusy !== "" || disabled}
+        disabled={copyBusy !== "" || revisionsBusy || disabled}
         aria-label={t("collectibles.copySelect")}
       >
-        <option value="">{t("collectibles.copySelect")}</option>
+        <option value="">{revisionsBusy ? t("collectibles.copyLoading") : t("collectibles.copySelect")}</option>
         {revisionOptions}
       </select>
       <button className="btn compact-btn" type="button"
-        disabled={copyBusy !== "" || disabled || !blockCopySource[kind]}
+        disabled={copyBusy !== "" || revisionsBusy || disabled || !blockCopySource[kind]}
         onClick={() => void copyBlock(kind, blockCopySource[kind])}>
         {copyBusy === kind ? <Loader2 className="spin" size={13} /> : <Copy size={13} />}{t("collectibles.copyLoad")}
       </button>
@@ -476,7 +506,9 @@ export function GiftCollectiblesModal({ gift, onClose, onPublished }: { gift: St
             <label><span>{t("gifts.reason")}</span><input value={reason} maxLength={1000} placeholder={t("gifts.reasonPlaceholder")} onChange={(e) => setReason(e.target.value)} /></label>
           </div>
           {/* Раунд 33/34: полное копирование ревизии + поблочное копирование
-              в шапках секций ниже. Выбор из списка ревизий подарка. */}
+              в шапках секций ниже. Раунд 35: список ревизий строится по slug
+              коллекции (см. поле slug выше) — ревизии других подарков той же
+              коллекции тоже доступны для копирования. */}
           <div className="gift-whitelist-block collectible-copy-block">
             <div className="gift-settings-head">
               <strong>{t("collectibles.copyTitle")}</strong>
@@ -487,16 +519,17 @@ export function GiftCollectiblesModal({ gift, onClose, onPublished }: { gift: St
                 className="collectible-copy-select"
                 value={copyRevisionID}
                 onChange={(e) => setCopyRevisionID(e.target.value)}
-                disabled={copyBusy !== ""}
+                disabled={copyBusy !== "" || revisionsBusy}
                 aria-label={t("collectibles.copySelect")}
               >
-                <option value="">{t("collectibles.copySelect")}</option>
+                <option value="">{revisionsBusy ? t("collectibles.copyLoading") : t("collectibles.copySelect")}</option>
                 {revisionOptions}
               </select>
-              <button className="btn" type="button" disabled={copyBusy !== "" || !copyRevisionID.trim()} onClick={() => void copyFromRevision(copyRevisionID)}>
+              <button className="btn" type="button" disabled={copyBusy !== "" || revisionsBusy || !copyRevisionID.trim()} onClick={() => void copyFromRevision(copyRevisionID)}>
                 {copyBusy === "all" ? <Loader2 className="spin" size={15} /> : <Copy size={15} />}{t("collectibles.copyLoadAll")}
               </button>
             </div>
+            {revisionListStatus}
             {copyError && <Alert>{copyError}</Alert>}
           </div>
           {renderAnimatedRows("models", models, setModels)}

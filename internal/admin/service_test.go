@@ -1939,14 +1939,22 @@ func (f *fakeGiftsService) SetCollectibleSupplyTotal(_ context.Context, write do
 	return revision, nil
 }
 
-func (f *fakeGiftsService) CollectibleRevisionSummaries(_ context.Context, giftID int64) ([]domain.StarGiftCollectibleRevisionSummary, error) {
+func (f *fakeGiftsService) CollectibleRevisionSummaries(_ context.Context, giftID int64, slug string) ([]domain.StarGiftCollectibleRevisionSummary, error) {
+	// Раунд 35: slug-режим отбирает ревизии по slug_prefix коллекции.
+	if slug != "" {
+		if f.sourceRevision == nil || f.sourceRevision.SlugPrefix != slug {
+			return nil, nil
+		}
+		giftID = f.sourceRevision.GiftID
+	}
 	if f.sourceRevision == nil || f.sourceRevision.GiftID != giftID {
 		return nil, nil
 	}
 	revision := *f.sourceRevision
 	return []domain.StarGiftCollectibleRevisionSummary{{
 		RevisionID: revision.ID, GiftID: revision.GiftID, Revision: revision.Revision,
-		Status: "published", UpgradeStars: revision.UpgradeStars, SupplyTotal: revision.SupplyTotal,
+		SlugPrefix: revision.SlugPrefix,
+		Status:     "published", UpgradeStars: revision.UpgradeStars, SupplyTotal: revision.SupplyTotal,
 		Issued: revision.Issued, ModelCount: len(revision.Models), PatternCount: len(revision.Patterns),
 		BackdropCount: len(revision.Backdrops), CreatedBy: revision.CreatedBy,
 	}}, nil

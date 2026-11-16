@@ -316,9 +316,11 @@ type GiftsService interface {
 	// SetCollectibleSupplyTotal (раунд 34) правит лимит возможных улучшенных
 	// подарков опубликованной ревизии коллекции (supply каталога увеличен).
 	SetCollectibleSupplyTotal(ctx context.Context, write domain.StarGiftCollectibleSupplyWrite) (domain.StarGiftCollectibleRevision, error)
-	// CollectibleRevisionSummaries (раунд 34) перечисляет ревизии коллекции
-	// подарка для выбора источника копирования атрибутов блоками.
-	CollectibleRevisionSummaries(ctx context.Context, giftID int64) ([]domain.StarGiftCollectibleRevisionSummary, error)
+	// CollectibleRevisionSummaries (раунд 34/35) перечисляет ревизии коллекции
+	// для выбора источника копирования атрибутов блоками; непустой slug ищет
+	// по slug_prefix коллекции (новый подарок ещё не имеет своих ревизий),
+	// пустой — по gift_id.
+	CollectibleRevisionSummaries(ctx context.Context, giftID int64, slug string) ([]domain.StarGiftCollectibleRevisionSummary, error)
 	CollectibleAnimationJSON(ctx context.Context, giftID int64, kind domain.StarGiftCollectibleAttributeKind, attributeID int64) ([]byte, bool, error)
 }
 
@@ -899,7 +901,10 @@ type SetStarGiftAuctionSettingsRequest struct {
 	MinBidAmount       *int64 `json:"min_bid_amount,omitempty"`
 	StartDate          *int   `json:"start_date,omitempty"`
 	EndDate            *int   `json:"end_date,omitempty"`
-	Status             string `json:"status,omitempty"`
+	// TotalRounds (раунд 35) — количество раундов аукциона: явное значение
+	// замещает выведенное из supply/gifts_per_round; nil = не менять.
+	TotalRounds *int   `json:"total_rounds,omitempty"`
+	Status      string `json:"status,omitempty"`
 }
 
 type SetStarGiftEnabledRequest struct {
@@ -4275,7 +4280,7 @@ func (s *Service) SetStarGiftAuctionSettings(ctx context.Context, req SetStarGif
 	write := domain.StarGiftAuctionRuntimeWrite{
 		GiftID: req.GiftID, RoundDuration: req.RoundDuration, RoundDurationsJSON: req.RoundDurationsJSON,
 		RaiseMinBid: req.RaiseMinBid, RoundExtendsJSON: req.RoundExtendsJSON, MinBidAmount: req.MinBidAmount,
-		StartDate: req.StartDate, EndDate: req.EndDate, Status: req.Status,
+		StartDate: req.StartDate, EndDate: req.EndDate, TotalRounds: req.TotalRounds, Status: req.Status,
 		Actor: req.Actor, CommandID: req.CommandID,
 	}
 	// Валидация до runCommand (включая dry-run) зеркалит проверки в
@@ -4296,7 +4301,8 @@ func (s *Service) SetStarGiftAuctionSettings(ctx context.Context, req SetStarGif
 	if write.RoundDuration != nil && *write.RoundDuration <= 0 ||
 		write.MinBidAmount != nil && *write.MinBidAmount <= 0 ||
 		write.StartDate != nil && *write.StartDate <= 0 ||
-		write.EndDate != nil && *write.EndDate <= 0 {
+		write.EndDate != nil && *write.EndDate <= 0 ||
+		write.TotalRounds != nil && *write.TotalRounds <= 0 {
 		return CommandResult{}, domain.ErrStarGiftInvalid
 	}
 	return s.runCommand(ctx, req.CommandMeta, ActionSetStarGiftAuction, req.GiftID, domain.Peer{}, req, func() (CommandResult, error) {
@@ -4321,6 +4327,9 @@ func (s *Service) SetStarGiftAuctionSettings(ctx context.Context, req SetStarGif
 		}
 		if req.EndDate != nil {
 			details["end_date"] = *req.EndDate
+		}
+		if req.TotalRounds != nil {
+			details["total_rounds"] = *req.TotalRounds
 		}
 		if status := strings.TrimSpace(req.Status); status != "" {
 			details["status"] = strings.ToLower(status)
@@ -5092,14 +5101,16 @@ func (s *Service) StarGiftCollectibleRevision(ctx context.Context, revisionID in
 	return s.gifts.CollectibleRevision(ctx, revisionID)
 }
 
-// StarGiftCollectibleRevisionSummaries (раунд 34) — список ревизий коллекции
-// подарка в лёгкой проекции: выбор источника копирования атрибутов блоками
-// (модели/фоны/узоры) в админке без загрузки полных метаданных.
-func (s *Service) StarGiftCollectibleRevisionSummaries(ctx context.Context, giftID int64) ([]domain.StarGiftCollectibleRevisionSummary, error) {
+// StarGiftCollectibleRevisionSummaries (раунд 34/35) — список ревизий коллекции
+// в лёгкой проекции: выбор источника копирования атрибутов блоками
+// (модели/фоны/узоры) в админке без загрузки полных метаданных. Непустой slug
+// отбирает ревизии всей коллекции по slug_prefix (ревизии могут принадлежать
+// другим подаркам этой коллекции), пустой slug — все ревизии gift_id.
+func (s *Service) StarGiftCollectibleRevisionSummaries(ctx context.Context, giftID int64, slug string) ([]domain.StarGiftCollectibleRevisionSummary, error) {
 	if s == nil || s.gifts == nil || giftID <= 0 {
 		return nil, domain.ErrStarGiftCollectibleInvalid
 	}
-	return s.gifts.CollectibleRevisionSummaries(ctx, giftID)
+	return s.gifts.CollectibleRevisionSummaries(ctx, giftID, slug)
 }
 
 // SetStarGiftCollectibleSupply (раунд 34) — правит лимит возможных улучшенных

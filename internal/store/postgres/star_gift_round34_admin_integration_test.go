@@ -113,6 +113,30 @@ func TestStarGiftAuctionRoundDurationsRecomputePostgres(t *testing.T) {
 	if updated.NextRoundAt != updated.StartDate+60 {
 		t.Fatalf("manual end next_round_at = %d, want start+60 = %d", updated.NextRoundAt, updated.StartDate+60)
 	}
+
+	// Раунд 35: явное количество раундов замещает выведенное из
+	// supply/gifts_per_round и пересчитывает end_date. jsonb из шага выше
+	// задаёт r1=60 и r2=180, current_round=1 → end = start+60+180 при
+	// total_rounds=2.
+	rounds := 2
+	updated, err = lifecycle.SetStarGiftAuctionSettings(ctx, domain.StarGiftAuctionRuntimeWrite{
+		GiftID: giftID, TotalRounds: &rounds,
+	})
+	if err != nil {
+		t.Fatalf("set total rounds: %v", err)
+	}
+	if updated.TotalRounds != 2 {
+		t.Fatalf("total_rounds = %d, want 2", updated.TotalRounds)
+	}
+	if want := updated.StartDate + 60 + 180; updated.EndDate != want {
+		t.Fatalf("rounds end_date = %d, want %d", updated.EndDate, want)
+	}
+	// Нулевое количество раундов отклоняется (валидация до записи).
+	if _, err := lifecycle.SetStarGiftAuctionSettings(ctx, domain.StarGiftAuctionRuntimeWrite{
+		GiftID: giftID, TotalRounds: func() *int { v := 0; return &v }(),
+	}); !errors.Is(err, domain.ErrStarGiftInvalid) {
+		t.Fatalf("zero total rounds: err=%v, want ErrStarGiftInvalid", err)
+	}
 }
 
 // Раунд 34: лимит возможных улучшенных подарков опубликованной ревизии —
@@ -138,8 +162,9 @@ func TestStarGiftCollectibleSupplyUpdatePostgres(t *testing.T) {
 		t.Fatalf("create catalog: %v", err)
 	}
 	giftID := entry.Gift.ID
+	slugPrefix := "supply-" + suffix
 	_, err = gifts.PublishCollectibleRevision(ctx, domain.StarGiftCollectibleWrite{
-		GiftID: giftID, UpgradeStars: 50, SupplyTotal: 5, SlugPrefix: "supply-" + suffix,
+		GiftID: giftID, UpgradeStars: 50, SupplyTotal: 5, SlugPrefix: slugPrefix,
 		Models: []domain.StarGiftCollectibleAttribute{
 			{Kind: domain.StarGiftCollectibleModel, Name: "M1", RarityKind: domain.StarGiftRarityPermille, RarityPermille: 1000,
 				Document: collectibleTestDocumentPtr(baseDocumentID+1, "m1.tgs"), Blob: collectibleTestBlobPtr(baseDocumentID+1, "m1"), Animation: collectibleTestAnimationPtr("m1.tgs")},
@@ -210,7 +235,7 @@ func TestStarGiftCollectibleSupplyUpdatePostgres(t *testing.T) {
 	}
 
 	// Список ревизий (раунд 34) — источник для копирования блоками.
-	summaries, err := gifts.CollectibleRevisionSummaries(ctx, giftID)
+	summaries, err := gifts.CollectibleRevisionSummaries(ctx, giftID, "")
 	if err != nil {
 		t.Fatalf("revision summaries: %v", err)
 	}
@@ -220,6 +245,22 @@ func TestStarGiftCollectibleSupplyUpdatePostgres(t *testing.T) {
 	if summaries[0].RevisionID != active.ID || summaries[0].Revision != 1 || summaries[0].Status != "published" ||
 		summaries[0].ModelCount != 2 || summaries[0].PatternCount != 2 || summaries[0].BackdropCount != 2 {
 		t.Fatalf("summary = %+v", summaries[0])
+	}
+	// Раунд 35: тот же список по slug коллекции — ревизия находится даже у
+	// подарка с другим gift_id (slug-режим), а чужой slug даёт пустой список.
+	bySlug, err := gifts.CollectibleRevisionSummaries(ctx, giftID+1000, slugPrefix)
+	if err != nil {
+		t.Fatalf("revision summaries by slug: %v", err)
+	}
+	if len(bySlug) != 1 || bySlug[0].RevisionID != active.ID || bySlug[0].SlugPrefix != slugPrefix || bySlug[0].GiftID != giftID {
+		t.Fatalf("summaries by slug = %+v", bySlug)
+	}
+	foreign, err := gifts.CollectibleRevisionSummaries(ctx, giftID, "foreign-slug")
+	if err != nil {
+		t.Fatalf("revision summaries foreign slug: %v", err)
+	}
+	if len(foreign) != 0 {
+		t.Fatalf("foreign slug summaries = %d entries, want 0", len(foreign))
 	}
 }
 

@@ -12,6 +12,7 @@ import (
 	"io/fs"
 	"mime/multipart"
 	"net/http"
+	"net/url"
 	"path"
 	"strconv"
 	"strings"
@@ -2466,7 +2467,9 @@ type setStarGiftAuctionSettingsAPIRequest struct {
 	MinBidAmount       *flexInt64 `json:"min_bid_amount,omitempty"`
 	StartDate          *flexUnix  `json:"start_date,omitempty"`
 	EndDate            *flexUnix  `json:"end_date,omitempty"`
-	Status             string     `json:"status,omitempty"`
+	// Раунд 35: количество раундов аукциона (total_rounds); nil = не менять.
+	TotalRounds *int   `json:"total_rounds,omitempty"`
+	Status      string `json:"status,omitempty"`
 }
 
 // handleSetStarGiftCollectibleSupplyAPI (раунд 34) — изменить лимит возможных
@@ -2490,15 +2493,21 @@ func (s *server) handleSetStarGiftCollectibleSupplyAPI(w http.ResponseWriter, r 
 	writeCommandResultAPI(w, result, err)
 }
 
-// handleStarGiftCollectibleRevisionSummariesAPI (раунд 34) — список ревизий
-// коллекции подарка для выбора источника копирования блоками.
+// handleStarGiftCollectibleRevisionSummariesAPI (раунд 34/35) — список ревизий
+// коллекции для выбора источника копирования блоками. Параметр ?slug=
+// пробрасывается в adminapi: список строится по slug коллекции (один slug
+// может публиковаться разными подарками), без slug — по gift_id.
 func (s *server) handleStarGiftCollectibleRevisionSummariesAPI(w http.ResponseWriter, r *http.Request) {
 	giftID, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	if err != nil || giftID <= 0 {
 		writeAPIError(w, http.StatusBadRequest, "invalid gift id")
 		return
 	}
-	s.proxyAdminJSONNoStore(w, r, fmt.Sprintf("/v1/gifts/%d/collectibles/revisions", giftID), 1<<20)
+	apiPath := fmt.Sprintf("/v1/gifts/%d/collectibles/revisions", giftID)
+	if slug := strings.TrimSpace(r.URL.Query().Get("slug")); slug != "" {
+		apiPath += "?slug=" + url.QueryEscape(slug)
+	}
+	s.proxyAdminJSONNoStore(w, r, apiPath, 1<<20)
 }
 
 func (s *server) handleSetStarGiftAuctionSettingsAPI(w http.ResponseWriter, r *http.Request) {
@@ -2525,7 +2534,7 @@ func (s *server) handleSetStarGiftAuctionSettingsAPI(w http.ResponseWriter, r *h
 		CommandMeta: s.commandMetaFromAPI(r, body.CommandID, body.Reason, body.Confirm, "set-gift-auction-settings"),
 		GiftID:      body.GiftID, RoundDuration: body.RoundDuration, RoundDurationsJSON: body.RoundDurationsJSON,
 		RaiseMinBid: body.RaiseMinBid, RoundExtendsJSON: body.RoundExtendsJSON, MinBidAmount: minBid,
-		StartDate: startDate, EndDate: endDate, Status: body.Status,
+		StartDate: startDate, EndDate: endDate, TotalRounds: body.TotalRounds, Status: body.Status,
 	}
 	result, err := s.callAdminAPI(r.Context(), "/v1/gifts/set-auction-settings", req)
 	writeCommandResultAPI(w, result, err)

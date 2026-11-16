@@ -281,6 +281,7 @@ export type StarGiftRow = {
   AuctionRaiseMinBid: boolean;
   AuctionRoundExtendsJSON: string;
   AuctionMinBidAmount: string;
+  AuctionStateTotalRounds: number;
   AuctionStateStart: number;
   AuctionStateEnd: number;
   AuctionStateStatus: string;
@@ -459,6 +460,7 @@ export type StarGiftCollectibleRevisionSummary = {
   revision_id: string;
   gift_id: string;
   revision: number;
+  slug_prefix: string;
   status: "draft" | "published";
   upgrade_stars: string;
   supply_total: number;

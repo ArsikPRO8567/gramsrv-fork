@@ -354,18 +354,42 @@ func (s *StarGiftStore) SetCollectibleSupplyTotal(_ context.Context, write domai
 }
 
 // CollectibleRevisionSummaries (раунд 34) перечисляет ревизии коллекции
-// подарка в лёгкой проекции. В памяти хранится только одна (активная)
-// ревизия на подарок, поэтому список содержит её (если опубликована).
-func (s *StarGiftStore) CollectibleRevisionSummaries(_ context.Context, giftID int64) ([]domain.StarGiftCollectibleRevisionSummary, error) {
+// в лёгкой проекции. В памяти хранится только одна (активная) ревизия на
+// подарок; раунд 35: непустой slug отбирает ревизии по slug_prefix (все
+// подарки коллекции), пустой — по gift_id.
+func (s *StarGiftStore) CollectibleRevisionSummaries(_ context.Context, giftID int64, slug string) ([]domain.StarGiftCollectibleRevisionSummary, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	out := make([]domain.StarGiftCollectibleRevisionSummary, 0, 1)
+	trimmed := strings.ToLower(strings.TrimSpace(slug))
+	if trimmed != "" {
+		// Slug-режим: одна коллекция может быть опубликована разными подарками.
+		for _, revision := range s.collectibles {
+			if revision.SlugPrefix != trimmed {
+				continue
+			}
+			out = append(out, collectibleRevisionSummary(revision))
+		}
+		sort.Slice(out, func(i, j int) bool {
+			if out[i].Revision != out[j].Revision {
+				return out[i].Revision > out[j].Revision
+			}
+			return out[i].RevisionID > out[j].RevisionID
+		})
+		return out, nil
+	}
 	revision, ok := s.collectibles[giftID]
 	if !ok {
 		return out, nil
 	}
+	out = append(out, collectibleRevisionSummary(revision))
+	return out, nil
+}
+
+func collectibleRevisionSummary(revision domain.StarGiftCollectibleRevision) domain.StarGiftCollectibleRevisionSummary {
 	summary := domain.StarGiftCollectibleRevisionSummary{
 		RevisionID: revision.ID, GiftID: revision.GiftID, Revision: revision.Revision,
+		SlugPrefix:   revision.SlugPrefix,
 		UpgradeStars: revision.UpgradeStars, SupplyTotal: revision.SupplyTotal, Issued: revision.Issued,
 		ModelCount: len(revision.Models), PatternCount: len(revision.Patterns), BackdropCount: len(revision.Backdrops),
 		CreatedBy: revision.CreatedBy, CreatedAt: revision.CreatedAt,
@@ -375,8 +399,7 @@ func (s *StarGiftStore) CollectibleRevisionSummaries(_ context.Context, giftID i
 	} else {
 		summary.Status = "draft"
 	}
-	out = append(out, summary)
-	return out, nil
+	return summary
 }
 
 func (s *StarGiftStore) ActiveCollectibleProjection(_ context.Context, giftID int64, samplePerKind int) (domain.StarGiftCollectibleRevision, bool, error) {

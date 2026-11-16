@@ -230,18 +230,33 @@ UPDATE star_gift_collectible_revisions SET supply_total=$2 WHERE id=$1`,
 }
 
 // CollectibleRevisionSummaries (раунд 34) перечисляет ревизии коллекции
-// подарка (новые первыми) в лёгкой проекции — для выбора источника копирования
+// (новые первыми) в лёгкой проекции — для выбора источника копирования
 // атрибутов в админке без загрузки полных метаданных всех ревизий.
-func (s *StarGiftStore) CollectibleRevisionSummaries(ctx context.Context, giftID int64) ([]domain.StarGiftCollectibleRevisionSummary, error) {
-	rows, err := s.db.Query(ctx, `
-SELECT r.id, r.gift_id, r.revision, r.status, r.upgrade_stars, r.supply_total, r.issued,
+// Раунд 35: источники ищутся по slug коллекции (slug_prefix) — одна коллекция
+// может публиковаться разными подарками, а список для нового подарка должен
+// показывать ревизии всей коллекции; пустой slug оставляет старое поведение
+// (все ревизии gift_id).
+func (s *StarGiftStore) CollectibleRevisionSummaries(ctx context.Context, giftID int64, slug string) ([]domain.StarGiftCollectibleRevisionSummary, error) {
+	query := `
+SELECT r.id, r.gift_id, r.revision, r.slug_prefix, r.status, r.upgrade_stars, r.supply_total, r.issued,
        (SELECT COUNT(*) FROM star_gift_collectible_models m WHERE m.collectible_revision_id = r.id),
        (SELECT COUNT(*) FROM star_gift_collectible_patterns p WHERE p.collectible_revision_id = r.id),
        (SELECT COUNT(*) FROM star_gift_collectible_backdrops b WHERE b.collectible_revision_id = r.id),
        r.created_by, r.created_at
 FROM star_gift_collectible_revisions r
-WHERE r.gift_id=$1
-ORDER BY r.revision DESC, r.id DESC`, giftID)
+`
+	var args []any
+	if trimmed := strings.ToLower(strings.TrimSpace(slug)); trimmed != "" {
+		query += `WHERE r.slug_prefix=$1
+`
+		args = append(args, trimmed)
+	} else {
+		query += `WHERE r.gift_id=$1
+`
+		args = append(args, giftID)
+	}
+	query += `ORDER BY r.revision DESC, r.id DESC`
+	rows, err := s.db.Query(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("list collectible revision summaries: %w", err)
 	}
@@ -249,7 +264,7 @@ ORDER BY r.revision DESC, r.id DESC`, giftID)
 	out := make([]domain.StarGiftCollectibleRevisionSummary, 0, 8)
 	for rows.Next() {
 		var summary domain.StarGiftCollectibleRevisionSummary
-		if err := rows.Scan(&summary.RevisionID, &summary.GiftID, &summary.Revision, &summary.Status,
+		if err := rows.Scan(&summary.RevisionID, &summary.GiftID, &summary.Revision, &summary.SlugPrefix, &summary.Status,
 			&summary.UpgradeStars, &summary.SupplyTotal, &summary.Issued,
 			&summary.ModelCount, &summary.PatternCount, &summary.BackdropCount,
 			&summary.CreatedBy, &summary.CreatedAt); err != nil {

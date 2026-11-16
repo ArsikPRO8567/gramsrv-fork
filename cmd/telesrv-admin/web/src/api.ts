@@ -130,12 +130,23 @@ async function request<T>(url: string, init: RequestInit = {}): Promise<T> {
     headers
   });
   const text = await response.text();
-  const data = text ? JSON.parse(text) : null;
+  // Сервер обязан отвечать JSON. Не-JSON ответ (HTML-страница прокси, пустое
+  // тело с 5xx) раньше падал сырым SyntaxError «unexpected character…» —
+  // превращаем его в читаемую APIError со статусом.
+  let data: { error?: string; Error?: string; message?: string } | null = null;
+  if (text) {
+    try {
+      data = JSON.parse(text);
+    } catch {
+      const preview = text.trim().slice(0, 160) || response.statusText || "empty response";
+      throw new APIError(response.status, `invalid server response (HTTP ${response.status}): ${preview}`);
+    }
+  }
   if (!response.ok) {
     const message = data?.error || data?.Error || data?.message || response.statusText;
     throw new APIError(response.status, message);
   }
-  return data as T;
+  return data as unknown as T;
 }
 
 export function errorMessage(error: unknown): string {
@@ -240,7 +251,11 @@ export const api = {
         giftAnimation: (id: string) => request<Record<string, unknown>>(`/api/gifts/${encodeURIComponent(id)}/animation`),
         giftCollectibles: (id: string) => request<StarGiftCollectiblePreview>(`/api/gifts/${encodeURIComponent(id)}/collectibles`),
         giftCollectibleRevision: (revisionID: string) => request<StarGiftCollectibleRevision>(`/api/gifts/collectibles/revisions/${encodeURIComponent(revisionID)}`),
-        giftCollectibleRevisions: (id: string) => request<StarGiftCollectibleRevisionList>(`/api/gifts/${encodeURIComponent(id)}/collectibles/revisions`),
+        // Раунд 35: список ревизий строится по slug коллекции (одна коллекция
+        // может публиковаться разными подарками); пустой slug — по gift_id.
+        giftCollectibleRevisions: (id: string, slug?: string) => request<StarGiftCollectibleRevisionList>(
+          `/api/gifts/${encodeURIComponent(id)}/collectibles/revisions${slug && slug.trim() ? `?slug=${encodeURIComponent(slug.trim())}` : ""}`
+        ),
         setGiftCollectibleSupply: (payload: Record<string, unknown>) => request<CommandResult>("/api/actions/set-gift-collectible-supply", { method: "POST", body: JSON.stringify(payload) }),
         giftCollectibleAnimation: (giftID: string, kind: "model" | "pattern", attributeID: string) => request<Record<string, unknown>>(`/api/gifts/${encodeURIComponent(giftID)}/collectibles/${kind}/${encodeURIComponent(attributeID)}/animation`),
         importGift: (form: FormData) => request<CommandResult>("/api/actions/import-gift", { method: "POST", body: form }),
