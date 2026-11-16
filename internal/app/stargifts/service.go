@@ -207,6 +207,36 @@ func (s *Service) CreateCatalogRevision(ctx context.Context, write domain.StarGi
 	return entry, nil
 }
 
+// UpdateCatalogSettings публикует новую ревизию без загрузки новой анимации
+// (раунд 32): все административные параметры (цена, настройки выпуска, аукцион,
+// вайтлист) замещаются, анимационные столбцы копируются из активной ревизии
+// внутри postgres-адаптера. После записи кэш каталога сбрасывается.
+func (s *Service) UpdateCatalogSettings(ctx context.Context, write domain.StarGiftCatalogSettingsWrite) (domain.StarGiftCatalogEntry, error) {
+	if s == nil || s.store == nil {
+		return domain.StarGiftCatalogEntry{}, fmt.Errorf("star gift catalog importer is not configured")
+	}
+	write.Title = branding.UserVisibleText(strings.TrimSpace(write.Title), "")
+	if write.Stars <= 0 || write.ConvertStars < 0 || write.ConvertStars > write.Stars ||
+		len([]rune(write.Title)) > domain.MaxStarGiftTitleRunes {
+		return domain.StarGiftCatalogEntry{}, domain.ErrStarGiftInvalid
+	}
+	entry, err := s.store.UpdateCatalogSettings(ctx, write)
+	if err != nil {
+		return domain.StarGiftCatalogEntry{}, err
+	}
+	s.InvalidateStarGiftCatalog()
+	return entry, nil
+}
+
+// SetStarGiftAuctionSettings делегирует административные настройки рабочей
+// строки star_gift_auctions в lifecycle-хранилище (раунд 32).
+func (s *Service) SetStarGiftAuctionSettings(ctx context.Context, write domain.StarGiftAuctionRuntimeWrite) (domain.StarGiftAuction, error) {
+	if s == nil || s.lifecycle == nil {
+		return domain.StarGiftAuction{}, fmt.Errorf("star gift lifecycle store is not configured")
+	}
+	return s.lifecycle.SetStarGiftAuctionSettings(ctx, write)
+}
+
 func (s *Service) materializeCatalogWrite(ctx context.Context, write *domain.StarGiftCatalogWrite) error {
 	objectKey, err := s.blobs.Put(ctx, write.Animation.TGS)
 	if err != nil {

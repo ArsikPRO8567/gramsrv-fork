@@ -246,6 +246,44 @@ export type StarGiftRow = {
   ReceivedCount: string;
   CreatedBy: string;
   UpdatedAt: string;
+  // Раунд 32: полный набор параметров для предзаполнения формы редактирования.
+  Limited: boolean;
+  SoldOut: boolean;
+  Birthday: boolean;
+  RequirePremium: boolean;
+  LimitedPerUser: boolean;
+  PeerColorAvailable: boolean;
+  Auction: boolean;
+  AvailabilityTotal: number;
+  AvailabilityRemains: number;
+  ReleasedByType: string;
+  ReleasedByID: string;
+  PerUserTotal: number;
+  LockedUntilDate: number;
+  AuctionSlug: string;
+  GiftsPerRound: number;
+  AuctionStartDate: number;
+  UpgradeVariants: number;
+  HasBackground: boolean;
+  BackgroundCenter: number;
+  BackgroundEdge: number;
+  BackgroundText: number;
+  HasWhitelist: boolean;
+  WhitelistBuyersJSON: string;
+  WhitelistHidden: boolean;
+  WhitelistNumbered: boolean;
+  WhitelistDisallowUpgrades: boolean;
+  WhitelistDisallowResell: boolean;
+  WhitelistApply: boolean;
+  AuctionRowExists: boolean;
+  AuctionRoundDuration: number;
+  AuctionRoundDurationsJSON: string;
+  AuctionRaiseMinBid: boolean;
+  AuctionRoundExtendsJSON: string;
+  AuctionMinBidAmount: string;
+  AuctionStateStart: number;
+  AuctionStateEnd: number;
+  AuctionStateStatus: string;
 };
 
 export type StarGiftListResponse = { Gifts: StarGiftRow[] };
@@ -267,6 +305,12 @@ export type OfficialStarGiftRow = {
   per_user_total: number;
   locked_until_date: number;
   auction: boolean;
+  // Раунд 32: аукционные поля для предзаполнения и признак полного пула
+  // атрибутов (у аукционных подарков upgrade_stars=0, но пул полный).
+  auction_slug: string;
+  gifts_per_round: number;
+  auction_start_date: number;
+  has_attributes: boolean;
   model_count: number;
   pattern_count: number;
   backdrop_count: number;

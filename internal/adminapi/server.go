@@ -83,6 +83,8 @@ type Service interface {
 	PublishStarGiftCollectibles(ctx context.Context, req admin.PublishStarGiftCollectiblesRequest) (admin.CommandResult, error)
 	SetStarGiftEnabled(ctx context.Context, req admin.SetStarGiftEnabledRequest) (admin.CommandResult, error)
 	SetStarGiftSortOrder(ctx context.Context, req admin.SetStarGiftSortOrderRequest) (admin.CommandResult, error)
+	UpdateStarGiftSettings(ctx context.Context, req admin.UpdateStarGiftSettingsRequest) (admin.CommandResult, error)
+	SetStarGiftAuctionSettings(ctx context.Context, req admin.SetStarGiftAuctionSettingsRequest) (admin.CommandResult, error)
 	GiveGift(ctx context.Context, req admin.GiveGiftRequest) (admin.CommandResult, error)
 	StarGiftAnimation(ctx context.Context, giftID int64) ([]byte, bool, error)
 	EmojiAnimation(ctx context.Context, documentID int64) ([]byte, bool, error)
@@ -253,6 +255,8 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("POST /v1/gifts/{id}/collectibles/publish", s.authenticated(s.handlePublishStarGiftCollectibles))
 	mux.HandleFunc("POST /v1/gifts/set-enabled", s.authenticated(s.handleSetStarGiftEnabled))
 	mux.HandleFunc("POST /v1/gifts/set-sort-order", s.authenticated(s.handleSetStarGiftSortOrder))
+	mux.HandleFunc("POST /v1/gifts/update-settings", s.authenticated(s.handleUpdateStarGiftSettings))
+	mux.HandleFunc("POST /v1/gifts/set-auction-settings", s.authenticated(s.handleSetStarGiftAuctionSettings))
 	mux.HandleFunc("POST /v1/gifts/give", s.authenticated(s.handleGiveGift))
 	mux.HandleFunc("GET /v1/gifts/{id}/animation", s.authenticated(s.handleStarGiftAnimation))
 	mux.HandleFunc("GET /v1/emoji/{id}/animation", s.authenticated(s.handleEmojiAnimation))
@@ -959,6 +963,11 @@ func officialStarGiftListItem(item officialgifts.GiftSummary) map[string]any {
 		"birthday": item.Birthday, "require_premium": item.RequirePremium,
 		"limited_per_user": item.LimitedPerUser, "per_user_total": item.PerUserTotal,
 		"locked_until_date": item.LockedUntilDate, "auction": item.Auction,
+		// Раунд 32: аукционные поля для предзаполнения и признак полного
+		// пула атрибутов — у аукционных подарков upgrade_stars=0, и без
+		// has_attributes форма не показывала бы «включить коллектив».
+		"auction_slug": item.AuctionSlug, "gifts_per_round": item.GiftsPerRound,
+		"auction_start_date": item.AuctionStartDate, "has_attributes": item.HasAttributes(),
 		"model_count": item.ModelCount, "pattern_count": item.PatternCount, "backdrop_count": item.BackdropCount,
 		"crafted_model_count": item.CraftedModelCount, "can_upgrade": item.CanUpgrade(), "can_craft": item.CanCraft(),
 		"document_id": strconv.FormatInt(item.DocumentID, 10), "animation_validated": item.AnimationValidated,
@@ -1071,6 +1080,24 @@ func (s *Server) handleSetStarGiftSortOrder(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	result, err := s.svc.SetStarGiftSortOrder(r.Context(), req)
+	writeCommandResult(w, result, err)
+}
+
+func (s *Server) handleUpdateStarGiftSettings(w http.ResponseWriter, r *http.Request) {
+	var req admin.UpdateStarGiftSettingsRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	result, err := s.svc.UpdateStarGiftSettings(r.Context(), req)
+	writeCommandResult(w, result, err)
+}
+
+func (s *Server) handleSetStarGiftAuctionSettings(w http.ResponseWriter, r *http.Request) {
+	var req admin.SetStarGiftAuctionSettingsRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	result, err := s.svc.SetStarGiftAuctionSettings(r.Context(), req)
 	writeCommandResult(w, result, err)
 }
 

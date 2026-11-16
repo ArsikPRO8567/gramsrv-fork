@@ -1307,6 +1307,186 @@ func TestImportOfficialStarGiftIssueSettingsAndWhitelist(t *testing.T) {
 	}
 }
 
+// Раунд 32: аукционный подарок из снимка с ПОЛНЫМ пулом атрибутов (модели/
+// узоры/фоны) импортируется с ревизией коллекции даже без галочки
+// «включить коллектив»: у аукционных подарков upgrade_stars=0, CanUpgrade()
+// ложен, и раньше ревизия коллекции не создавалась.
+func TestImportOfficialStarGiftAuctionAutoIncludesCollectibles(t *testing.T) {
+	lottie := `{"v":"5.7.4","fr":30,"ip":0,"op":60,"w":512,"h":512,"layers":[{"ty":4}],"assets":[]}`
+	raw := []byte(lottie)
+	sum := sha256.Sum256(raw)
+	permille := 500
+	baseDocument := officialgifts.Document{ID: 1, FileName: "auction.json", SHA256: hex.EncodeToString(sum[:]), Data: raw}
+	modelDoc := officialgifts.Document{ID: 11, FileName: "model.json", SHA256: hex.EncodeToString(sum[:]), Data: raw}
+	patternDoc := officialgifts.Document{ID: 12, FileName: "pattern.json", SHA256: hex.EncodeToString(sum[:]), Data: raw}
+	source := &fakeOfficialGiftsSource{bundle: officialgifts.Bundle{
+		ManifestSHA256: bytesOf(0x33, sha256.Size),
+		SourceJSON:     []byte(`{"id":7770003,"auction":true}`),
+		Gift: officialgifts.Gift{
+			ID: 7770003, Title: "Auction Rose", Stars: 500, ConvertStars: 425, DocumentID: 1,
+			Auction: true, AvailabilityTotal: 10,
+		},
+		BaseDocument: baseDocument,
+		Collectible: &officialgifts.CollectibleSet{
+			Models: []officialgifts.Model{
+				{Name: "First", DocumentID: 11, Rarity: officialgifts.Rarity{Kind: "permille", Permille: &permille}, Document: modelDoc},
+				{Name: "Second", DocumentID: 11, Rarity: officialgifts.Rarity{Kind: "permille", Permille: &permille}, Document: modelDoc},
+			},
+			Patterns: []officialgifts.Pattern{
+				{Name: "First", DocumentID: 12, Rarity: officialgifts.Rarity{Kind: "permille", Permille: &permille}, Document: patternDoc},
+				{Name: "Second", DocumentID: 12, Rarity: officialgifts.Rarity{Kind: "permille", Permille: &permille}, Document: patternDoc},
+			},
+			Backdrops: []officialgifts.Backdrop{
+				{Name: "First", BackdropID: 1, Rarity: officialgifts.Rarity{Kind: "permille", Permille: &permille}},
+				{Name: "Second", BackdropID: 2, Rarity: officialgifts.Rarity{Kind: "permille", Permille: &permille}},
+			},
+		},
+	}}
+	gifts := &fakeGiftsService{}
+	svc := NewService(Dependencies{Commands: newMemoryCommandRepo(), Gifts: gifts, OfficialGifts: source, Now: fixedNow})
+	req := ImportOfficialStarGiftRequest{SourceGiftID: "7770003", Enabled: true}
+	req.CommandMeta = CommandMeta{CommandID: "auction-collectible-import", Actor: "ops", Reason: "auction pool", DryRun: false}
+	result, err := svc.ImportOfficialStarGift(context.Background(), req)
+	if err != nil {
+		t.Fatalf("auction import with attribute pool: result=%+v err=%v", result, err)
+	}
+	if gifts.lastBundle.Collectible == nil {
+		t.Fatalf("collectible revision must be written for an auction gift even without include_collectible")
+	}
+	if len(gifts.lastBundle.Collectible.Models) != 2 || len(gifts.lastBundle.Collectible.Patterns) != 2 || len(gifts.lastBundle.Collectible.Backdrops) != 2 {
+		t.Fatalf("collectible pool incomplete: models=%d patterns=%d backdrops=%d",
+			len(gifts.lastBundle.Collectible.Models), len(gifts.lastBundle.Collectible.Patterns), len(gifts.lastBundle.Collectible.Backdrops))
+	}
+	if !gifts.lastBundle.Catalog.Auction {
+		t.Fatalf("catalog must keep the auction flag: %+v", gifts.lastBundle.Catalog)
+	}
+}
+
+// Раунд 32: команда gifts.update_settings применяет ВСЕ параметры (цены,
+// сортировка, настройки выпуска, аукцион, вайтлист) к settings write.
+func TestUpdateStarGiftSettingsAppliesAllParameters(t *testing.T) {
+	gifts := &fakeGiftsService{}
+	svc := NewService(Dependencies{Commands: newMemoryCommandRepo(), Gifts: gifts, Now: fixedNow})
+	total, remains, perUser, locked := 40, 30, 2, 1_900_000_000
+	start := int(fixedNow().Unix())
+	req := UpdateStarGiftSettingsRequest{
+		GiftID: 11, Title: "Edited Rose", Stars: 250, ConvertStars: 200, Enabled: true, SortOrder: 7,
+		AvailabilityTotal: &total, AvailabilityRemains: &remains, PerUserTotal: &perUser,
+		ReleasedByType: "user", ReleasedByID: 42, Birthday: boolPtr(true), RequirePremium: boolPtr(true),
+		LockedUntilDate: &locked,
+		Auction:         boolPtr(true), AuctionSlug: " Edited-Rose ", GiftsPerRound: &start,
+		Whitelist: &StarGiftWhitelistSettings{AllowedBuyers: []string{"  777  "}, Hidden: true, Apply: true},
+	}
+	req.AuctionStartDate = &start
+	req.CommandMeta = CommandMeta{CommandID: "update-settings", Actor: "ops", Reason: "edit", DryRun: false}
+	result, err := svc.UpdateStarGiftSettings(context.Background(), req)
+	if err != nil {
+		t.Fatalf("update gift settings: result=%+v err=%v", result, err)
+	}
+	write := gifts.lastSettings
+	if write.GiftID != 11 || write.Title != "Edited Rose" || write.Stars != 250 || write.ConvertStars != 200 || write.SortOrder != 7 || !write.Enabled {
+		t.Fatalf("base settings not applied: %+v", write)
+	}
+	if !write.Limited || write.AvailabilityTotal != 40 || write.AvailabilityRemains != 30 || !write.LimitedPerUser || write.PerUserTotal != 2 {
+		t.Fatalf("issue settings not applied: %+v", write)
+	}
+	if write.ReleasedBy != (domain.Peer{Type: domain.PeerTypeUser, ID: 42}) || !write.Birthday || !write.RequirePremium || write.LockedUntilDate != locked {
+		t.Fatalf("release/flag settings not applied: %+v", write)
+	}
+	if !write.Auction || write.AuctionSlug != "edited-rose" || write.GiftsPerRound != start || write.AuctionStartDate != start {
+		t.Fatalf("auction settings not applied: %+v", write)
+	}
+	if write.Whitelist == nil || len(write.Whitelist.AllowedBuyers) != 1 || write.Whitelist.AllowedBuyers[0] != "777" || !write.Whitelist.Hidden || !write.Whitelist.Apply {
+		t.Fatalf("whitelist not applied: %+v", write.Whitelist)
+	}
+}
+
+// Раунд 32: валидация зеркалит SQL-констрейнты ревизии — включённый аукцион
+// без slug/периода/старта и несогласованные счётчики отклоняются до записи.
+func TestUpdateStarGiftSettingsValidation(t *testing.T) {
+	gifts := &fakeGiftsService{}
+	svc := NewService(Dependencies{Commands: newMemoryCommandRepo(), Gifts: gifts, Now: fixedNow})
+	perRound := 5
+	cases := []struct {
+		name string
+		mut  func(req *UpdateStarGiftSettingsRequest)
+	}{
+		{"auction without slug", func(req *UpdateStarGiftSettingsRequest) {
+			req.Auction = boolPtr(true)
+			req.GiftsPerRound = &perRound
+			req.AuctionStartDate = intPtr(int(fixedNow().Unix()))
+		}},
+		{"auction without start", func(req *UpdateStarGiftSettingsRequest) {
+			req.Auction = boolPtr(true)
+			req.AuctionSlug = "slug"
+			req.GiftsPerRound = &perRound
+		}},
+		{"auction without per round", func(req *UpdateStarGiftSettingsRequest) { req.Auction = boolPtr(true); req.AuctionSlug = "slug" }},
+		{"convert above stars", func(req *UpdateStarGiftSettingsRequest) { req.Stars, req.ConvertStars = 10, 11 }},
+		{"released type without id", func(req *UpdateStarGiftSettingsRequest) { req.ReleasedByType = "channel" }},
+		{"remains above total", func(req *UpdateStarGiftSettingsRequest) {
+			total, remains := 5, 9
+			req.AvailabilityTotal, req.AvailabilityRemains = &total, &remains
+		}},
+	}
+	for _, tc := range cases {
+		req := UpdateStarGiftSettingsRequest{GiftID: 11, Title: "X", Stars: 50, ConvertStars: 40, Enabled: true}
+		tc.mut(&req)
+		req.CommandMeta = CommandMeta{CommandID: "update-validation", Actor: "ops", Reason: "check", DryRun: false}
+		if _, err := svc.UpdateStarGiftSettings(context.Background(), req); err == nil {
+			t.Fatalf("%s: expected validation error", tc.name)
+		}
+	}
+	// Нулевой gift_id тоже отклоняется.
+	req := UpdateStarGiftSettingsRequest{Title: "X", Stars: 50, Enabled: true}
+	req.CommandMeta = CommandMeta{CommandID: "update-validation-zero", Actor: "ops", Reason: "check", DryRun: false}
+	if _, err := svc.UpdateStarGiftSettings(context.Background(), req); err == nil {
+		t.Fatalf("zero gift id: expected validation error")
+	}
+}
+
+// Раунд 32: команда gifts.set_auction_settings пробрасывает настройки рабочей
+// строки в GiftsService и возвращает результат.
+func TestSetStarGiftAuctionSettingsCommand(t *testing.T) {
+	gifts := &fakeGiftsService{}
+	svc := NewService(Dependencies{Commands: newMemoryCommandRepo(), Gifts: gifts, Now: fixedNow})
+	duration, endDate := 900, 1_999_999_999
+	minBid := int64(250)
+	req := SetStarGiftAuctionSettingsRequest{
+		GiftID: 11, RoundDuration: &duration, RoundDurationsJSON: `{"round_1":120}`,
+		RaiseMinBid: boolPtr(true), RoundExtendsJSON: `{"round_2":{"window":30}}`,
+		MinBidAmount: &minBid, EndDate: &endDate, Status: "active",
+	}
+	req.CommandMeta = CommandMeta{CommandID: "auction-settings", Actor: "ops", Reason: "tune auction", DryRun: false}
+	result, err := svc.SetStarGiftAuctionSettings(context.Background(), req)
+	if err != nil {
+		t.Fatalf("set auction settings: result=%+v err=%v", result, err)
+	}
+	write := gifts.lastAuctionWrite
+	if write.GiftID != 11 || write.RoundDuration == nil || *write.RoundDuration != duration ||
+		write.RoundDurationsJSON != `{"round_1":120}` || write.RaiseMinBid == nil || !*write.RaiseMinBid ||
+		write.RoundExtendsJSON != `{"round_2":{"window":30}}` || write.MinBidAmount == nil || *write.MinBidAmount != minBid ||
+		write.EndDate == nil || *write.EndDate != endDate || write.Status != "active" {
+		t.Fatalf("auction runtime write mismatch: %+v", write)
+	}
+	// DryRun не трогает стор.
+	gifts.lastAuctionWrite = domain.StarGiftAuctionRuntimeWrite{}
+	dry := SetStarGiftAuctionSettingsRequest{GiftID: 11, Status: "pending"}
+	dry.CommandMeta = CommandMeta{CommandID: "auction-settings-dry", Actor: "ops", Reason: "check", DryRun: true}
+	if _, err := svc.SetStarGiftAuctionSettings(context.Background(), dry); err != nil {
+		t.Fatalf("dry run: %v", err)
+	}
+	if gifts.lastAuctionWrite.GiftID != 0 {
+		t.Fatalf("dry run must not touch the store: %+v", gifts.lastAuctionWrite)
+	}
+	// Некорректный статус отклоняется.
+	bad := SetStarGiftAuctionSettingsRequest{GiftID: 11, Status: "running"}
+	bad.CommandMeta = CommandMeta{CommandID: "auction-settings-bad", Actor: "ops", Reason: "check", DryRun: true}
+	if _, err := svc.SetStarGiftAuctionSettings(context.Background(), bad); err == nil {
+		t.Fatalf("invalid status: expected validation error")
+	}
+}
+
 // Раунд 31: валидация настроек выпуска зеркалит SQL-констрейнты —
 // отрицательные/несогласованные значения отклоняются до записи в БД.
 func TestImportStarGiftIssueSettingsValidation(t *testing.T) {
@@ -1342,6 +1522,7 @@ func TestImportStarGiftIssueSettingsValidation(t *testing.T) {
 }
 
 func boolPtr(value bool) *bool { return &value }
+func intPtr(value int) *int    { return &value }
 
 func TestImportOfficialStarGiftPublishesThroughRealGiftService(t *testing.T) {
 	const lottie = `{"v":"5.7.4","fr":30,"ip":0,"op":60,"w":512,"h":512,"layers":[{"ty":4}],"assets":[]}`
@@ -1442,8 +1623,10 @@ func (f *fakeOfficialGiftsSource) Bundle(_ context.Context, giftID int64, includ
 }
 
 type fakeGiftsService struct {
-	createCalls int
-	lastBundle  domain.StarGiftCatalogBundleWrite
+	createCalls      int
+	lastBundle       domain.StarGiftCatalogBundleWrite
+	lastSettings     domain.StarGiftCatalogSettingsWrite
+	lastAuctionWrite domain.StarGiftAuctionRuntimeWrite
 }
 
 func (f *fakeGiftsService) GiftByID(_ context.Context, id int64) (domain.StarGift, bool, error) {
@@ -1482,6 +1665,15 @@ func (*fakeGiftsService) SetCatalogEnabled(context.Context, int64, bool) (bool, 
 }
 func (*fakeGiftsService) SetCatalogSortOrder(context.Context, int64, int) (bool, error) {
 	return true, nil
+}
+func (f *fakeGiftsService) UpdateCatalogSettings(_ context.Context, write domain.StarGiftCatalogSettingsWrite) (domain.StarGiftCatalogEntry, error) {
+	f.createCalls++
+	f.lastSettings = write
+	return domain.StarGiftCatalogEntry{Gift: domain.StarGift{ID: write.GiftID, RevisionID: 22, Stars: write.Stars}, Revision: 2}, nil
+}
+func (f *fakeGiftsService) SetStarGiftAuctionSettings(_ context.Context, write domain.StarGiftAuctionRuntimeWrite) (domain.StarGiftAuction, error) {
+	f.lastAuctionWrite = write
+	return domain.StarGiftAuction{Version: 7, Gift: domain.StarGift{ID: write.GiftID}}, nil
 }
 func (*fakeGiftsService) AnimationJSON(context.Context, int64) ([]byte, bool, error) {
 	return []byte(`{"v":"5.7"}`), true, nil

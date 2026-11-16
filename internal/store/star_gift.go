@@ -19,6 +19,10 @@ type StarGiftStore interface {
 	// CreateCatalogBundle atomically switches the catalog revision and optional complete
 	// collectible revision. It is the only write path used by official full imports.
 	CreateCatalogBundle(ctx context.Context, write domain.StarGiftCatalogBundleWrite) (domain.StarGiftCatalogBundleResult, error)
+	// UpdateCatalogSettings создаёт новую ревизию, копируя анимацию текущей
+	// активной, и обновляет все административные параметры (раунд 32):
+	// цену/название/сортировку, настройки выпуска, аукциона и вайтлист.
+	UpdateCatalogSettings(ctx context.Context, write domain.StarGiftCatalogSettingsWrite) (domain.StarGiftCatalogEntry, error)
 	SetCatalogEnabled(ctx context.Context, giftID int64, enabled bool) (bool, error)
 	SetCatalogSortOrder(ctx context.Context, giftID int64, sortOrder int) (bool, error)
 	// AnimationJSON 返回当前版本的规范化 Lottie JSON，供管理后台安全预览。
@@ -138,4 +142,9 @@ type StarGiftLifecycleStore interface {
 	// SweepStarGiftLifecycle advances time-driven offer/auction aggregates and
 	// drains their durable notification/delivery outboxes in bounded batches.
 	SweepStarGiftLifecycle(ctx context.Context, now, limit int) error
+	// SetStarGiftAuctionSettings применяет административные настройки рабочей
+	// строки star_gift_auctions (раунд 32): длительности раундов, режим
+	// повышения ставки, продления, минимум, границы и статус. Отсутствующая
+	// строка создаётся из активной ревизии каталога.
+	SetStarGiftAuctionSettings(ctx context.Context, write domain.StarGiftAuctionRuntimeWrite) (domain.StarGiftAuction, error)
 }

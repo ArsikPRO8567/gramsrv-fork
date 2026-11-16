@@ -333,6 +333,134 @@ func (s *StarGiftStore) CreateCatalogBundle(ctx context.Context, write domain.St
 	return result, err
 }
 
+// UpdateCatalogSettings публикует новую ревизию БЕЗ загрузки новой анимации
+// (раунд 32): анимационные столбцы копируются из текущей активной ревизии, все
+// административные параметры берутся из write. Валидация зеркалит SQL-констрейнты
+// star_gift_catalog_revision_supply_check / _released_by_check /
+// _auction_check / _background_check, чтобы команда не падала на 23514.
+func (s *StarGiftStore) UpdateCatalogSettings(ctx context.Context, write domain.StarGiftCatalogSettingsWrite) (domain.StarGiftCatalogEntry, error) {
+	if write.GiftID <= 0 || write.Stars <= 0 || write.ConvertStars < 0 || write.ConvertStars > write.Stars ||
+		write.AvailabilityTotal < 0 || write.AvailabilityRemains < 0 || write.PerUserTotal < 0 ||
+		write.LockedUntilDate < 0 || write.UpgradeVariants < 0 {
+		return domain.StarGiftCatalogEntry{}, domain.ErrStarGiftInvalid
+	}
+	// Зеркало supply_check: limited и limited_per_user выводятся из счётчиков.
+	limited := write.Limited || write.AvailabilityTotal > 0
+	if limited {
+		if write.AvailabilityTotal <= 0 {
+			return domain.StarGiftCatalogEntry{}, domain.ErrStarGiftInvalid
+		}
+	} else if write.AvailabilityTotal != 0 {
+		return domain.StarGiftCatalogEntry{}, domain.ErrStarGiftInvalid
+	}
+	if write.SoldOut && !limited {
+		return domain.StarGiftCatalogEntry{}, domain.ErrStarGiftInvalid
+	}
+	limitedPerUser := write.LimitedPerUser || write.PerUserTotal > 0
+	if limitedPerUser != (write.PerUserTotal > 0) {
+		return domain.StarGiftCatalogEntry{}, domain.ErrStarGiftInvalid
+	}
+	// Зеркало auction_check: не-аукцион требует нулевые поля, аукцион —
+	// положительные slug/период/старт и limited.
+	if write.Auction {
+		if !limited || strings.TrimSpace(write.AuctionSlug) == "" || write.GiftsPerRound <= 0 || write.AuctionStartDate <= 0 {
+			return domain.StarGiftCatalogEntry{}, domain.ErrStarGiftInvalid
+		}
+	} else if write.AuctionSlug != "" || write.GiftsPerRound != 0 || write.AuctionStartDate != 0 {
+		return domain.StarGiftCatalogEntry{}, domain.ErrStarGiftInvalid
+	}
+	// Зеркало released_by_check.
+	if write.ReleasedBy.ID < 0 {
+		return domain.StarGiftCatalogEntry{}, domain.ErrStarGiftInvalid
+	}
+	if write.ReleasedBy.ID > 0 && write.ReleasedBy.Type != domain.PeerTypeUser && write.ReleasedBy.Type != domain.PeerTypeChannel {
+		return domain.StarGiftCatalogEntry{}, domain.ErrStarGiftInvalid
+	}
+	if background := write.Background; background != nil {
+		if background.CenterColor < 0 || background.CenterColor > 16777215 ||
+			background.EdgeColor < 0 || background.EdgeColor > 16777215 ||
+			background.TextColor < 0 || background.TextColor > 16777215 {
+			return domain.StarGiftCatalogEntry{}, domain.ErrStarGiftInvalid
+		}
+	}
+	if len([]rune(strings.TrimSpace(write.Title))) > domain.MaxStarGiftTitleRunes {
+		return domain.StarGiftCatalogEntry{}, domain.ErrStarGiftInvalid
+	}
+	var entry domain.StarGiftCatalogEntry
+	err := withTx(ctx, s.db, "update star gift catalog settings", func(tx pgx.Tx) error {
+		var ignored int64
+		if err := tx.QueryRow(ctx, `
+SELECT active_revision_id FROM star_gift_catalog WHERE gift_id=$1 FOR UPDATE`, write.GiftID).Scan(&ignored); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return domain.ErrStarGiftNotFound
+			}
+			return fmt.Errorf("lock star gift catalog: %w", err)
+		}
+		var revisionID int64
+		if err := tx.QueryRow(ctx, `SELECT nextval('star_gift_catalog_revision_id_seq')`).Scan(&revisionID); err != nil {
+			return fmt.Errorf("allocate star gift revision id: %w", err)
+		}
+		revision := 1
+		if err := tx.QueryRow(ctx, `
+SELECT COALESCE(MAX(revision), 0) + 1 FROM star_gift_catalog_revisions WHERE gift_id=$1`, write.GiftID).Scan(&revision); err != nil {
+			return fmt.Errorf("count star gift revisions: %w", err)
+		}
+		// Анимация и источник копируются из активной ревизии: команда
+		// правит параметры, а не файл (замена файла — import-gift).
+		if _, err := tx.Exec(ctx, `
+INSERT INTO star_gift_catalog_revisions (
+    id, gift_id, revision, title, stars, convert_stars, document_id,
+    animation_json, animation_sha256, source_name, source_format,
+    width, height, frame_rate, in_point, out_point, created_by, command_id,
+    official_gift_id, source_manifest_sha256, official_source,
+    limited, sold_out, birthday, require_premium, limited_per_user,
+    peer_color_available, auction, availability_total,
+    released_by_peer_type, released_by_peer_id, per_user_total, locked_until_date,
+    auction_slug, gifts_per_round, auction_start_date, upgrade_variants,
+    background_center_color, background_edge_color, background_text_color
+) SELECT $1, r.gift_id, $2, $3, $4, $5, r.document_id,
+       r.animation_json, r.animation_sha256, r.source_name, r.source_format,
+       r.width, r.height, r.frame_rate, r.in_point, r.out_point, $6, $7,
+       r.official_gift_id, r.source_manifest_sha256, r.official_source,
+       $8, $9, $10, $11, $12,
+       $13, $14, $15,
+       NULLIF($16::text,'')::text, NULLIF($17::bigint,0), $18, $19,
+       $20, $21, $22, $23,
+       $24, $25, $26
+FROM star_gift_catalog_revisions r
+WHERE r.id = (SELECT active_revision_id FROM star_gift_catalog WHERE gift_id=$27)`,
+			revisionID, revision, write.Title, write.Stars, write.ConvertStars,
+			write.Actor, write.CommandID,
+			limited, write.SoldOut, write.Birthday, write.RequirePremium, limitedPerUser,
+			write.PeerColorAvailable, write.Auction, write.AvailabilityTotal,
+			nullableStarGiftPeerType(write.ReleasedBy), nullableStarGiftPeerID(write.ReleasedBy), write.PerUserTotal, write.LockedUntilDate,
+			write.AuctionSlug, write.GiftsPerRound, write.AuctionStartDate, write.UpgradeVariants,
+			nullableBackgroundColor(write.Background, "center"),
+			nullableBackgroundColor(write.Background, "edge"), nullableBackgroundColor(write.Background, "text"),
+			write.GiftID,
+		); err != nil {
+			return fmt.Errorf("insert star gift revision: %w", err)
+		}
+		// Раунд 32: вайтлист из той же команды; nil — no-op.
+		if err := upsertGiftWhitelistTx(ctx, tx, write.GiftID, write.Whitelist); err != nil {
+			return fmt.Errorf("upsert gift whitelist: %w", err)
+		}
+		if _, err := tx.Exec(ctx, `
+UPDATE star_gift_catalog
+SET active_revision_id=$2, enabled=$3, sort_order=$4, availability_remains=$5, updated_at=now()
+WHERE gift_id=$1`, write.GiftID, revisionID, write.Enabled, write.SortOrder, write.AvailabilityRemains); err != nil {
+			return fmt.Errorf("activate star gift revision: %w", err)
+		}
+		var err error
+		entry, err = catalogEntryByID(ctx, tx, write.GiftID)
+		return err
+	})
+	if err != nil {
+		return domain.StarGiftCatalogEntry{}, err
+	}
+	return entry, nil
+}
+
 func (s *StarGiftStore) SetCatalogEnabled(ctx context.Context, giftID int64, enabled bool) (bool, error) {
 	tag, err := s.db.Exec(ctx, `
 UPDATE star_gift_catalog SET enabled=$2, updated_at=now()

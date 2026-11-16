@@ -10,11 +10,13 @@ import (
 	"math/big"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 
 	"telesrv/internal/domain"
 	"telesrv/internal/store"
+	"telesrv/internal/store/postgres/sqlcgen"
 )
 
 const (
@@ -541,6 +543,12 @@ WHERE collectible_revision_id=$1 AND crafted
 			}
 		}
 		if _, err := tx.Exec(ctx, `DELETE FROM star_gift_listings WHERE unique_gift_id=ANY($1::bigint[])`, uniqueIDs); err != nil {
+			return err
+		}
+		// Потребление подарка крафтом закрывает листинги: вместе с ними
+		// сбрасываем «только TON» (resale_ton_only), чтобы проекция профиля
+		// не показывала устаревший режим оплаты.
+		if _, err := tx.Exec(ctx, `UPDATE unique_star_gifts SET resale_ton_only=false,updated_at=now() WHERE id=ANY($1::bigint[])`, uniqueIDs); err != nil {
 			return err
 		}
 		if err := updateStarGiftResaleProjection(ctx, tx, giftID); err != nil {
@@ -1459,13 +1467,116 @@ next_round_at=$2,round_extend_seconds=$3,end_date=GREATEST(star_gift_auctions.en
 	return state, balance, err
 }
 
-func (s *StarGiftLifecycleStore) ensureStarGiftAuction(ctx context.Context, giftID int64, slug string, now int) (int64, error) {
+// SetStarGiftAuctionSettings применяет административные настройки рабочей
+// строки star_gift_auctions (раунд 32): длительности раундов (общая и
+// индивидуальные), режим повышения минимальной ставки, продления раундов,
+// минимальная ставка, границы аукциона и статус. Отсутствующая строка
+// lazily создаётся из активной ревизии каталога (как ensureStarGiftAuction),
+// после чего не-nil поля запроса замещают значения. Каждое изменение поднимает
+// version — клиенты получают новые границы через updateStarGiftAuctionState.
+func (s *StarGiftLifecycleStore) SetStarGiftAuctionSettings(ctx context.Context, write domain.StarGiftAuctionRuntimeWrite) (domain.StarGiftAuction, error) {
+	if s == nil || s.db == nil || write.GiftID <= 0 {
+		return domain.StarGiftAuction{}, domain.ErrStarGiftAuctionUnavailable
+	}
+	if write.RoundDuration != nil && *write.RoundDuration <= 0 ||
+		write.MinBidAmount != nil && *write.MinBidAmount <= 0 ||
+		write.StartDate != nil && *write.StartDate <= 0 ||
+		write.EndDate != nil && *write.EndDate <= 0 {
+		return domain.StarGiftAuction{}, domain.ErrStarGiftInvalid
+	}
+	status := strings.ToLower(strings.TrimSpace(write.Status))
+	if status != "" && status != "pending" && status != "active" && status != "completed" && status != "cancelled" {
+		return domain.StarGiftAuction{}, domain.ErrStarGiftInvalid
+	}
+	// JSON-поля: пустая строка = не менять, "null" = сбросить (NULL),
+	// иначе строка обязана быть валидным JSON.
+	for _, raw := range []string{write.RoundDurationsJSON, write.RoundExtendsJSON} {
+		trimmed := strings.TrimSpace(raw)
+		if trimmed == "" || trimmed == "null" {
+			continue
+		}
+		if !json.Valid([]byte(trimmed)) {
+			return domain.StarGiftAuction{}, domain.ErrStarGiftInvalid
+		}
+	}
+	now := int(time.Now().Unix())
+	var ensured domain.StarGiftAuction
+	err := withTx(ctx, s.db, "set star gift auction settings", func(tx pgx.Tx) error {
+		// Строка star_gift_auctions может ещё не существовать (аукцион
+		// создаётся лениво первой ставкой/просмотром): создаём её из
+		// активной ревизии, чтобы настройки всегда легли на реальную строку.
+		if _, err := ensureStarGiftAuctionDB(ctx, tx, write.GiftID, "", now); err != nil {
+			return err
+		}
+		sets := []string{"version=version+1", "updated_at=now()"}
+		args := []any{}
+		appendArg := func(value any) string {
+			args = append(args, value)
+			return fmt.Sprintf("$%d", len(args))
+		}
+		if write.RoundDuration != nil {
+			sets = append(sets, "round_duration="+appendArg(*write.RoundDuration))
+		}
+		if raw := strings.TrimSpace(write.RoundDurationsJSON); raw != "" {
+			if raw == "null" {
+				sets = append(sets, "round_durations=NULL")
+			} else {
+				sets = append(sets, "round_durations="+appendArg(raw)+"::jsonb")
+			}
+		}
+		if write.RaiseMinBid != nil {
+			sets = append(sets, "raise_min_bid="+appendArg(*write.RaiseMinBid))
+		}
+		if raw := strings.TrimSpace(write.RoundExtendsJSON); raw != "" {
+			if raw == "null" {
+				sets = append(sets, "round_extends=NULL")
+			} else {
+				sets = append(sets, "round_extends="+appendArg(raw)+"::jsonb")
+			}
+		}
+		if write.MinBidAmount != nil {
+			sets = append(sets, "min_bid_amount="+appendArg(*write.MinBidAmount))
+		}
+		if write.StartDate != nil {
+			sets = append(sets, "start_date="+appendArg(*write.StartDate))
+		}
+		if write.EndDate != nil {
+			sets = append(sets, "end_date="+appendArg(*write.EndDate))
+		}
+		if status != "" {
+			sets = append(sets, "status="+appendArg(status))
+		}
+		// next_round_at обязан остаться >= start_date (shape_check):
+		// при сдвиге старта граница текущего раунда двигается вместе с ним.
+		if write.StartDate != nil {
+			sets = append(sets, fmt.Sprintf("next_round_at=GREATEST(next_round_at,%s)", appendArg(*write.StartDate)))
+		}
+		query := `UPDATE star_gift_auctions SET ` + strings.Join(sets, ",") + ` WHERE gift_id=` + appendArg(write.GiftID)
+		if _, err := tx.Exec(ctx, query, args...); err != nil {
+			return fmt.Errorf("update star gift auction settings: %w", err)
+		}
+		return nil
+	})
+	if err != nil {
+		return domain.StarGiftAuction{}, err
+	}
+	ensured, err = s.loadStarGiftAuction(ctx, 0, write.GiftID)
+	if err != nil {
+		return domain.StarGiftAuction{}, err
+	}
+	return ensured, nil
+}
+
+// ensureStarGiftAuctionDB лениво создаёт строку star_gift_auctions из активной
+// ревизии каталога (ON CONFLICT DO NOTHING — существующее состояние не трогается).
+// Работает и с пулом, и с транзакцией (sqlcgen.DBTX).
+func ensureStarGiftAuctionDB(ctx context.Context, db sqlcgen.DBTX, giftID int64, slug string, now int) (int64, error) {
 	if giftID == 0 {
-		if err := s.db.QueryRow(ctx, `SELECT gift_id FROM star_gift_catalog_revisions WHERE auction AND auction_slug=$1 ORDER BY id DESC LIMIT 1`, slug).Scan(&giftID); err != nil {
+		if err := db.QueryRow(ctx, `SELECT gift_id FROM star_gift_catalog_revisions WHERE auction AND auction_slug=$1 ORDER BY id DESC LIMIT 1`, slug).Scan(&giftID); err != nil {
 			return 0, domain.ErrStarGiftAuctionUnavailable
 		}
 	}
-	gift, found, err := NewStarGiftStore(s.db).CatalogGift(ctx, giftID)
+	gift, found, err := NewStarGiftStore(db).CatalogGift(ctx, giftID)
 	if err != nil || !found || !gift.Auction || gift.GiftsPerRound <= 0 || gift.AuctionSlug == "" {
 		return 0, domain.ErrStarGiftAuctionUnavailable
 	}
@@ -1490,15 +1601,18 @@ func (s *StarGiftLifecycleStore) ensureStarGiftAuction(ctx context.Context, gift
 	if now >= start {
 		status, currentRound = "active", 1
 	}
-	_, err = s.db.Exec(ctx, `INSERT INTO star_gift_auctions(gift_id,slug,start_date,end_date,round_duration,gifts_per_round,
+	if _, err := db.Exec(ctx, `INSERT INTO star_gift_auctions(gift_id,slug,start_date,end_date,round_duration,gifts_per_round,
 total_rounds,current_round,next_round_at,gifts_left,min_bid_amount,status)
 VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) ON CONFLICT(gift_id) DO NOTHING`, gift.ID, gift.AuctionSlug,
 		start, end, starGiftAuctionRoundDuration, gift.GiftsPerRound, totalRounds, currentRound,
-		start+starGiftAuctionRoundDuration, supply, maxInt64(1, gift.Stars), status)
-	if err != nil {
+		start+starGiftAuctionRoundDuration, supply, maxInt64(1, gift.Stars), status); err != nil {
 		return 0, err
 	}
 	return gift.ID, nil
+}
+
+func (s *StarGiftLifecycleStore) ensureStarGiftAuction(ctx context.Context, giftID int64, slug string, now int) (int64, error) {
+	return ensureStarGiftAuctionDB(ctx, s.db, giftID, slug, now)
 }
 
 func (s *StarGiftLifecycleStore) loadStarGiftAuction(ctx context.Context, userID, giftID int64) (domain.StarGiftAuction, error) {

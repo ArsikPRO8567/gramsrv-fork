@@ -760,6 +760,14 @@ func (fakeService) SetStarGiftSortOrder(_ context.Context, req admin.SetStarGift
 	return admin.CommandResult{CommandID: req.CommandID, Status: "completed", DryRun: req.DryRun}, nil
 }
 
+func (fakeService) UpdateStarGiftSettings(_ context.Context, req admin.UpdateStarGiftSettingsRequest) (admin.CommandResult, error) {
+	return admin.CommandResult{CommandID: req.CommandID, Status: "completed", DryRun: req.DryRun}, nil
+}
+
+func (fakeService) SetStarGiftAuctionSettings(_ context.Context, req admin.SetStarGiftAuctionSettingsRequest) (admin.CommandResult, error) {
+	return admin.CommandResult{CommandID: req.CommandID, Status: "completed", DryRun: req.DryRun}, nil
+}
+
 func (fakeService) StarGiftAnimation(context.Context, int64) ([]byte, bool, error) {
 	return []byte(`{"v":"5.7","w":512,"h":512}`), true, nil
 }
@@ -975,11 +983,11 @@ func TestAdminAPIMintCollectibleUsernameForwardsExactInt64AndDryRun(t *testing.T
 	svc := &captureCollectibleUsernameService{}
 	srv := &Server{token: "secret", svc: svc}
 	req := httptest.NewRequest(http.MethodPost, "/v1/collectible-usernames/mint", strings.NewReader(`{
-		"command_id":"mint-1","actor":"ops","reason":"fragment import","dry_run":true,
-		"username":"durov","owner_user_id":"1001","currency":"TON","amount":"9223372036854775807",
-		"crypto_currency":"TON","crypto_amount":"250000000000",
-		"url":"https://fragment.example/durov","purchase_date":1700000000
-	}`))
+                "command_id":"mint-1","actor":"ops","reason":"fragment import","dry_run":true,
+                "username":"durov","owner_user_id":"1001","currency":"TON","amount":"9223372036854775807",
+                "crypto_currency":"TON","crypto_amount":"250000000000",
+                "url":"https://fragment.example/durov","purchase_date":1700000000
+        }`))
 	req.Header.Set("Authorization", "Bearer secret")
 	rec := httptest.NewRecorder()
 	srv.routes().ServeHTTP(rec, req)

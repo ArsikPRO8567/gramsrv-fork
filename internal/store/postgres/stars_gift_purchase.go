@@ -190,19 +190,24 @@ SET balance=stars_balances.balance+EXCLUDED.balance, updated_at=now()
 RETURNING balance,granted`, req.BuyerUserID, req.Stars).Scan(&result.Balance.Balance, &result.Balance.Granted); err != nil {
 			return fmt.Errorf("credit stars topup buyer: %w", err)
 		}
-		// Раунд 30: без английского текста — клиент рисует Fragment-начисление
-		// по starsTransactionPeerFragment (peer выбирается в rpc-проекции).
-		if err := insertStarsTxn(ctx, tx, req.BuyerUserID, req.Stars, domain.StarsReasonTopup,
+		// Раунд 30: без английского текста — клиент рисует начисление по
+		// peer-проекции (Fragment/AppStore/PlayMarket/PremiumBot выбирается
+		// в rpc-проекции по reason, раунд 32).
+		if err := insertStarsTxn(ctx, tx, req.BuyerUserID, req.Stars, req.Acquisition.StarsTopupReason(),
 			req.SpendPurposePeer, req.Date, "", ""); err != nil {
 			return err
 		}
-		_, err := tx.Exec(ctx, `
+		purposeJSON, err := starsPurchasePurposeJSON(req.StarsPurchaseForm)
+		if err != nil {
+			return domain.ErrStarsPurchaseFormInvalid
+		}
+		_, err = tx.Exec(ctx, `
 INSERT INTO stars_purchase_commands
         (buyer_user_id,form_id,kind,request_fingerprint,recipient_user_id,spend_peer_type,spend_peer_id,purpose_json,stars,currency,amount,
          balance_after,transaction_id,created_at)
-VALUES($1,$2,$3,$4,NULL,$5,$6,'{}'::jsonb,$7,$8,$9,$10,$11,$12)`, req.BuyerUserID, req.FormID, string(req.Kind), fingerprint[:],
+VALUES($1,$2,$3,$4,NULL,$5,$6,$7,$8,$9,$10,$11,$12,$13)`, req.BuyerUserID, req.FormID, string(req.Kind), fingerprint[:],
 			starsPurchasePeerTypeValue(req.SpendPurposePeer), starsPurchasePeerIDValue(req.SpendPurposePeer),
-			req.Stars, req.Currency, req.Amount, result.Balance.Balance, transactionID, req.Date)
+			purposeJSON, req.Stars, req.Currency, req.Amount, result.Balance.Balance, transactionID, req.Date)
 		if err != nil {
 			return fmt.Errorf("insert stars topup command: %w", err)
 		}
@@ -441,6 +446,17 @@ func validStarsPurchaseForm(form domain.StarsPurchaseForm) bool {
 		(form.Giveaway.UntilDate > form.IssuedAt && form.Giveaway.UntilDate <= form.IssuedAt+7*24*60*60)
 }
 
+// validStarsTopupAcquisition допускает пустой канал (Fragment по умолчанию)
+// и все четыре известных канала приобретения (раунд 32).
+func validStarsTopupAcquisition(value domain.StarsTopupAcquisition) bool {
+	switch value {
+	case "", domain.StarsTopupFragment, domain.StarsTopupAppStore, domain.StarsTopupPlayMarket, domain.StarsTopupBot:
+		return true
+	default:
+		return false
+	}
+}
+
 func validStarsPurchaseCommand(form domain.StarsPurchaseForm) bool {
 	if !form.Kind.Valid() || form.BuyerUserID <= 0 || form.Stars <= 0 || form.Amount <= 0 || len(form.Currency) != 3 {
 		return false
@@ -449,7 +465,7 @@ func validStarsPurchaseCommand(form domain.StarsPurchaseForm) bool {
 		((form.SpendPurposePeer.Type == domain.PeerTypeUser || form.SpendPurposePeer.Type == domain.PeerTypeChannel) && form.SpendPurposePeer.ID > 0)
 	switch form.Kind {
 	case domain.StarsPurchaseTopup:
-		return form.RecipientUserID == 0 && validSpendPeer && form.Giveaway == nil
+		return form.RecipientUserID == 0 && validSpendPeer && form.Giveaway == nil && validStarsTopupAcquisition(form.Acquisition)
 	case domain.StarsPurchaseGift:
 		return form.RecipientUserID > 0 && form.RecipientUserID != form.BuyerUserID && form.SpendPurposePeer == (domain.Peer{}) && form.Giveaway == nil
 	case domain.StarsPurchaseGiveaway:
@@ -490,6 +506,14 @@ func validStarsGiveawayPurchase(g *domain.StarsGiveawayPurchase, stars int64) bo
 }
 
 func starsPurchasePurposeJSON(form domain.StarsPurchaseForm) ([]byte, error) {
+	if form.Kind == domain.StarsPurchaseTopup {
+		// Раунд 32: канал приобретения топапа персистится в purpose_json —
+		// форма перепроверяется при settlement и replay без новой миграции.
+		if form.Acquisition == "" {
+			return []byte(`{}`), nil
+		}
+		return json.Marshal(map[string]string{"acquisition": string(form.Acquisition)})
+	}
 	if form.Kind != domain.StarsPurchaseGiveaway {
 		return []byte(`{}`), nil
 	}
@@ -505,8 +529,17 @@ func sameStarsPurchasePurpose(stored []byte, form domain.StarsPurchaseForm) bool
 		return false
 	}
 	if form.Kind != domain.StarsPurchaseGiveaway {
-		var value map[string]any
-		return json.Unmarshal(stored, &value) == nil && len(value) == 0
+		// Форма топапа хранит опциональный канал приобретения; строки без
+		// ключа (legacy `{}`) читаются как пустой канал (Fragment).
+		var value map[string]string
+		if json.Unmarshal(stored, &value) != nil {
+			return false
+		}
+		var wanted map[string]string
+		if json.Unmarshal(want, &wanted) != nil {
+			return false
+		}
+		return value["acquisition"] == wanted["acquisition"]
 	}
 	var decoded domain.StarsGiveawayPurchase
 	if err := json.Unmarshal(stored, &decoded); err != nil {

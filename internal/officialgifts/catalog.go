@@ -77,6 +77,15 @@ func (g GiftSummary) CanUpgrade() bool {
 	return g.UpgradeStars > 0 && g.ModelCount > 0 && g.PatternCount > 0 && g.BackdropCount > 0
 }
 
+// HasAttributes reports whether the snapshot carries a complete attribute pool
+// regardless of the upgrade price. Auction gifts upgrade for free
+// (upgrade_stars = 0), so CanUpgrade() is false for them while the pool is
+// still complete — the importer uses this flag to always include collectibles
+// for auction gifts (раунд 32).
+func (g GiftSummary) HasAttributes() bool {
+	return g.ModelCount > 0 && g.PatternCount > 0 && g.BackdropCount > 0
+}
+
 // CanCraft reports whether upgraded collectibles from this gift can reach an
 // official craft-only model. Craft is not advertised without a valid upgrade
 // path even if a malformed snapshot were to contain a crafted model.

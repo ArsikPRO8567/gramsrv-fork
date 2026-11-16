@@ -8,7 +8,7 @@ import type {
   BotDetail,
   BotListResponse,
   BroadcastListResponse,
-	GifCatalogListResponse,
+        GifCatalogListResponse,
   BotVerificationCountsResponse,
   BotVerifierListResponse,
   ChannelDetail,
@@ -111,7 +111,7 @@ function plainHeaders(source: HeadersInit | undefined): Record<string, string> {
 }
 
 async function request<T>(url: string, init: RequestInit = {}): Promise<T> {
-	const isForm = typeof FormData !== "undefined" && init.body instanceof FormData;
+        const isForm = typeof FormData !== "undefined" && init.body instanceof FormData;
   // A multipart body must keep the boundary the browser generates, so its
   // Content-Type is left alone; the CSRF header is added either way.
   const headers: Record<string, string> = isForm ? {} : { "Content-Type": "application/json" };
@@ -232,25 +232,27 @@ export const api = {
       method: "POST",
       body: JSON.stringify(payload)
     }),
-	gifts: () => request<StarGiftListResponse>("/api/gifts"),
-	officialGifts: () => request<OfficialStarGiftListResponse>("/api/official-gifts"),
-	officialGiftAnimation: (id: string) => request<Record<string, unknown>>(`/api/official-gifts/${encodeURIComponent(id)}/animation`),
-	giftAnimation: (id: string) => request<Record<string, unknown>>(`/api/gifts/${encodeURIComponent(id)}/animation`),
-	giftCollectibles: (id: string) => request<StarGiftCollectiblePreview>(`/api/gifts/${encodeURIComponent(id)}/collectibles`),
-	giftCollectibleAnimation: (giftID: string, kind: "model" | "pattern", attributeID: string) => request<Record<string, unknown>>(`/api/gifts/${encodeURIComponent(giftID)}/collectibles/${kind}/${encodeURIComponent(attributeID)}/animation`),
-	importGift: (form: FormData) => request<CommandResult>("/api/actions/import-gift", { method: "POST", body: form }),
-	importOfficialGift: (payload: Record<string, unknown>) => request<CommandResult>("/api/actions/import-official-gift", { method: "POST", body: JSON.stringify(payload) }),
-	publishGiftCollectibles: (giftID: string, form: FormData) => request<CommandResult>(`/api/actions/publish-gift-collectibles?gift_id=${encodeURIComponent(giftID)}`, { method: "POST", body: form }),
-	gifCatalog: () => request<GifCatalogListResponse>("/api/gif-catalog"),
-	stickerSets: (kind: "stickers" | "emoji") => request<StickerSetListResponse>(`/api/stickers?kind=${encodeURIComponent(kind)}`),
-	stickerSetDocuments: (setID: string) => request<{ document_ids: string[] }>(`/api/stickers/${encodeURIComponent(setID)}/documents`),
-	stickerDocumentAnimationURL: (documentID: string) => `/api/stickers/documents/${encodeURIComponent(documentID)}/animation`,
-	gifCatalogDocumentPreviewURL: (documentID: string) => `/api/gif-catalog/documents/${encodeURIComponent(documentID)}/preview`,
-	createStickerSet: (form: FormData) => request<CommandResult>("/api/actions/create-sticker-set", { method: "POST", body: form }),
-	addStickerToSet: (form: FormData) => request<CommandResult>("/api/actions/add-sticker-to-set", { method: "POST", body: form }),
-	createGifCatalogEntry: (form: FormData) => request<CommandResult>("/api/actions/create-gif-catalog-entry", { method: "POST", body: form }),
-	setAccountAvatar: (form: FormData) => request<CommandResult>("/api/actions/set-account-avatar", { method: "POST", body: form }),
-	setChannelAvatar: (form: FormData) => request<CommandResult>("/api/actions/set-channel-avatar", { method: "POST", body: form }),
+        gifts: () => request<StarGiftListResponse>("/api/gifts"),
+        officialGifts: () => request<OfficialStarGiftListResponse>("/api/official-gifts"),
+        officialGiftAnimation: (id: string) => request<Record<string, unknown>>(`/api/official-gifts/${encodeURIComponent(id)}/animation`),
+        giftAnimation: (id: string) => request<Record<string, unknown>>(`/api/gifts/${encodeURIComponent(id)}/animation`),
+        giftCollectibles: (id: string) => request<StarGiftCollectiblePreview>(`/api/gifts/${encodeURIComponent(id)}/collectibles`),
+        giftCollectibleAnimation: (giftID: string, kind: "model" | "pattern", attributeID: string) => request<Record<string, unknown>>(`/api/gifts/${encodeURIComponent(giftID)}/collectibles/${kind}/${encodeURIComponent(attributeID)}/animation`),
+        importGift: (form: FormData) => request<CommandResult>("/api/actions/import-gift", { method: "POST", body: form }),
+        importOfficialGift: (payload: Record<string, unknown>) => request<CommandResult>("/api/actions/import-official-gift", { method: "POST", body: JSON.stringify(payload) }),
+        updateGiftSettings: (payload: Record<string, unknown>) => request<CommandResult>("/api/actions/update-gift-settings", { method: "POST", body: JSON.stringify(payload) }),
+        setGiftAuctionSettings: (payload: Record<string, unknown>) => request<CommandResult>("/api/actions/set-gift-auction-settings", { method: "POST", body: JSON.stringify(payload) }),
+        publishGiftCollectibles: (giftID: string, form: FormData) => request<CommandResult>(`/api/actions/publish-gift-collectibles?gift_id=${encodeURIComponent(giftID)}`, { method: "POST", body: form }),
+        gifCatalog: () => request<GifCatalogListResponse>("/api/gif-catalog"),
+        stickerSets: (kind: "stickers" | "emoji") => request<StickerSetListResponse>(`/api/stickers?kind=${encodeURIComponent(kind)}`),
+        stickerSetDocuments: (setID: string) => request<{ document_ids: string[] }>(`/api/stickers/${encodeURIComponent(setID)}/documents`),
+        stickerDocumentAnimationURL: (documentID: string) => `/api/stickers/documents/${encodeURIComponent(documentID)}/animation`,
+        gifCatalogDocumentPreviewURL: (documentID: string) => `/api/gif-catalog/documents/${encodeURIComponent(documentID)}/preview`,
+        createStickerSet: (form: FormData) => request<CommandResult>("/api/actions/create-sticker-set", { method: "POST", body: form }),
+        addStickerToSet: (form: FormData) => request<CommandResult>("/api/actions/add-sticker-to-set", { method: "POST", body: form }),
+        createGifCatalogEntry: (form: FormData) => request<CommandResult>("/api/actions/create-gif-catalog-entry", { method: "POST", body: form }),
+        setAccountAvatar: (form: FormData) => request<CommandResult>("/api/actions/set-account-avatar", { method: "POST", body: form }),
+        setChannelAvatar: (form: FormData) => request<CommandResult>("/api/actions/set-channel-avatar", { method: "POST", body: form }),
   action: (path: string, payload: Record<string, unknown>) => request<CommandResult>(path, {
     method: "POST",
     body: JSON.stringify(payload)

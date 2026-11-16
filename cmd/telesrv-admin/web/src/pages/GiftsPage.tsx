@@ -1,4 +1,4 @@
-import { CheckCircle2, FileJson2, Gem, Loader2, Pause, Play, Plus, RefreshCw, Search, ShieldCheck, Upload, X } from "lucide-react";
+import { CheckCircle2, FileJson2, Gem, Loader2, Pause, Pencil, Play, Plus, RefreshCw, Search, ShieldCheck, Upload, X } from "lucide-react";
 import lottie from "lottie-web/build/player/lottie_light_canvas";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
@@ -120,6 +120,23 @@ export function GiftsPage() {
   const [whitelistDisallowUpgrades, setWhitelistDisallowUpgrades] = useState(false);
   const [whitelistDisallowResell, setWhitelistDisallowResell] = useState(false);
   const [whitelistApply, setWhitelistApply] = useState(true);
+  // Раунд 32: настройки аукциона каталога (ревизия: auction/slug/период/старт).
+  const [auctionEnabled, setAuctionEnabled] = useState(false);
+  const [auctionSlug, setAuctionSlug] = useState("");
+  const [auctionGiftsPerRound, setAuctionGiftsPerRound] = useState("0");
+  const [auctionStartDate, setAuctionStartDate] = useState("");
+  // Раунд 32: рабочая строка star_gift_auctions — правится из режима
+  // редактирования существующего подарка; пустые поля = «не менять».
+  const [auctionRoundDuration, setAuctionRoundDuration] = useState("");
+  const [auctionRoundDurations, setAuctionRoundDurations] = useState("");
+  const [auctionRaiseMinBid, setAuctionRaiseMinBid] = useState(false);
+  const [auctionRoundExtends, setAuctionRoundExtends] = useState("");
+  const [auctionMinBidAmount, setAuctionMinBidAmount] = useState("");
+  const [auctionEndDate, setAuctionEndDate] = useState("");
+  const [auctionStatus, setAuctionStatus] = useState("");
+  // Раунд 32: режим «edit» — правка всех параметров существующего подарка без
+  // загрузки новой анимации (замена файла по-прежнему через вкладку «Заменить»).
+  const [editGift, setEditGift] = useState<StarGiftRow | null>(null);
   const [reason, setReason] = useState("");
   const [preview, setPreview] = useState<CommandResult | null>(null);
   const [busy, setBusy] = useState(false);
@@ -172,12 +189,36 @@ export function GiftsPage() {
 
   // Раунд 31: настройки выпуска и вайтлиста — общий блок для обеих вкладок
   // (копия из снимка / загрузка своего файла). Дата разблокировки вводится
-  // календарём и уходит на сервер unix-секундами.
+  // календарём и уходит на сервер unix-секундами. Раунд 32: старт аукциона
+  // вводится с точностью до минуты (datetime-local).
   function lockedUntilUnix() {
     const value = lockedUntilDate.trim();
     if (!value) return 0;
     const parsed = Date.parse(value + "T00:00:00Z");
     return Number.isFinite(parsed) ? Math.floor(parsed / 1000) : 0;
+  }
+
+  function auctionStartUnix() {
+    const value = auctionStartDate.trim();
+    if (!value) return 0;
+    const parsed = Date.parse(value.length > 10 ? value : value + "T00:00:00Z");
+    return Number.isFinite(parsed) ? Math.floor(parsed / 1000) : 0;
+  }
+
+  function auctionEndUnix() {
+    const value = auctionEndDate.trim();
+    if (!value) return 0;
+    const parsed = Date.parse(value.length > 10 ? value : value + "T00:00:00Z");
+    return Number.isFinite(parsed) ? Math.floor(parsed / 1000) : 0;
+  }
+
+  function auctionSettings() {
+    return {
+      auction: auctionEnabled,
+      auction_slug: auctionSlug.trim().toLowerCase(),
+      gifts_per_round: Math.max(0, Math.floor(Number(auctionGiftsPerRound) || 0)),
+      auction_start_date: auctionStartUnix()
+    };
   }
 
   function issueSettings() {
@@ -191,6 +232,7 @@ export function GiftsPage() {
       birthday,
       require_premium: requirePremium,
       locked_until_date: lockedUntilUnix(),
+      ...auctionSettings(),
       whitelist: whitelistOpen ? {
         allowed_buyers: buyers,
         hidden: whitelistHidden,
@@ -209,6 +251,9 @@ export function GiftsPage() {
     setWhitelistOpen(false); setWhitelistBuyers(""); setWhitelistHidden(false);
     setWhitelistNumbered(false); setWhitelistDisallowUpgrades(false);
     setWhitelistDisallowResell(false); setWhitelistApply(true);
+    setAuctionEnabled(false); setAuctionSlug(""); setAuctionGiftsPerRound("0"); setAuctionStartDate("");
+    setAuctionRoundDuration(""); setAuctionRoundDurations(""); setAuctionRaiseMinBid(false);
+    setAuctionRoundExtends(""); setAuctionMinBidAmount(""); setAuctionEndDate(""); setAuctionStatus("");
   }
 
   function uploadForm(confirm: boolean, commandID = "") {
@@ -249,7 +294,10 @@ export function GiftsPage() {
     setTitle(gift.title || t("gifts.officialUnnamed", { id: gift.source_gift_id }));
     setStars(String(gift.stars));
     setConvertStars(String(gift.convert_stars));
-    setIncludeCollectible(gift.can_upgrade);
+    // Раунд 32: у аукционных подарков upgrade_stars=0 (бесплатное улучшение),
+    // поэтому пул атрибутов включаем по can_upgrade ИЛИ has_attributes —
+    // иначе импорт аукционного подарка остался бы без ревизии коллекции.
+    setIncludeCollectible(gift.can_upgrade || gift.has_attributes);
                 setUpgradeStars(gift.upgrade_stars);
                 setSupplyTotal(String(gift.availability_total > 0 ? gift.availability_total : Math.max(gift.upgrade_variants, 1)));
     setSlugPrefix(`official-${gift.source_gift_id}`);
@@ -262,13 +310,58 @@ export function GiftsPage() {
     setRequirePremium(gift.require_premium);
     setLockedUntilDate(gift.locked_until_date > 0 ? new Date(gift.locked_until_date * 1000).toISOString().slice(0, 10) : "");
     setReleasedByType(""); setReleasedByID("");
+    // Раунд 32: предзаполнение аукционных настроек данными снимка.
+    setAuctionEnabled(gift.auction);
+    setAuctionSlug(gift.auction ? (gift.auction_slug || `official-${gift.source_gift_id}`) : "");
+    setAuctionGiftsPerRound(String(gift.auction ? Math.max(gift.gifts_per_round, 1) : 0));
+    setAuctionStartDate(gift.auction_start_date > 0 ? new Date(gift.auction_start_date * 1000).toISOString().slice(0, 16) : "");
     setPreview(null);
+  }
+
+  // Раунд 32: payload редактирования всех параметров существующего подарка
+  // (без анимации). Отправляется целиком — форма всегда предзаполнена.
+  function editPayload(confirm: boolean, commandID = "") {
+    if (!editGift) throw new Error(t("gifts.officialRequired"));
+    if (!reason.trim()) throw new Error(t("action.reasonRequired"));
+    return {
+      command_id: commandID, reason: reason.trim(), confirm,
+      gift_id: editGift.GiftID, title: title.trim(),
+      stars, convert_stars: convertStars, enabled, sort_order: Number(sortOrder),
+      ...issueSettings()
+    };
+  }
+
+  // Раунд 32: признак того, что рабочие настройки аукциона изменены —
+  // тогда после основной команды уходит вторая (set-gift-auction-settings).
+  function auctionRuntimeDirty() {
+    if (!editGift) return false;
+    return Boolean(auctionRoundDuration.trim() || auctionRoundDurations.trim() || auctionRoundExtends.trim() ||
+      auctionMinBidAmount.trim() || auctionEndDate.trim() || auctionStatus.trim() ||
+      auctionRaiseMinBid !== editGift.AuctionRaiseMinBid);
+  }
+
+  function auctionRuntimePayload(confirm: boolean, commandID = "") {
+    if (!editGift) throw new Error(t("gifts.officialRequired"));
+    if (!reason.trim()) throw new Error(t("action.reasonRequired"));
+    const payload: Record<string, unknown> = {
+      command_id: commandID, reason: reason.trim(), confirm, gift_id: editGift.GiftID,
+      raise_min_bid: auctionRaiseMinBid
+    };
+    if (auctionRoundDuration.trim()) payload.round_duration = Math.max(1, Math.floor(Number(auctionRoundDuration) || 1));
+    if (auctionRoundDurations.trim()) payload.round_durations = auctionRoundDurations.trim();
+    if (auctionRoundExtends.trim()) payload.round_extends = auctionRoundExtends.trim();
+    if (auctionMinBidAmount.trim()) payload.min_bid_amount = String(BigInt(auctionMinBidAmount.trim()));
+    if (auctionEndDate.trim()) payload.end_date = auctionEndUnix();
+    if (auctionStatus.trim()) payload.status = auctionStatus.trim();
+    return payload;
   }
 
   async function validateImport() {
     setBusy(true); setImportError(""); setPreview(null);
     try {
-      setPreview(importSource === "official" ? await api.importOfficialGift(officialPayload(false)) : await api.importGift(uploadForm(false)));
+      setPreview(editGift
+        ? await api.updateGiftSettings(editPayload(false))
+        : importSource === "official" ? await api.importOfficialGift(officialPayload(false)) : await api.importGift(uploadForm(false)));
     } catch (err) {
       setImportError(errorMessage(err));
     } finally { setBusy(false); }
@@ -278,9 +371,12 @@ export function GiftsPage() {
     if (!preview) return;
     setBusy(true); setImportError("");
     try {
-      if (importSource === "official") await api.importOfficialGift(officialPayload(true, preview.command_id));
+      if (editGift) {
+        await api.updateGiftSettings(editPayload(true, preview.command_id));
+        if (auctionRuntimeDirty()) await api.setGiftAuctionSettings(auctionRuntimePayload(true));
+      } else if (importSource === "official") await api.importOfficialGift(officialPayload(true, preview.command_id));
       else await api.importGift(uploadForm(true, preview.command_id));
-                setPreview(null); setFile(null); setGiftID("0"); setTitle(""); setSourceGiftID("");
+                setPreview(null); setFile(null); setGiftID("0"); setTitle(""); setSourceGiftID(""); setEditGift(null);
       await load();
       setImportOpen(false);
     } catch (err) {
@@ -291,6 +387,7 @@ export function GiftsPage() {
   function startImport() {
         setGiftID("0"); setTitle(""); setStars("50"); setConvertStars("50"); setSortOrder("0");
     setEnabled(true); setReason(""); setFile(null); setPreview(null); setImportError("");
+    setEditGift(null);
     resetIssueSettings();
     setImportSource("official"); setSourceGiftID(""); setOfficialQuery(""); setOfficialCategory("all"); setImportOpen(true);
   }
@@ -299,8 +396,48 @@ export function GiftsPage() {
     setGiftID(gift.GiftID); setTitle(gift.Title); setStars(String(gift.Stars));
     setConvertStars(String(gift.ConvertStars)); setSortOrder(String(gift.SortOrder)); setEnabled(gift.Enabled);
     setReason(""); setFile(null); setPreview(null); setImportError("");
+    setEditGift(null);
     resetIssueSettings();
     setImportSource("official"); setSourceGiftID(""); setOfficialQuery(""); setOfficialCategory("all"); setImportOpen(true);
+  }
+
+  // Раунд 32: редактирование всех параметров существующего подарка без новой
+  // анимации — форма предзаполняется текущими значениями (ревизия, вайтлист,
+  // аукцион каталога и рабочая строка star_gift_auctions).
+  function startEdit(gift: StarGiftRow) {
+    setEditGift(gift);
+    setGiftID(gift.GiftID); setTitle(gift.Title); setStars(String(gift.Stars));
+    setConvertStars(String(gift.ConvertStars)); setSortOrder(String(gift.SortOrder)); setEnabled(gift.Enabled);
+    setAvailabilityTotal(String(gift.AvailabilityTotal));
+    setAvailabilityRemains(String(gift.AvailabilityRemains));
+    setPerUserTotal(String(gift.PerUserTotal));
+    setBirthday(gift.Birthday); setRequirePremium(gift.RequirePremium);
+    setLockedUntilDate(gift.LockedUntilDate > 0 ? new Date(gift.LockedUntilDate * 1000).toISOString().slice(0, 10) : "");
+    setReleasedByType(gift.ReleasedByType === "user" || gift.ReleasedByType === "channel" ? gift.ReleasedByType : "");
+    setReleasedByID(gift.ReleasedByID && gift.ReleasedByID !== "0" ? String(gift.ReleasedByID) : "");
+    setWhitelistOpen(gift.HasWhitelist);
+    let buyers = "";
+    try {
+      const parsed = JSON.parse(gift.WhitelistBuyersJSON || "[]") as unknown;
+      if (Array.isArray(parsed)) buyers = parsed.map((value) => String(value)).join("\n");
+    } catch { buyers = ""; }
+    setWhitelistBuyers(buyers);
+    setWhitelistHidden(gift.WhitelistHidden); setWhitelistNumbered(gift.WhitelistNumbered);
+    setWhitelistDisallowUpgrades(gift.WhitelistDisallowUpgrades); setWhitelistDisallowResell(gift.WhitelistDisallowResell);
+    setWhitelistApply(gift.WhitelistApply);
+    setAuctionEnabled(gift.Auction);
+    setAuctionSlug(gift.AuctionSlug);
+    setAuctionGiftsPerRound(String(gift.GiftsPerRound));
+    setAuctionStartDate(gift.AuctionStartDate > 0 ? new Date(gift.AuctionStartDate * 1000).toISOString().slice(0, 16) : "");
+    setAuctionRoundDuration(gift.AuctionRoundDuration > 0 ? String(gift.AuctionRoundDuration) : "");
+    setAuctionRoundDurations(gift.AuctionRoundDurationsJSON || "");
+    setAuctionRaiseMinBid(gift.AuctionRaiseMinBid);
+    setAuctionRoundExtends(gift.AuctionRoundExtendsJSON || "");
+    setAuctionMinBidAmount(gift.AuctionMinBidAmount && gift.AuctionMinBidAmount !== "0" ? gift.AuctionMinBidAmount : "");
+    setAuctionEndDate(gift.AuctionStateEnd > 0 ? new Date(gift.AuctionStateEnd * 1000).toISOString().slice(0, 16) : "");
+    setAuctionStatus(gift.AuctionStateStatus || "");
+    setReason(""); setFile(null); setPreview(null); setImportError("");
+    setImportOpen(true);
   }
 
   return (
@@ -335,7 +472,7 @@ export function GiftsPage() {
                 <td>{gift.ReceivedCount}</td>
                 <td><Badge tone={gift.Enabled ? "good" : "neutral"}>{gift.Enabled ? t("common.enabled") : t("common.disabled")}</Badge></td>
                 <td>{formatDate(gift.UpdatedAt)}</td>
-                <td><div className="gift-table-actions"><button className="btn compact-btn collectible-button" type="button" onClick={() => setCollectibleGift(gift)}><Gem size={13} />{t("collectibles.manage")}</button><button className="btn compact-btn" type="button" onClick={() => startRevision(gift)}>{t("gifts.replace")}</button><ActionButton compact tone="neutral" label={gift.Enabled ? t("gifts.disable") : t("gifts.enable")} path="/api/actions/set-gift-enabled" payload={() => ({ gift_id: gift.GiftID, enabled: !gift.Enabled })} onDone={() => void load()} /></div></td>
+                <td><div className="gift-table-actions"><button className="btn compact-btn collectible-button" type="button" onClick={() => setCollectibleGift(gift)}><Gem size={13} />{t("collectibles.manage")}</button><button className="btn compact-btn" type="button" onClick={() => startEdit(gift)}><Pencil size={13} />{t("gifts.edit")}</button><button className="btn compact-btn" type="button" onClick={() => startRevision(gift)}>{t("gifts.replace")}</button><ActionButton compact tone="neutral" label={gift.Enabled ? t("gifts.disable") : t("gifts.enable")} path="/api/actions/set-gift-enabled" payload={() => ({ gift_id: gift.GiftID, enabled: !gift.Enabled })} onDone={() => void load()} /></div></td>
               </tr>
             ))}
             {visibleGifts.length === 0 && <EmptyRow colSpan={9} />}
@@ -345,22 +482,22 @@ export function GiftsPage() {
 
       {importOpen && createPortal(
         <div className="modal-backdrop" role="presentation">
-                        <section className="modal command-modal gift-import-modal" role="dialog" aria-modal="true" aria-label={giftID !== "0" ? t("gifts.newRevision", { id: giftID }) : t("gifts.importTitle")}>
+                        <section className="modal command-modal gift-import-modal" role="dialog" aria-modal="true" aria-label={editGift ? t("gifts.editTitle", { id: editGift.GiftID }) : giftID !== "0" ? t("gifts.newRevision", { id: giftID }) : t("gifts.importTitle")}>
             <div className="modal-head">
-                                <div><div className="eyebrow">{t("gifts.importEyebrow")}</div><h2>{giftID !== "0" ? t("gifts.newRevision", { id: giftID }) : t("gifts.importTitle")}</h2></div>
-              <button className="icon-btn" type="button" onClick={() => setImportOpen(false)} disabled={busy} aria-label={t("action.close")}><X size={15} /></button>
+                                <div><div className="eyebrow">{editGift ? t("gifts.editEyebrow") : t("gifts.importEyebrow")}</div><h2>{editGift ? t("gifts.editTitle", { id: editGift.GiftID }) : giftID !== "0" ? t("gifts.newRevision", { id: giftID }) : t("gifts.importTitle")}</h2></div>
+              <button className="icon-btn" type="button" onClick={() => { setImportOpen(false); setEditGift(null); }} disabled={busy} aria-label={t("action.close")}><X size={15} /></button>
             </div>
             <div className="command-body gift-import-modal-body">
               <div className="command-steps">
-                <div className={`command-step ${(importSource === "official" ? sourceGiftID : file) ? "done" : "active"}`}><span>1</span><strong>{t("gifts.stepDetails")}</strong></div>
-                <div className={`command-step ${preview ? "done" : (importSource === "official" ? sourceGiftID : file) ? "active" : ""}`}><span>2</span><strong>{t("gifts.stepValidate")}</strong></div>
-                <div className={`command-step ${preview ? "active" : ""}`}><span>3</span><strong>{t("gifts.stepImport")}</strong></div>
+                <div className={`command-step ${(editGift || (importSource === "official" ? sourceGiftID : file)) ? "done" : "active"}`}><span>1</span><strong>{t("gifts.stepDetails")}</strong></div>
+                <div className={`command-step ${preview ? "done" : (editGift || (importSource === "official" ? sourceGiftID : file)) ? "active" : ""}`}><span>2</span><strong>{t("gifts.stepValidate")}</strong></div>
+                <div className={`command-step ${preview ? "active" : ""}`}><span>3</span><strong>{editGift ? t("gifts.stepSave") : t("gifts.stepImport")}</strong></div>
               </div>
-              <div className="gift-source-tabs">
+              {!editGift && <div className="gift-source-tabs">
                 <button className={`btn ${importSource === "official" ? "primary" : ""}`} type="button" onClick={() => { setImportSource("official"); setPreview(null); }}>{t("gifts.officialSource")}</button>
                 <button className={`btn ${importSource === "file" ? "primary" : ""}`} type="button" onClick={() => { setImportSource("file"); setPreview(null); }}>{t("gifts.fileSource")}</button>
-              </div>
-              {importSource === "official" ? <section className="official-gift-picker">
+              </div>}
+              {!editGift && (importSource === "official" ? <section className="official-gift-picker">
                 <div className="gift-import-note"><span>{t("gifts.officialHint")}</span><div className="gift-format-chips"><span>{officialGifts.length}</span><span>SHA-256</span></div></div>
                 <div className="official-gift-tools">
                   <label className="searchbox"><Search size={15} /><input value={officialQuery} onChange={(e) => setOfficialQuery(e.target.value)} placeholder={t("gifts.officialSearch")} /></label>
@@ -399,10 +536,10 @@ export function GiftsPage() {
                   <OfficialLottiePreview sourceGiftID={selectedOfficial.source_gift_id} />
                   <div><strong>{selectedOfficial.title || t("gifts.officialUnnamed", { id: selectedOfficial.source_gift_id })}</strong><span className="mono">{selectedOfficial.source_gift_id}</span><small>{selectedOfficial.model_count} {t("collectibles.models")} · {selectedOfficial.pattern_count} {t("collectibles.patterns")} · {selectedOfficial.backdrop_count} {t("collectibles.backdrops")}</small><span className="official-gift-capabilities"><span className={selectedOfficial.can_upgrade ? "yes" : "no"}>{selectedOfficial.can_upgrade ? t("gifts.canUpgrade") : t("gifts.cannotUpgrade")}</span><span className={selectedOfficial.can_craft ? "craft" : "no"}>{selectedOfficial.can_craft ? t("gifts.canCraft") : t("gifts.cannotCraft")}</span></span></div>
                 </div>}
-                {selectedOfficial?.can_upgrade && <>
+                {selectedOfficial && (selectedOfficial.can_upgrade || selectedOfficial.has_attributes) && <>
                   <label className="gift-switch"><input type="checkbox" checked={includeCollectible} onChange={(e) => { setIncludeCollectible(e.target.checked); setPreview(null); }} /><span className="gift-switch-track" aria-hidden="true"><span /></span><span>{t("gifts.includeCollectible")}</span></label>
                   {includeCollectible && <div className="gift-fields-grid">
-                    <label><span>{t("collectibles.upgradeStars")}</span><input type="number" min="1" value={upgradeStars} onChange={(e) => { setUpgradeStars(e.target.value); setPreview(null); }} /></label>
+                    <label><span>{t("collectibles.upgradeStars")}</span><input type="number" min="0" value={upgradeStars} onChange={(e) => { setUpgradeStars(e.target.value); setPreview(null); }} /></label>
                     <label><span>{t("collectibles.supply")}</span><input type="number" min="1" value={supplyTotal} onChange={(e) => { setSupplyTotal(e.target.value); setPreview(null); }} /></label>
                     <label><span>{t("collectibles.slug")}</span><input value={slugPrefix} maxLength={48} onChange={(e) => { setSlugPrefix(e.target.value.toLowerCase()); setPreview(null); }} /></label>
                   </div>}
@@ -415,7 +552,8 @@ export function GiftsPage() {
                   <span className="gift-file-copy"><span className="gift-field-label">{t("gifts.animation")}</span><strong>{file ? file.name : t("gifts.filePrompt")}</strong><small>{file ? formatBytes(file.size) : t("gifts.fileHint")}</small></span>
                   <span className="gift-file-action">{file ? t("gifts.changeFile") : t("gifts.chooseFile")}</span>
                 </label>
-              </>}
+              </>)}
+              {editGift && <div className="gift-import-note"><span>{t("gifts.editHint")}</span><div className="gift-format-chips"><span>#{editGift.GiftID}</span><span>r{editGift.Revision}</span></div></div>}
               <div className="gift-fields-grid">
                 <label><span>{t("gifts.title")}</span><input value={title} maxLength={128} placeholder={t("gifts.titlePlaceholder")} onChange={(e) => { setTitle(e.target.value); setPreview(null); }} /></label>
                 <label><span>{t("gifts.stars")}</span><input type="number" min="1" value={stars} onChange={(e) => { setStars(e.target.value); setPreview(null); }} /></label>
@@ -462,15 +600,60 @@ export function GiftsPage() {
                   </>}
                 </div>
               </div>
+              {/* Раунд 32: настройки аукциона (ревизия каталога) — общий блок
+                  для обеих вкладок импорта и режима редактирования */}
+                <div className="gift-settings-block">
+                  <div className="gift-settings-head">
+                    <strong>{t("gifts.auctionSettings")}</strong>
+                    <span>{t("gifts.auctionHint")}</span>
+                  </div>
+                  <label className="gift-switch"><input type="checkbox" checked={auctionEnabled} onChange={(e) => { setAuctionEnabled(e.target.checked); setPreview(null); }} /><span className="gift-switch-track" aria-hidden="true"><span /></span><span>{t("gifts.auctionEnable")}</span></label>
+                  {auctionEnabled && <div className="gift-fields-grid gift-fields-grid-wide">
+                    <label><span>{t("gifts.auctionSlug")}</span><input value={auctionSlug} maxLength={48} onChange={(e) => { setAuctionSlug(e.target.value.toLowerCase()); setPreview(null); }} /></label>
+                    <label><span>{t("gifts.auctionGiftsPerRound")}</span><input type="number" min="1" value={auctionGiftsPerRound} onChange={(e) => { setAuctionGiftsPerRound(e.target.value); setPreview(null); }} /></label>
+                    <label><span>{t("gifts.auctionStartDate")}</span><input type="datetime-local" value={auctionStartDate} onChange={(e) => { setAuctionStartDate(e.target.value); setPreview(null); }} /></label>
+                  </div>}
+                </div>
+                {/* Раунд 32: рабочая строка star_gift_auctions — только в режиме
+                    редактирования; пустые поля «не менять» */}
+                {editGift && <div className="gift-settings-block">
+                  <div className="gift-settings-head">
+                    <strong>{t("gifts.auctionRuntime")}</strong>
+                    <span>{t("gifts.auctionRuntimeHint")}</span>
+                  </div>
+                  <div className="gift-fields-grid gift-fields-grid-wide">
+                    <label><span>{t("gifts.auctionRoundDuration")}</span><input type="number" min="1" placeholder={t("gifts.keepUnchanged")} value={auctionRoundDuration} onChange={(e) => { setAuctionRoundDuration(e.target.value); setPreview(null); }} /></label>
+                    <label><span>{t("gifts.auctionMinBid")}</span><input type="number" min="1" placeholder={t("gifts.keepUnchanged")} value={auctionMinBidAmount} onChange={(e) => { setAuctionMinBidAmount(e.target.value); setPreview(null); }} /></label>
+                    <label><span>{t("gifts.auctionEndDate")}</span><input type="datetime-local" value={auctionEndDate} onChange={(e) => { setAuctionEndDate(e.target.value); setPreview(null); }} /></label>
+                    <label><span>{t("gifts.auctionStatus")}</span>
+                      <select value={auctionStatus} onChange={(e) => { setAuctionStatus(e.target.value); setPreview(null); }}>
+                        <option value="">{t("gifts.keepUnchanged")}</option>
+                        <option value="pending">pending</option>
+                        <option value="active">active</option>
+                        <option value="completed">completed</option>
+                        <option value="cancelled">cancelled</option>
+                      </select>
+                    </label>
+                    <label className="gift-reason-field"><span>{t("gifts.auctionRoundDurations")}</span>
+                      <textarea rows={2} placeholder='{"round_1":120,"round_2":300}' value={auctionRoundDurations} onChange={(e) => { setAuctionRoundDurations(e.target.value); setPreview(null); }} />
+                    </label>
+                    <label className="gift-reason-field"><span>{t("gifts.auctionRoundExtends")}</span>
+                      <textarea rows={2} placeholder='{"round_2":{"window":30,"top":3,"threshold":120}}' value={auctionRoundExtends} onChange={(e) => { setAuctionRoundExtends(e.target.value); setPreview(null); }} />
+                    </label>
+                  </div>
+                  <div className="gift-settings-switches">
+                    <label className="gift-switch"><input type="checkbox" checked={auctionRaiseMinBid} onChange={(e) => { setAuctionRaiseMinBid(e.target.checked); setPreview(null); }} /><span className="gift-switch-track" aria-hidden="true"><span /></span><span>{t("gifts.auctionRaiseMinBid")}</span></label>
+                  </div>
+                </div>}
               <label className="gift-reason-field"><span>{t("gifts.reason")}</span><input value={reason} placeholder={t("gifts.reasonPlaceholder")} onChange={(e) => setReason(e.target.value)} /></label>
               <label className="gift-switch"><input type="checkbox" checked={enabled} onChange={(e) => { setEnabled(e.target.checked); setPreview(null); }} /><span className="gift-switch-track" aria-hidden="true"><span /></span><span>{t("gifts.enableAfterImport")}</span></label>
               {importError && <Alert>{importError}</Alert>}
               {preview && <div className="gift-validation"><div className="gift-validation-head"><CheckCircle2 size={17} /><div><strong>{t("gifts.validationReady")}</strong><span>{t("gifts.validationHint")}</span></div></div><pre>{JSON.stringify(preview.details, null, 2)}</pre></div>}
             </div>
             <div className="modal-actions">
-              <button className="btn" type="button" onClick={() => setImportOpen(false)} disabled={busy}>{t("common.close")}</button>
+              <button className="btn" type="button" onClick={() => { setImportOpen(false); setEditGift(null); }} disabled={busy}>{t("common.close")}</button>
               <button className="btn" type="button" onClick={validateImport} disabled={busy}>{busy ? <Loader2 className="spin" size={15} /> : <ShieldCheck size={15} />}{t("gifts.validate")}</button>
-              <button className="btn primary" type="button" onClick={confirmImport} disabled={busy || !preview}><Upload size={15} />{t("gifts.confirmImport")}</button>
+              <button className="btn primary" type="button" onClick={confirmImport} disabled={busy || !preview}><Upload size={15} />{editGift ? t("gifts.saveSettings") : t("gifts.confirmImport")}</button>
             </div>
           </section>
         </div>,

@@ -139,6 +139,8 @@ func (s *server) routes() http.Handler {
 	mux.Handle("POST /api/actions/import-official-gift", s.requireAuthAPI(http.HandlerFunc(s.handleImportOfficialStarGiftAPI)))
 	mux.Handle("POST /api/actions/publish-gift-collectibles", s.requireAuthAPI(http.HandlerFunc(s.handlePublishStarGiftCollectiblesAPI)))
 	mux.Handle("POST /api/actions/set-gift-enabled", s.requireAuthAPI(http.HandlerFunc(s.handleSetStarGiftEnabledAPI)))
+	mux.Handle("POST /api/actions/update-gift-settings", s.requireAuthAPI(http.HandlerFunc(s.handleUpdateStarGiftSettingsAPI)))
+	mux.Handle("POST /api/actions/set-gift-auction-settings", s.requireAuthAPI(http.HandlerFunc(s.handleSetStarGiftAuctionSettingsAPI)))
 	mux.Handle("POST /api/actions/set-gift-sort-order", s.requireAuthAPI(http.HandlerFunc(s.handleSetStarGiftSortOrderAPI)))
 	mux.Handle("POST /api/actions/give-gift", s.requireAuthAPI(http.HandlerFunc(s.handleGiveGiftAPI)))
 	mux.Handle("POST /api/actions/mint-collectible-username", s.requireAuthAPI(http.HandlerFunc(s.handleMintCollectibleUsernameAPI)))
@@ -2048,15 +2050,20 @@ type importStarGiftAPIRequest struct {
 	Enabled      bool   `json:"enabled"`
 	SortOrder    int    `json:"sort_order"`
 	// Настройки выпуска (раунд 31).
-	AvailabilityTotal   *int                          `json:"availability_total,omitempty"`
-	AvailabilityRemains *int                          `json:"availability_remains,omitempty"`
-	ReleasedByType      string                        `json:"released_by_type,omitempty"`
-	ReleasedByID        int64                         `json:"released_by_id,string,omitempty"`
-	PerUserTotal        *int                          `json:"per_user_total,omitempty"`
-	Birthday            *bool                         `json:"birthday,omitempty"`
-	RequirePremium      *bool                         `json:"require_premium,omitempty"`
-	LockedUntilDate     *int                          `json:"locked_until_date,omitempty"`
-	Whitelist           *starGiftWhitelistAPISettings `json:"whitelist,omitempty"`
+	AvailabilityTotal   *int   `json:"availability_total,omitempty"`
+	AvailabilityRemains *int   `json:"availability_remains,omitempty"`
+	ReleasedByType      string `json:"released_by_type,omitempty"`
+	ReleasedByID        int64  `json:"released_by_id,string,omitempty"`
+	PerUserTotal        *int   `json:"per_user_total,omitempty"`
+	Birthday            *bool  `json:"birthday,omitempty"`
+	RequirePremium      *bool  `json:"require_premium,omitempty"`
+	LockedUntilDate     *int   `json:"locked_until_date,omitempty"`
+	// Настройки аукциона (раунд 32).
+	Auction          *bool                         `json:"auction,omitempty"`
+	AuctionSlug      string                        `json:"auction_slug,omitempty"`
+	GiftsPerRound    *int                          `json:"gifts_per_round,omitempty"`
+	AuctionStartDate *int                          `json:"auction_start_date,omitempty"`
+	Whitelist        *starGiftWhitelistAPISettings `json:"whitelist,omitempty"`
 }
 
 func (s *server) handleImportStarGiftAPI(w http.ResponseWriter, r *http.Request) {
@@ -2106,7 +2113,12 @@ func (s *server) handleImportStarGiftAPI(w http.ResponseWriter, r *http.Request)
 		Birthday:            body.Birthday,
 		RequirePremium:      body.RequirePremium,
 		LockedUntilDate:     body.LockedUntilDate,
-		Whitelist:           starGiftWhitelistFromAPI(body.Whitelist),
+		// Раунд 32: настройки аукциона пробрасываются как есть.
+		Auction:          body.Auction,
+		AuctionSlug:      body.AuctionSlug,
+		GiftsPerRound:    body.GiftsPerRound,
+		AuctionStartDate: body.AuctionStartDate,
+		Whitelist:        starGiftWhitelistFromAPI(body.Whitelist),
 	}
 	result, err := s.callAdminMultipart(r.Context(), "/v1/gifts/import", req, header.Filename, data)
 	writeCommandResultAPI(w, result, err)
@@ -2128,15 +2140,20 @@ type importOfficialStarGiftAPIRequest struct {
 	SupplyTotal        int    `json:"supply_total"`
 	SlugPrefix         string `json:"slug_prefix"`
 	// Настройки выпуска (раунд 31); nil = не передано — сохраняются значения снимка.
-	AvailabilityTotal   *int                          `json:"availability_total,omitempty"`
-	AvailabilityRemains *int                          `json:"availability_remains,omitempty"`
-	ReleasedByType      string                        `json:"released_by_type,omitempty"`
-	ReleasedByID        int64                         `json:"released_by_id,string,omitempty"`
-	PerUserTotal        *int                          `json:"per_user_total,omitempty"`
-	Birthday            *bool                         `json:"birthday,omitempty"`
-	RequirePremium      *bool                         `json:"require_premium,omitempty"`
-	LockedUntilDate     *int                          `json:"locked_until_date,omitempty"`
-	Whitelist           *starGiftWhitelistAPISettings `json:"whitelist,omitempty"`
+	AvailabilityTotal   *int   `json:"availability_total,omitempty"`
+	AvailabilityRemains *int   `json:"availability_remains,omitempty"`
+	ReleasedByType      string `json:"released_by_type,omitempty"`
+	ReleasedByID        int64  `json:"released_by_id,string,omitempty"`
+	PerUserTotal        *int   `json:"per_user_total,omitempty"`
+	Birthday            *bool  `json:"birthday,omitempty"`
+	RequirePremium      *bool  `json:"require_premium,omitempty"`
+	LockedUntilDate     *int   `json:"locked_until_date,omitempty"`
+	// Настройки аукциона (раунд 32); nil = значения снимка.
+	Auction          *bool                         `json:"auction,omitempty"`
+	AuctionSlug      string                        `json:"auction_slug,omitempty"`
+	GiftsPerRound    *int                          `json:"gifts_per_round,omitempty"`
+	AuctionStartDate *int                          `json:"auction_start_date,omitempty"`
+	Whitelist        *starGiftWhitelistAPISettings `json:"whitelist,omitempty"`
 }
 
 // starGiftWhitelistFromAPI конвертирует API-блок вайтлиста в доменную форму
@@ -2180,7 +2197,13 @@ func (s *server) handleImportOfficialStarGiftAPI(w http.ResponseWriter, r *http.
 		Birthday:            body.Birthday,
 		RequirePremium:      body.RequirePremium,
 		LockedUntilDate:     body.LockedUntilDate,
-		Whitelist:           starGiftWhitelistFromAPI(body.Whitelist),
+		// Раунд 32: настройки аукциона пробрасываются как есть
+		// (nil = значения снимка сохраняются).
+		Auction:          body.Auction,
+		AuctionSlug:      body.AuctionSlug,
+		GiftsPerRound:    body.GiftsPerRound,
+		AuctionStartDate: body.AuctionStartDate,
+		Whitelist:        starGiftWhitelistFromAPI(body.Whitelist),
 	}
 	result, err := s.callAdminAPI(r.Context(), "/v1/official-gifts/import", req)
 	writeCommandResultAPI(w, result, err)
@@ -2307,6 +2330,99 @@ func (s *server) handleSetStarGiftSortOrderAPI(w http.ResponseWriter, r *http.Re
 		GiftID:      body.GiftID, SortOrder: body.SortOrder,
 	}
 	result, err := s.callAdminAPI(r.Context(), "/v1/gifts/set-sort-order", req)
+	writeCommandResultAPI(w, result, err)
+}
+
+// updateStarGiftSettingsAPIRequest / setStarGiftAuctionSettingsAPIRequest —
+// зеркала admin-запросов (раунд 32). Опциональные поля передаются как указатели:
+// nil = настройка не задана (для аукциона — значение по умолчанию).
+type updateStarGiftSettingsAPIRequest struct {
+	CommandID           string                        `json:"command_id"`
+	Reason              string                        `json:"reason"`
+	Confirm             bool                          `json:"confirm"`
+	GiftID              int64                         `json:"gift_id,string"`
+	Title               string                        `json:"title"`
+	Stars               int64                         `json:"stars,string"`
+	ConvertStars        int64                         `json:"convert_stars,string"`
+	Enabled             bool                          `json:"enabled"`
+	SortOrder           int                           `json:"sort_order"`
+	AvailabilityTotal   *int                          `json:"availability_total,omitempty"`
+	AvailabilityRemains *int                          `json:"availability_remains,omitempty"`
+	ReleasedByType      string                        `json:"released_by_type,omitempty"`
+	ReleasedByID        int64                         `json:"released_by_id,string,omitempty"`
+	PerUserTotal        *int                          `json:"per_user_total,omitempty"`
+	Birthday            *bool                         `json:"birthday,omitempty"`
+	RequirePremium      *bool                         `json:"require_premium,omitempty"`
+	LockedUntilDate     *int                          `json:"locked_until_date,omitempty"`
+	Auction             *bool                         `json:"auction,omitempty"`
+	AuctionSlug         string                        `json:"auction_slug,omitempty"`
+	GiftsPerRound       *int                          `json:"gifts_per_round,omitempty"`
+	AuctionStartDate    *int                          `json:"auction_start_date,omitempty"`
+	Whitelist           *starGiftWhitelistAPISettings `json:"whitelist,omitempty"`
+}
+
+func (s *server) handleUpdateStarGiftSettingsAPI(w http.ResponseWriter, r *http.Request) {
+	var body updateStarGiftSettingsAPIRequest
+	if !decodeAction(w, r, &body) {
+		return
+	}
+	req := admin.UpdateStarGiftSettingsRequest{
+		CommandMeta: s.commandMetaFromAPI(r, body.CommandID, body.Reason, body.Confirm, "update-gift-settings"),
+		GiftID:      body.GiftID, Title: body.Title, Stars: body.Stars, ConvertStars: body.ConvertStars,
+		Enabled: body.Enabled, SortOrder: body.SortOrder,
+		AvailabilityTotal: body.AvailabilityTotal, AvailabilityRemains: body.AvailabilityRemains,
+		ReleasedByType: body.ReleasedByType, ReleasedByID: body.ReleasedByID,
+		PerUserTotal: body.PerUserTotal, Birthday: body.Birthday, RequirePremium: body.RequirePremium,
+		LockedUntilDate: body.LockedUntilDate,
+		Auction:         body.Auction, AuctionSlug: body.AuctionSlug, GiftsPerRound: body.GiftsPerRound,
+		AuctionStartDate: body.AuctionStartDate, Whitelist: starGiftWhitelistFromAPI(body.Whitelist),
+	}
+	result, err := s.callAdminAPI(r.Context(), "/v1/gifts/update-settings", req)
+	writeCommandResultAPI(w, result, err)
+}
+
+type setStarGiftAuctionSettingsAPIRequest struct {
+	CommandID          string     `json:"command_id"`
+	Reason             string     `json:"reason"`
+	Confirm            bool       `json:"confirm"`
+	GiftID             int64      `json:"gift_id,string"`
+	RoundDuration      *int       `json:"round_duration,omitempty"`
+	RoundDurationsJSON string     `json:"round_durations,omitempty"`
+	RaiseMinBid        *bool      `json:"raise_min_bid,omitempty"`
+	RoundExtendsJSON   string     `json:"round_extends,omitempty"`
+	MinBidAmount       *flexInt64 `json:"min_bid_amount,omitempty"`
+	StartDate          *flexUnix  `json:"start_date,omitempty"`
+	EndDate            *flexUnix  `json:"end_date,omitempty"`
+	Status             string     `json:"status,omitempty"`
+}
+
+func (s *server) handleSetStarGiftAuctionSettingsAPI(w http.ResponseWriter, r *http.Request) {
+	var body setStarGiftAuctionSettingsAPIRequest
+	if !decodeAction(w, r, &body) {
+		return
+	}
+	var minBid *int64
+	if body.MinBidAmount != nil {
+		value := body.MinBidAmount.Int64()
+		minBid = &value
+	}
+	var startDate *int
+	if body.StartDate != nil {
+		value := int(body.StartDate.Unix())
+		startDate = &value
+	}
+	var endDate *int
+	if body.EndDate != nil {
+		value := int(body.EndDate.Unix())
+		endDate = &value
+	}
+	req := admin.SetStarGiftAuctionSettingsRequest{
+		CommandMeta: s.commandMetaFromAPI(r, body.CommandID, body.Reason, body.Confirm, "set-gift-auction-settings"),
+		GiftID:      body.GiftID, RoundDuration: body.RoundDuration, RoundDurationsJSON: body.RoundDurationsJSON,
+		RaiseMinBid: body.RaiseMinBid, RoundExtendsJSON: body.RoundExtendsJSON, MinBidAmount: minBid,
+		StartDate: startDate, EndDate: endDate, Status: body.Status,
+	}
+	result, err := s.callAdminAPI(r.Context(), "/v1/gifts/set-auction-settings", req)
 	writeCommandResultAPI(w, result, err)
 }
 

@@ -919,6 +919,12 @@ func (s *StarGiftLifecycleStore) SetStarGiftListing(ctx context.Context, req dom
 			if _, err := tx.Exec(ctx, `DELETE FROM star_gift_listings WHERE unique_gift_id=$1`, unique.ID); err != nil {
 				return err
 			}
+			// Снятие листинга убирает режим «только TON»: без активного
+			// листинга флаг resale_ton_only не имеет смысла, а клиент
+			// рендерит подарок в профиле по этому флагу.
+			if _, err := tx.Exec(ctx, `UPDATE unique_star_gifts SET resale_ton_only=false,updated_at=now() WHERE id=$1`, unique.ID); err != nil {
+				return err
+			}
 		} else {
 			// catalog.resell_min_stars — ТОЛЬКО отображаемая метка «цены от N
 			// звёзд» для типа подарка (проекция MIN(star_gift_listings.amount),
@@ -1246,7 +1252,7 @@ func (s *StarGiftLifecycleStore) PurchaseResaleStarGift(ctx context.Context, req
 				return err
 			}
 			if _, err := tx.Exec(ctx, `UPDATE unique_star_gifts SET owner_peer_type=$2,owner_peer_id=$3,
-                         last_sale_date=$4,last_sale_currency=$5,last_sale_amount=$6,updated_at=now() WHERE id=$1`,
+                         last_sale_date=$4,last_sale_currency=$5,last_sale_amount=$6,resale_ton_only=false,updated_at=now() WHERE id=$1`,
 				uniqueID, string(req.To.Type), req.To.ID, req.Date, listingCurrency, listingAmount); err != nil {
 				return err
 			}
@@ -1433,7 +1439,7 @@ WHERE actor_user_id=$1 AND command_key=$2`, req.BuyerUserID, strings.TrimSpace(r
 			return err
 		}
 		if _, err := tx.Exec(ctx, `UPDATE unique_star_gifts SET owner_peer_type=$2,owner_peer_id=$3,
-                 last_sale_date=$4,last_sale_currency=$5,last_sale_amount=$6,updated_at=now() WHERE id=$1`,
+                 last_sale_date=$4,last_sale_currency=$5,last_sale_amount=$6,resale_ton_only=false,updated_at=now() WHERE id=$1`,
 			uniqueID, string(req.To.Type), req.To.ID, req.Date, listingCurrency, listingAmount); err != nil {
 			return err
 		}
@@ -1778,7 +1784,7 @@ func (s *StarGiftLifecycleStore) ResolveStarGiftOffer(ctx context.Context, req d
 				return err
 			}
 			if _, err := tx.Exec(ctx, `UPDATE unique_star_gifts SET owner_peer_type='user',owner_peer_id=$2,
-                         last_sale_date=$3,last_sale_currency=$4,last_sale_amount=$5,updated_at=now() WHERE id=$1`, current.ID,
+                         last_sale_date=$3,last_sale_currency=$4,last_sale_amount=$5,resale_ton_only=false,updated_at=now() WHERE id=$1`, current.ID,
 				locked.BuyerUserID, req.Date, string(locked.Price.Currency), locked.Price.Amount); err != nil {
 				return err
 			}
@@ -2547,7 +2553,7 @@ WHERE provider_request_id=$1 FOR UPDATE`, providerRequestID).Scan(&uniqueID, &ow
 		requestHash := sha256.Sum256([]byte(providerRequestID))
 		giftAddress := fmt.Sprintf("telesrv-gift:%s:%x", unique.Slug, requestHash[:8])
 		if _, err := tx.Exec(ctx, `UPDATE unique_star_gifts SET owner_peer_type=NULL,owner_peer_id=NULL,
-owner_address=$2,gift_address=$3,craft_chance_permille=0,updated_at=now() WHERE id=$1`, uniqueID, ownerAddress, giftAddress); err != nil {
+owner_address=$2,gift_address=$3,craft_chance_permille=0,resale_ton_only=false,updated_at=now() WHERE id=$1`, uniqueID, ownerAddress, giftAddress); err != nil {
 			return err
 		}
 		if _, err := tx.Exec(ctx, `UPDATE peer_star_gifts SET lifecycle_status='exported',unsaved=true,pinned_order=0,can_craft_at=0 WHERE id=$1`, saved.ID); err != nil {

@@ -889,11 +889,18 @@ func tgTonTransactions(in []domain.TonTransaction, payloads starsGiftPayloads) [
 
 // tgStarsTransactionPeer 选择对手方构造器：grant/topup 走 Fragment（站外充值轨），
 // 真实 peer 走 starsTransactionPeer，其余兜底 Unsupported（Peer 字段必填，不可为 nil）。
+// Раунд 32: варианты топапа проецируются в официальные counterpart-перы —
+// AppStore/PlayMarket («Покупка в приложении»), PremiumBot («Бот для покупки
+// звёзд»); Fragment остаётся каналом по умолчанию.
 func tgStarsTransactionPeer(t domain.StarsTransaction) tg.StarsTransactionPeerClass {
 	switch t.Reason {
 	case domain.StarsReasonGrant, domain.StarsReasonTopup:
 		return &tg.StarsTransactionPeerFragment{}
-	case domain.StarsReasonPremium:
+	case domain.StarsReasonTopupAppStore:
+		return &tg.StarsTransactionPeerAppStore{}
+	case domain.StarsReasonTopupPlayMarket:
+		return &tg.StarsTransactionPeerPlayMarket{}
+	case domain.StarsReasonTopupBot, domain.StarsReasonPremium:
 		return &tg.StarsTransactionPeerPremiumBot{}
 	}
 	if t.Peer.Type != "" && t.Peer.ID != 0 {

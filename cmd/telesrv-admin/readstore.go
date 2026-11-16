@@ -316,10 +316,10 @@ type AccountRow struct {
 // introducing one lowercase island. Ordering matches domain.SortUsernames for
 // collectible rows -- stored order, then the name as a stable tiebreak.
 const accountCollectibleUsernamesColumn = `COALESCE((
-	SELECT jsonb_agg(jsonb_build_object('Username', pc.username, 'Active', pc.active)
-		ORDER BY pc.sort_order, pc.username_lower)
-	FROM peer_usernames pc
-	WHERE pc.peer_type = 'user' AND pc.peer_id = u.id AND pc.collectible_id IS NOT NULL
+        SELECT jsonb_agg(jsonb_build_object('Username', pc.username, 'Active', pc.active)
+                ORDER BY pc.sort_order, pc.username_lower)
+        FROM peer_usernames pc
+        WHERE pc.peer_type = 'user' AND pc.peer_id = u.id AND pc.collectible_id IS NOT NULL
 ), '[]'::jsonb)`
 
 type AccountDetail struct {
@@ -439,6 +439,49 @@ type StarGiftRow struct {
 	ReceivedCount int64 `json:"ReceivedCount,string"`
 	CreatedBy     string
 	UpdatedAt     time.Time
+	// Раунд 32: полный набор административных параметров для предзаполнения
+	// формы редактирования (gifts.update_settings) — настройки выпуска,
+	// аукцион из ревизии, вайтлист и рабочее состояние star_gift_auctions.
+	Limited             bool
+	SoldOut             bool
+	Birthday            bool
+	RequirePremium      bool
+	LimitedPerUser      bool
+	PeerColorAvailable  bool
+	Auction             bool
+	AvailabilityTotal   int
+	AvailabilityRemains int
+	ReleasedByType      string
+	ReleasedByID        int64 `json:"ReleasedByID,string"`
+	PerUserTotal        int
+	LockedUntilDate     int
+	AuctionSlug         string
+	GiftsPerRound       int
+	AuctionStartDate    int
+	UpgradeVariants     int
+	HasBackground       bool
+	BackgroundCenter    int
+	BackgroundEdge      int
+	BackgroundText      int
+	// Вайтлист (gift_whitelists): пустая строка JSON-массива = нет строки.
+	HasWhitelist              bool
+	WhitelistBuyersJSON       string
+	WhitelistHidden           bool
+	WhitelistNumbered         bool
+	WhitelistDisallowUpgrades bool
+	WhitelistDisallowResell   bool
+	WhitelistApply            bool
+	// Рабочая строка star_gift_auctions (настройки организации аукциона):
+	// нулевой RoundDuration = строки нет.
+	AuctionRowExists          bool
+	AuctionRoundDuration      int
+	AuctionRoundDurationsJSON string
+	AuctionRaiseMinBid        bool
+	AuctionRoundExtendsJSON   string
+	AuctionMinBidAmount       int64 `json:"AuctionMinBidAmount,string"`
+	AuctionStateStart         int
+	AuctionStateEnd           int
+	AuctionStateStatus        string
 }
 
 func (s *readStore) ListStarGifts(ctx context.Context) ([]StarGiftRow, error) {
@@ -447,10 +490,28 @@ SELECT c.gift_id, r.id, r.revision, r.title, r.stars, r.convert_stars,
        c.enabled, c.sort_order, r.document_id, r.source_name, r.source_format,
        encode(r.animation_sha256, 'hex'), d.size, r.width, r.height, r.frame_rate,
        (SELECT COUNT(*) FROM peer_star_gifts p WHERE p.gift_id = c.gift_id),
-       r.created_by, c.updated_at
+       r.created_by, c.updated_at,
+       r.limited, r.sold_out, r.birthday, r.require_premium, r.limited_per_user,
+       r.peer_color_available, r.auction, r.availability_total, c.availability_remains,
+       COALESCE(r.released_by_peer_type, ''), COALESCE(r.released_by_peer_id, 0),
+       r.per_user_total, r.locked_until_date, r.auction_slug, r.gifts_per_round,
+       r.auction_start_date, r.upgrade_variants,
+       r.background_center_color IS NOT NULL,
+       COALESCE(r.background_center_color, 0), COALESCE(r.background_edge_color, 0),
+       COALESCE(r.background_text_color, 0),
+       w.gift_id IS NOT NULL, COALESCE(w.allowed_buyers::text, '[]'),
+       COALESCE(w.gift_hidden, false), COALESCE(w.numbered, false),
+       COALESCE(w.disallow_upgrades, false), COALESCE(w.disallow_resell, false),
+       COALESCE(w.apply_whitelist, true),
+       a.gift_id IS NOT NULL, COALESCE(a.round_duration, 0),
+       COALESCE(a.round_durations::text, ''), COALESCE(a.raise_min_bid, false),
+       COALESCE(a.round_extends::text, ''), COALESCE(a.min_bid_amount, 0),
+       COALESCE(a.start_date, 0), COALESCE(a.end_date, 0), COALESCE(a.status, '')
 FROM star_gift_catalog c
 JOIN star_gift_catalog_revisions r ON r.id = c.active_revision_id
 JOIN documents d ON d.id = r.document_id
+LEFT JOIN gift_whitelists w ON w.gift_id = c.gift_id
+LEFT JOIN star_gift_auctions a ON a.gift_id = c.gift_id
 ORDER BY c.sort_order, c.gift_id
 LIMIT $1`, domain.MaxStarGiftCatalogSize)
 	if err != nil {
@@ -465,6 +526,20 @@ LIMIT $1`, domain.MaxStarGiftCatalogSize)
 			&row.Enabled, &row.SortOrder, &row.DocumentID, &row.SourceName, &row.SourceFormat,
 			&row.AnimationSHA, &row.AnimationSize, &row.Width, &row.Height, &row.FrameRate,
 			&row.ReceivedCount, &row.CreatedBy, &row.UpdatedAt,
+			&row.Limited, &row.SoldOut, &row.Birthday, &row.RequirePremium, &row.LimitedPerUser,
+			&row.PeerColorAvailable, &row.Auction, &row.AvailabilityTotal, &row.AvailabilityRemains,
+			&row.ReleasedByType, &row.ReleasedByID,
+			&row.PerUserTotal, &row.LockedUntilDate, &row.AuctionSlug, &row.GiftsPerRound,
+			&row.AuctionStartDate, &row.UpgradeVariants,
+			&row.HasBackground, &row.BackgroundCenter, &row.BackgroundEdge, &row.BackgroundText,
+			&row.HasWhitelist, &row.WhitelistBuyersJSON,
+			&row.WhitelistHidden, &row.WhitelistNumbered,
+			&row.WhitelistDisallowUpgrades, &row.WhitelistDisallowResell,
+			&row.WhitelistApply,
+			&row.AuctionRowExists, &row.AuctionRoundDuration,
+			&row.AuctionRoundDurationsJSON, &row.AuctionRaiseMinBid,
+			&row.AuctionRoundExtendsJSON, &row.AuctionMinBidAmount,
+			&row.AuctionStateStart, &row.AuctionStateEnd, &row.AuctionStateStatus,
 		); err != nil {
 			return nil, err
 		}
@@ -487,15 +562,15 @@ func (s *readStore) SearchAccounts(ctx context.Context, q string) ([]AccountRow,
 	username := strings.ToLower(strings.TrimPrefix(q, "@"))
 	rows, err := s.pool.Query(ctx, `
 WITH auth AS (
-	SELECT user_id, max(active_at) AS last_active_at, count(*)::int AS device_count
-	FROM authorizations
-	GROUP BY user_id
+        SELECT user_id, max(active_at) AS last_active_at, count(*)::int AS device_count
+        FROM authorizations
+        GROUP BY user_id
 )
 SELECT u.id, u.phone, u.username, u.first_name, u.last_name, u.created_at, u.updated_at,
-	COALESCE(r.frozen, false), COALESCE(r.reason, ''), u.verified, u.scam, u.fake,
-	COALESCE(EXTRACT(EPOCH FROM u.premium_expires_at), 0)::bigint,
-	COALESCE(a.last_active_at, '0001-01-01 00:00:00+00'::timestamptz), COALESCE(a.device_count, 0)::int,
-	COALESCE(NULLIF(u.username, ''), p.username_lower, '') AS display_username
+        COALESCE(r.frozen, false), COALESCE(r.reason, ''), u.verified, u.scam, u.fake,
+        COALESCE(EXTRACT(EPOCH FROM u.premium_expires_at), 0)::bigint,
+        COALESCE(a.last_active_at, '0001-01-01 00:00:00+00'::timestamptz), COALESCE(a.device_count, 0)::int,
+        COALESCE(NULLIF(u.username, ''), p.username_lower, '') AS display_username
 FROM users u
 LEFT JOIN account_restrictions r ON r.user_id = u.id
 LEFT JOIN peer_usernames p ON p.peer_type = 'user' AND p.peer_id = u.id AND p.editable
@@ -552,7 +627,7 @@ func (s *readStore) ListBots(ctx context.Context, beforeID int64, limit int) ([]
 	}
 	rows, err := s.pool.Query(ctx, `
 SELECT u.id, COALESCE(NULLIF(u.username, ''), p.username_lower, ''), u.first_name, u.last_name, u.verified, u.scam, u.fake,
-	COALESCE(b.owner_user_id, 0), u.created_at, u.updated_at
+        COALESCE(b.owner_user_id, 0), u.created_at, u.updated_at
 FROM users u
 LEFT JOIN bots b ON b.bot_user_id = u.id
 LEFT JOIN peer_usernames p ON p.peer_type = 'user' AND p.peer_id = u.id AND p.editable
@@ -594,7 +669,7 @@ func (s *readStore) SearchBots(ctx context.Context, q string) ([]BotRow, error) 
 	username := strings.ToLower(strings.TrimPrefix(q, "@"))
 	rows, err := s.pool.Query(ctx, `
 SELECT u.id, COALESCE(NULLIF(u.username, ''), p.username_lower, ''), u.first_name, u.last_name, u.verified, u.scam, u.fake,
-	COALESCE(b.owner_user_id, 0), u.created_at, u.updated_at
+        COALESCE(b.owner_user_id, 0), u.created_at, u.updated_at
 FROM users u
 LEFT JOIN bots b ON b.bot_user_id = u.id
 LEFT JOIN peer_usernames p ON p.peer_type = 'user' AND p.peer_id = u.id AND p.editable
@@ -621,8 +696,8 @@ func (s *readStore) BotDetail(ctx context.Context, botUserID int64) (BotDetail, 
 	var out BotDetail
 	err := s.pool.QueryRow(ctx, `
 SELECT u.id, COALESCE(NULLIF(u.username, ''), p.username_lower, ''), u.first_name, u.last_name, u.about, u.verified, u.scam, u.fake,
-	COALESCE(b.owner_user_id, 0), COALESCE(b.description, ''),
-	u.created_at, u.updated_at
+        COALESCE(b.owner_user_id, 0), COALESCE(b.description, ''),
+        u.created_at, u.updated_at
 FROM users u
 LEFT JOIN bots b ON b.bot_user_id = u.id
 LEFT JOIN peer_usernames p ON p.peer_type = 'user' AND p.peer_id = u.id AND p.editable
@@ -665,22 +740,22 @@ func (s *readStore) SearchChannels(ctx context.Context, q string) ([]ChannelRow,
 	username := strings.ToLower(strings.TrimPrefix(q, "@"))
 	rows, err := s.pool.Query(ctx, `
 SELECT c.id, c.access_hash, c.creator_user_id, c.title, c.about,
-	COALESCE(NULLIF(c.username, ''), p.username_lower, '') AS display_username,
-	c.broadcast, c.megagroup, c.forum, c.monoforum, c.verified, c.scam, c.fake, c.gigagroup, c.deleted,
-	c.antispam, c.participants_hidden, c.noforwards, c.join_to_send, c.join_request, c.slowmode_seconds,
-	c.participants_count, c.admins_count, c.kicked_count, c.banned_count,
-	c.top_message_id, c.pinned_message_id, c.pts, c.date, c.created_at, c.updated_at
+        COALESCE(NULLIF(c.username, ''), p.username_lower, '') AS display_username,
+        c.broadcast, c.megagroup, c.forum, c.monoforum, c.verified, c.scam, c.fake, c.gigagroup, c.deleted,
+        c.antispam, c.participants_hidden, c.noforwards, c.join_to_send, c.join_request, c.slowmode_seconds,
+        c.participants_count, c.admins_count, c.kicked_count, c.banned_count,
+        c.top_message_id, c.pinned_message_id, c.pts, c.date, c.created_at, c.updated_at
 FROM channels c
 LEFT JOIN peer_usernames p ON p.peer_type = 'channel' AND p.peer_id = c.id AND p.editable
 WHERE NOT c.deleted
-	AND NOT c.monoforum
-	AND (c.broadcast OR c.megagroup)
-	AND (
-		c.id = $1
-		OR lower(COALESCE(c.username, '')) = $2
-		OR p.username_lower = $2
-		OR lower(c.title) LIKE '%' || $2 || '%'
-	)
+        AND NOT c.monoforum
+        AND (c.broadcast OR c.megagroup)
+        AND (
+                c.id = $1
+                OR lower(COALESCE(c.username, '')) = $2
+                OR p.username_lower = $2
+                OR lower(c.title) LIKE '%' || $2 || '%'
+        )
 ORDER BY c.updated_at DESC, c.id DESC
 LIMIT $3`, id, username, channelSearchLimit)
 	if err != nil {
@@ -699,17 +774,17 @@ func (s *readStore) ListChannels(ctx context.Context, beforeUpdatedUS, beforeID 
 	}
 	rows, err := s.pool.Query(ctx, `
 SELECT c.id, c.access_hash, c.creator_user_id, c.title, c.about,
-	COALESCE(NULLIF(c.username, ''), p.username_lower, '') AS display_username,
-	c.broadcast, c.megagroup, c.forum, c.monoforum, c.verified, c.scam, c.fake, c.gigagroup, c.deleted,
-	c.antispam, c.participants_hidden, c.noforwards, c.join_to_send, c.join_request, c.slowmode_seconds,
-	c.participants_count, c.admins_count, c.kicked_count, c.banned_count,
-	c.top_message_id, c.pinned_message_id, c.pts, c.date, c.created_at, c.updated_at
+        COALESCE(NULLIF(c.username, ''), p.username_lower, '') AS display_username,
+        c.broadcast, c.megagroup, c.forum, c.monoforum, c.verified, c.scam, c.fake, c.gigagroup, c.deleted,
+        c.antispam, c.participants_hidden, c.noforwards, c.join_to_send, c.join_request, c.slowmode_seconds,
+        c.participants_count, c.admins_count, c.kicked_count, c.banned_count,
+        c.top_message_id, c.pinned_message_id, c.pts, c.date, c.created_at, c.updated_at
 FROM channels c
 LEFT JOIN peer_usernames p ON p.peer_type = 'channel' AND p.peer_id = c.id AND p.editable
 WHERE NOT c.deleted
-	AND NOT c.monoforum
-	AND (c.broadcast OR c.megagroup)
-	AND ($1::bigint = 0 OR (c.updated_at, c.id) < (to_timestamp(($1::double precision) / 1000000.0), $2::bigint))
+        AND NOT c.monoforum
+        AND (c.broadcast OR c.megagroup)
+        AND ($1::bigint = 0 OR (c.updated_at, c.id) < (to_timestamp(($1::double precision) / 1000000.0), $2::bigint))
 ORDER BY c.updated_at DESC, c.id DESC
 LIMIT $3`, beforeUpdatedUS, beforeID, limit+1)
 	if err != nil {
@@ -732,18 +807,18 @@ func (s *readStore) ChannelDetail(ctx context.Context, channelID int64) (Channel
 	var raw []byte
 	err := s.pool.QueryRow(ctx, `
 SELECT c.id, c.access_hash, c.creator_user_id, c.title, c.about,
-	COALESCE(NULLIF(c.username, ''), p.username_lower, '') AS display_username,
-	c.broadcast, c.megagroup, c.forum, c.monoforum, c.verified, c.scam, c.fake, c.gigagroup, c.deleted,
-	c.antispam, c.participants_hidden, c.noforwards, c.join_to_send, c.join_request, c.slowmode_seconds,
-	c.participants_count, c.admins_count, c.kicked_count, c.banned_count,
-	c.top_message_id, c.pinned_message_id, c.pts, c.date, c.created_at, c.updated_at,
-	row_to_json(c)::jsonb
+        COALESCE(NULLIF(c.username, ''), p.username_lower, '') AS display_username,
+        c.broadcast, c.megagroup, c.forum, c.monoforum, c.verified, c.scam, c.fake, c.gigagroup, c.deleted,
+        c.antispam, c.participants_hidden, c.noforwards, c.join_to_send, c.join_request, c.slowmode_seconds,
+        c.participants_count, c.admins_count, c.kicked_count, c.banned_count,
+        c.top_message_id, c.pinned_message_id, c.pts, c.date, c.created_at, c.updated_at,
+        row_to_json(c)::jsonb
 FROM channels c
 LEFT JOIN peer_usernames p ON p.peer_type = 'channel' AND p.peer_id = c.id AND p.editable
 WHERE c.id = $1
-	AND NOT c.deleted
-	AND NOT c.monoforum
-	AND (c.broadcast OR c.megagroup)`, channelID).Scan(channelScanDestWithRaw(&out.Channel, &raw)...)
+        AND NOT c.deleted
+        AND NOT c.monoforum
+        AND (c.broadcast OR c.megagroup)`, channelID).Scan(channelScanDestWithRaw(&out.Channel, &raw)...)
 	if err != nil {
 		return out, fmt.Errorf("get channel: %w", err)
 	}
@@ -799,22 +874,22 @@ func (s *readStore) ListAccounts(ctx context.Context, beforeActiveUS, beforeID i
 	}
 	rows, err := s.pool.Query(ctx, `
 WITH auth AS (
-	SELECT user_id, max(active_at) AS last_active_at, count(*)::int AS device_count
-	FROM authorizations
-	GROUP BY user_id
+        SELECT user_id, max(active_at) AS last_active_at, count(*)::int AS device_count
+        FROM authorizations
+        GROUP BY user_id
 )
 SELECT u.id, u.phone, u.username, u.first_name, u.last_name, u.created_at, u.updated_at,
-	COALESCE(r.frozen, false), COALESCE(r.reason, ''), u.verified, u.scam, u.fake,
-	COALESCE(EXTRACT(EPOCH FROM u.premium_expires_at), 0)::bigint,
-	auth.last_active_at, auth.device_count,
-	COALESCE(NULLIF(u.username, ''), p.username_lower, '') AS display_username,
-	`+accountCollectibleUsernamesColumn+` AS collectibles
+        COALESCE(r.frozen, false), COALESCE(r.reason, ''), u.verified, u.scam, u.fake,
+        COALESCE(EXTRACT(EPOCH FROM u.premium_expires_at), 0)::bigint,
+        auth.last_active_at, auth.device_count,
+        COALESCE(NULLIF(u.username, ''), p.username_lower, '') AS display_username,
+        `+accountCollectibleUsernamesColumn+` AS collectibles
 FROM users u
 JOIN auth ON auth.user_id = u.id
 LEFT JOIN account_restrictions r ON r.user_id = u.id
 LEFT JOIN peer_usernames p ON p.peer_type = 'user' AND p.peer_id = u.id AND p.editable
 WHERE NOT u.is_bot
-	AND ($1::bigint = 0 OR (auth.last_active_at, u.id) < (to_timestamp(($1::double precision) / 1000000.0), $2::bigint))
+        AND ($1::bigint = 0 OR (auth.last_active_at, u.id) < (to_timestamp(($1::double precision) / 1000000.0), $2::bigint))
 ORDER BY auth.last_active_at DESC, u.id DESC
 LIMIT $3`, beforeActiveUS, beforeID, limit+1)
 	if err != nil {
@@ -843,13 +918,13 @@ func (s *readStore) AccountDetail(ctx context.Context, userID int64) (AccountDet
 	var out AccountDetail
 	err := s.pool.QueryRow(ctx, `
 SELECT u.id, u.phone, u.username, u.first_name, u.last_name, u.created_at, u.updated_at,
-	u.about, u.last_seen_at, u.verified, u.scam, u.fake, u.support, u.is_bot,
-	COALESCE(r.frozen, false), COALESCE(r.reason, ''),
-	COALESCE(EXTRACT(EPOCH FROM u.premium_expires_at), 0)::bigint,
-	COALESCE(sb.balance, 0)::bigint, COALESCE(sb.granted, false),
-	COALESCE(ap.login_email, ''),
-	COALESCE(NULLIF(u.username, ''), p.username_lower, '') AS display_username,
-	`+accountCollectibleUsernamesColumn+` AS collectibles
+        u.about, u.last_seen_at, u.verified, u.scam, u.fake, u.support, u.is_bot,
+        COALESCE(r.frozen, false), COALESCE(r.reason, ''),
+        COALESCE(EXTRACT(EPOCH FROM u.premium_expires_at), 0)::bigint,
+        COALESCE(sb.balance, 0)::bigint, COALESCE(sb.granted, false),
+        COALESCE(ap.login_email, ''),
+        COALESCE(NULLIF(u.username, ''), p.username_lower, '') AS display_username,
+        `+accountCollectibleUsernamesColumn+` AS collectibles
 FROM users u
 LEFT JOIN account_restrictions r ON r.user_id = u.id
 LEFT JOIN stars_balances sb ON sb.user_id = u.id
@@ -1005,10 +1080,10 @@ func (s *readStore) ListMessages(ctx context.Context, ownerUserID, peerID int64,
 	}
 	rows, err := s.pool.Query(ctx, `
 SELECT owner_user_id, box_id, private_message_id, message_sender_id, peer_id, from_user_id,
-	message_date, outgoing, body, pts, deleted, COALESCE(media, '{}'::jsonb)
+        message_date, outgoing, body, pts, deleted, COALESCE(media, '{}'::jsonb)
 FROM message_boxes
 WHERE owner_user_id = $1 AND peer_type = 'user' AND peer_id = $2
-	AND ($3::bigint = 0 OR (message_date, box_id) < ($3::bigint, $4::int))
+        AND ($3::bigint = 0 OR (message_date, box_id) < ($3::bigint, $4::int))
 ORDER BY message_date DESC, box_id DESC
 LIMIT $5`, ownerUserID, peerID, beforeDate, beforeID, limit)
 	if err != nil {
@@ -1034,11 +1109,11 @@ func (s *readStore) ListGroupMessages(ctx context.Context, channelID int64, befo
 	}
 	rows, err := s.pool.Query(ctx, `
 SELECT channel_id, id, sender_user_id, from_peer_type, from_peer_id,
-	message_date, post, body, pts, deleted, COALESCE(media, '{}'::jsonb),
-	views_count, edit_date, pinned
+        message_date, post, body, pts, deleted, COALESCE(media, '{}'::jsonb),
+        views_count, edit_date, pinned
 FROM channel_messages
 WHERE channel_id = $1 AND NOT deleted
-	AND ($2::bigint = 0 OR (message_date, id) < ($2::bigint, $3::int))
+        AND ($2::bigint = 0 OR (message_date, id) < ($2::bigint, $3::int))
 ORDER BY message_date DESC, id DESC
 LIMIT $4`, channelID, beforeDate, beforeID, limit)
 	if err != nil {
@@ -1109,7 +1184,7 @@ func (s *readStore) MessageDetail(ctx context.Context, ownerUserID int64, msgID 
 	var messageJSON []byte
 	err := s.pool.QueryRow(ctx, `
 SELECT owner_user_id, box_id, private_message_id, message_sender_id, peer_id, from_user_id,
-	message_date, outgoing, body, pts, deleted, COALESCE(media, '{}'::jsonb), row_to_json(mb)::jsonb
+        message_date, outgoing, body, pts, deleted, COALESCE(media, '{}'::jsonb), row_to_json(mb)::jsonb
 FROM message_boxes mb
 WHERE owner_user_id = $1 AND box_id = $2`, ownerUserID, msgID).Scan(
 		&out.Message.OwnerUserID, &out.Message.BoxID, &out.Message.PrivateMessageID, &out.Message.MessageSenderID, &out.Message.PeerID,
@@ -1142,8 +1217,8 @@ func (s *readStore) GroupMessageDetail(ctx context.Context, channelID int64, msg
 	var messageJSON []byte
 	err := s.pool.QueryRow(ctx, `
 SELECT channel_id, id, sender_user_id, from_peer_type, from_peer_id,
-	message_date, post, body, pts, deleted, COALESCE(media, '{}'::jsonb),
-	views_count, edit_date, pinned, row_to_json(cm)::jsonb
+        message_date, post, body, pts, deleted, COALESCE(media, '{}'::jsonb),
+        views_count, edit_date, pinned, row_to_json(cm)::jsonb
 FROM channel_messages cm
 WHERE channel_id = $1 AND id = $2`, channelID, msgID).Scan(
 		&out.Message.ChannelID, &out.Message.ID, &out.Message.SenderUserID, &out.Message.FromPeerType, &out.Message.FromPeerID,
@@ -1177,7 +1252,7 @@ func (s *readStore) updateEvents(ctx context.Context, ownerUserID int64, msgID i
 SELECT pts, pts_count, event_type, date, row_to_json(e)::jsonb
 FROM user_update_events e
 WHERE user_id = $1 AND (
-	message_box_id = $2 OR message_ids @> $3::jsonb
+        message_box_id = $2 OR message_ids @> $3::jsonb
 )
 ORDER BY pts DESC
 LIMIT 20`, ownerUserID, msgID, fmt.Sprintf("[%d]", msgID))
@@ -1203,7 +1278,7 @@ func (s *readStore) channelUpdateEvents(ctx context.Context, channelID int64, ms
 SELECT pts, pts_count, event_type, message_id, date, sender_user_id, row_to_json(e)::jsonb
 FROM channel_update_events e
 WHERE channel_id = $1 AND (
-	message_id = $2 OR message_ids @> $3::jsonb
+        message_id = $2 OR message_ids @> $3::jsonb
 )
 ORDER BY pts DESC
 LIMIT 20`, channelID, msgID, fmt.Sprintf("[%d]", msgID))
@@ -1373,9 +1448,9 @@ func scanEmojiRows(rows pgx.Rows) ([]EmojiRow, error) {
 }
 
 const emojiSelectColumns = `d.id,
-	COALESCE((SELECT a->>'alt' FROM jsonb_array_elements(d.attributes) a WHERE a->>'kind' = 'custom_emoji' LIMIT 1), ''),
-	d.mime_type, d.size, d.created_at,
-	COALESCE((SELECT s.title FROM sticker_sets s WHERE s.emojis AND NOT s.deleted AND s.document_ids @> to_jsonb(d.id) LIMIT 1), '')`
+        COALESCE((SELECT a->>'alt' FROM jsonb_array_elements(d.attributes) a WHERE a->>'kind' = 'custom_emoji' LIMIT 1), ''),
+        d.mime_type, d.size, d.created_at,
+        COALESCE((SELECT s.title FROM sticker_sets s WHERE s.emojis AND NOT s.deleted AND s.document_ids @> to_jsonb(d.id) LIMIT 1), '')`
 
 // ListEmoji pages over custom-emoji documents by descending id.
 func (s *readStore) ListEmoji(ctx context.Context, beforeID int64, limit int) ([]EmojiRow, bool, error) {
@@ -1389,7 +1464,7 @@ func (s *readStore) ListEmoji(ctx context.Context, beforeID int64, limit int) ([
 SELECT `+emojiSelectColumns+`
 FROM documents d
 WHERE d.attributes @> '[{"kind":"custom_emoji"}]'::jsonb
-	AND ($1::bigint = 0 OR d.id < $1)
+        AND ($1::bigint = 0 OR d.id < $1)
 ORDER BY d.id DESC
 LIMIT $2`, beforeID, limit+1)
 	if err != nil {
@@ -1421,10 +1496,10 @@ func (s *readStore) SearchEmoji(ctx context.Context, q string) ([]EmojiRow, erro
 SELECT `+emojiSelectColumns+`
 FROM documents d
 WHERE d.attributes @> '[{"kind":"custom_emoji"}]'::jsonb
-	AND (d.id = $1 OR EXISTS (
-		SELECT 1 FROM jsonb_array_elements(d.attributes) a
-		WHERE a->>'kind' = 'custom_emoji' AND a->>'alt' ILIKE '%' || $2 || '%'
-	))
+        AND (d.id = $1 OR EXISTS (
+                SELECT 1 FROM jsonb_array_elements(d.attributes) a
+                WHERE a->>'kind' = 'custom_emoji' AND a->>'alt' ILIKE '%' || $2 || '%'
+        ))
 ORDER BY d.id DESC
 LIMIT $3`, id, q, emojiListMaxLimit)
 	if err != nil {
@@ -1493,14 +1568,14 @@ type CollectibleUsernameDetail struct {
 }
 
 const collectibleUsernameSelectColumns = `cu.id, cu.username, cu.status,
-	cu.owner_peer_type, cu.owner_peer_id,
-	COALESCE(NULLIF(ou.username, ''), NULLIF(oc.username, ''), '') AS owner_username,
-	COALESCE(NULLIF(ou.first_name, ''), NULLIF(oc.title, ''), '') AS owner_name,
-	cu.purchase_date, cu.currency, cu.amount, cu.crypto_currency, cu.crypto_amount, cu.url,
-	cu.original_owner_peer_type, cu.original_owner_peer_id,
-	COALESCE(NULLIF(gu.username, ''), NULLIF(gc.username, ''), '') AS original_owner_username,
-	cu.transfer_count, cu.version, cu.created_at, cu.updated_at,
-	COALESCE(pu.active, false), COALESCE(pu.sort_order, 0)`
+        cu.owner_peer_type, cu.owner_peer_id,
+        COALESCE(NULLIF(ou.username, ''), NULLIF(oc.username, ''), '') AS owner_username,
+        COALESCE(NULLIF(ou.first_name, ''), NULLIF(oc.title, ''), '') AS owner_name,
+        cu.purchase_date, cu.currency, cu.amount, cu.crypto_currency, cu.crypto_amount, cu.url,
+        cu.original_owner_peer_type, cu.original_owner_peer_id,
+        COALESCE(NULLIF(gu.username, ''), NULLIF(gc.username, ''), '') AS original_owner_username,
+        cu.transfer_count, cu.version, cu.created_at, cu.updated_at,
+        COALESCE(pu.active, false), COALESCE(pu.sort_order, 0)`
 
 // collectibleUsernameJoins resolves the current holder, the original holder and
 // the holder's registry row. Owners are users or channels, so both sides are
@@ -1539,9 +1614,9 @@ func (s *readStore) ListCollectibleUsernames(ctx context.Context, status string,
 	rows, err := s.pool.Query(ctx, `
 SELECT `+collectibleUsernameSelectColumns+collectibleUsernameJoins+`
 WHERE ($1 = '' OR cu.status = $1)
-	AND ($2::bigint = 0 OR (cu.owner_peer_type = 'user' AND cu.owner_peer_id = $2))
-	AND ($3 = '' OR cu.username_lower LIKE $3 || '%')
-	AND ($4::bigint = 0 OR cu.id < $4)
+        AND ($2::bigint = 0 OR (cu.owner_peer_type = 'user' AND cu.owner_peer_id = $2))
+        AND ($3 = '' OR cu.username_lower LIKE $3 || '%')
+        AND ($4::bigint = 0 OR cu.id < $4)
 ORDER BY cu.id DESC
 LIMIT $5`, status, ownerUserID, query, beforeID, limit+1)
 	if err != nil {
@@ -1589,11 +1664,11 @@ WHERE cu.id = $1`, id).Scan(collectibleUsernameScanDest(&out.Asset)...)
 func (s *readStore) collectibleUsernameTransfers(ctx context.Context, collectibleID int64) ([]CollectibleUsernameTransferRow, error) {
 	rows, err := s.pool.Query(ctx, `
 SELECT t.id, t.collectible_id, t.kind,
-	t.from_peer_type, t.from_peer_id,
-	COALESCE(NULLIF(fu.username, ''), NULLIF(fc.username, ''), '') AS from_username,
-	t.to_peer_type, t.to_peer_id,
-	COALESCE(NULLIF(tu.username, ''), NULLIF(tc.username, ''), '') AS to_username,
-	t.currency, t.amount, t.actor, t.reason, COALESCE(t.command_key, ''), t.created_at
+        t.from_peer_type, t.from_peer_id,
+        COALESCE(NULLIF(fu.username, ''), NULLIF(fc.username, ''), '') AS from_username,
+        t.to_peer_type, t.to_peer_id,
+        COALESCE(NULLIF(tu.username, ''), NULLIF(tc.username, ''), '') AS to_username,
+        t.currency, t.amount, t.actor, t.reason, COALESCE(t.command_key, ''), t.created_at
 FROM collectible_username_transfers t
 LEFT JOIN users fu ON t.from_peer_type = 'user' AND fu.id = t.from_peer_id
 LEFT JOIN channels fc ON t.from_peer_type = 'channel' AND fc.id = t.from_peer_id
@@ -1668,11 +1743,11 @@ type AccountRatingDetail struct {
 }
 
 const accountRatingSelectColumns = `r.user_id,
-	COALESCE(NULLIF(u.username, ''), p.username_lower, '') AS display_username,
-	COALESCE(u.first_name, ''),
-	r.level, r.stars, r.current_level_stars, r.next_level_stars,
-	r.stars_component, r.activity_component, r.penalty_component, r.manual_component,
-	r.pending_stars, r.pending_date, r.computed_at, r.updated_at, r.version`
+        COALESCE(NULLIF(u.username, ''), p.username_lower, '') AS display_username,
+        COALESCE(u.first_name, ''),
+        r.level, r.stars, r.current_level_stars, r.next_level_stars,
+        r.stars_component, r.activity_component, r.penalty_component, r.manual_component,
+        r.pending_stars, r.pending_date, r.computed_at, r.updated_at, r.version`
 
 const accountRatingJoins = `
 FROM account_rating r
@@ -1736,30 +1811,30 @@ func (s *readStore) ListAccountRatings(ctx context.Context, minLevel int, userID
 	}
 	rows, err := s.pool.Query(ctx, `
 WITH cursor_row AS (
-	SELECT level AS c_level, stars AS c_stars, user_id AS c_user_id
-	FROM account_rating WHERE $3::bigint <> 0 AND user_id = $3
+        SELECT level AS c_level, stars AS c_stars, user_id AS c_user_id
+        FROM account_rating WHERE $3::bigint <> 0 AND user_id = $3
 )
 SELECT `+accountRatingSelectColumns+accountRatingJoins+`
 LEFT JOIN cursor_row c ON true
 WHERE r.level >= $1
-	AND ($2::bigint = 0 OR r.user_id = $2)
-	AND ($5::text = '' OR (
-		($6::bigint <> 0 AND r.user_id = $6)
-		OR lower(COALESCE(u.username, '')) LIKE $5
-		OR lower(COALESCE(u.first_name, '')) LIKE $5
-		OR lower(COALESCE(u.last_name, '')) LIKE $5
-		OR EXISTS (
-			SELECT 1 FROM peer_usernames pu
-			WHERE pu.peer_type = 'user' AND pu.peer_id = r.user_id
-				AND pu.username_lower LIKE $5
-		)
-	))
-	AND (
-		c.c_user_id IS NULL
-		OR r.level < c.c_level
-		OR (r.level = c.c_level AND r.stars < c.c_stars)
-		OR (r.level = c.c_level AND r.stars = c.c_stars AND r.user_id > c.c_user_id)
-	)
+        AND ($2::bigint = 0 OR r.user_id = $2)
+        AND ($5::text = '' OR (
+                ($6::bigint <> 0 AND r.user_id = $6)
+                OR lower(COALESCE(u.username, '')) LIKE $5
+                OR lower(COALESCE(u.first_name, '')) LIKE $5
+                OR lower(COALESCE(u.last_name, '')) LIKE $5
+                OR EXISTS (
+                        SELECT 1 FROM peer_usernames pu
+                        WHERE pu.peer_type = 'user' AND pu.peer_id = r.user_id
+                                AND pu.username_lower LIKE $5
+                )
+        ))
+        AND (
+                c.c_user_id IS NULL
+                OR r.level < c.c_level
+                OR (r.level = c.c_level AND r.stars < c.c_stars)
+                OR (r.level = c.c_level AND r.stars = c.c_stars AND r.user_id > c.c_user_id)
+        )
 ORDER BY r.level DESC, r.stars DESC, r.user_id
 LIMIT $4`, minLevel, userID, beforeID, limit+1, pattern, queryUserID)
 	if err != nil {
@@ -1931,14 +2006,14 @@ type VerificationApplicationDetail struct {
 }
 
 const verificationSelectColumns = `va.id, va.applicant_user_id,
-	COALESCE(NULLIF(au.username, ''), p.username_lower, '') AS applicant_username,
-	TRIM(BOTH ' ' FROM COALESCE(au.first_name, '') || ' ' || COALESCE(au.last_name, '')) AS applicant_name,
-	va.target_type, va.target_id, va.target_title, va.target_username,
-	COALESCE(tu.verified, tc.verified, false) AS target_verified,
-	va.category, va.description, va.official_website, va.social_links, va.press_links,
-	va.additional_note, va.status, va.reviewer_admin_id, va.decision_reason,
-	va.internal_note, va.correlation_id,
-	va.created_at, va.updated_at, va.submitted_at, va.reviewed_at, va.version`
+        COALESCE(NULLIF(au.username, ''), p.username_lower, '') AS applicant_username,
+        TRIM(BOTH ' ' FROM COALESCE(au.first_name, '') || ' ' || COALESCE(au.last_name, '')) AS applicant_name,
+        va.target_type, va.target_id, va.target_title, va.target_username,
+        COALESCE(tu.verified, tc.verified, false) AS target_verified,
+        va.category, va.description, va.official_website, va.social_links, va.press_links,
+        va.additional_note, va.status, va.reviewer_admin_id, va.decision_reason,
+        va.internal_note, va.correlation_id,
+        va.created_at, va.updated_at, va.submitted_at, va.reviewed_at, va.version`
 
 // verificationJoins resolves the applicant and the live target. Bots and users
 // live in the user namespace, channels and supergroups in the channel one, so
@@ -2010,15 +2085,15 @@ func (s *readStore) ListVerificationApplications(
 	rows, err := s.pool.Query(ctx, `
 SELECT `+verificationSelectColumns+verificationJoins+`
 WHERE ($1 = '' OR va.status = $1)
-	AND ($2 = '' OR va.target_type = $2)
-	AND ($3 = '' OR va.reviewer_admin_id = $3)
-	AND ($4::bigint = 0 OR va.id < $4)
-	AND ($5::text = '' OR (
-		($6::bigint <> 0 AND (va.id = $6 OR va.target_id = $6 OR va.applicant_user_id = $6))
-		OR lower(va.target_username) LIKE $5
-		OR lower(va.target_title) LIKE $5
-		OR lower(COALESCE(au.username, '')) LIKE $5
-	))
+        AND ($2 = '' OR va.target_type = $2)
+        AND ($3 = '' OR va.reviewer_admin_id = $3)
+        AND ($4::bigint = 0 OR va.id < $4)
+        AND ($5::text = '' OR (
+                ($6::bigint <> 0 AND (va.id = $6 OR va.target_id = $6 OR va.applicant_user_id = $6))
+                OR lower(va.target_username) LIKE $5
+                OR lower(va.target_title) LIKE $5
+                OR lower(COALESCE(au.username, '')) LIKE $5
+        ))
 ORDER BY va.id DESC
 LIMIT $7`, status, targetType, reviewer, beforeID, pattern, queryID, limit+1)
 	if err != nil {
@@ -2149,8 +2224,8 @@ func (s *readStore) applicantControlsVerificationTarget(ctx context.Context, app
 		var owns bool
 		err := s.pool.QueryRow(ctx, `
 SELECT EXISTS (
-	SELECT 1 FROM bots b
-	WHERE b.bot_user_id = $1 AND b.owner_user_id = $2 AND b.bot_user_id <> $3
+        SELECT 1 FROM bots b
+        WHERE b.bot_user_id = $1 AND b.owner_user_id = $2 AND b.bot_user_id <> $3
 )`, targetID, applicantUserID, domain.BotFatherUserID).Scan(&owns)
 		if err != nil {
 			return false, fmt.Errorf("check verification bot ownership: %w", err)
@@ -2160,10 +2235,10 @@ SELECT EXISTS (
 		var admins bool
 		err := s.pool.QueryRow(ctx, `
 SELECT EXISTS (
-	SELECT 1 FROM user_channel_member_index i
-	WHERE i.user_id = $1 AND i.channel_id = $2
-		AND i.status = 'active' AND i.role IN ('creator', 'admin')
-		AND i.public_username AND NOT i.deleted
+        SELECT 1 FROM user_channel_member_index i
+        WHERE i.user_id = $1 AND i.channel_id = $2
+                AND i.status = 'active' AND i.role IN ('creator', 'admin')
+                AND i.public_username AND NOT i.deleted
 )`, applicantUserID, targetID).Scan(&admins)
 		if err != nil {
 			return false, fmt.Errorf("check verification channel ownership: %w", err)
@@ -2294,13 +2369,13 @@ type CustomVerificationRequestDetail struct {
 }
 
 const botVerifierSelectColumns = `s.bot_id,
-	COALESCE(NULLIF(u.username, ''), p.username_lower, '') AS bot_username,
-	TRIM(BOTH ' ' FROM COALESCE(u.first_name, '') || ' ' || COALESCE(u.last_name, '')) AS bot_name,
-	s.icon_document_id, COALESCE(i.name, '') AS icon_name,
-	s.company_name, s.default_description, s.can_modify_custom_description,
-	s.enabled, s.granted_by, s.grant_reason,
-	(SELECT count(*) FROM custom_verifications cv WHERE cv.verifier_bot_id = s.bot_id) AS mark_count,
-	s.created_at, s.updated_at, s.version`
+        COALESCE(NULLIF(u.username, ''), p.username_lower, '') AS bot_username,
+        TRIM(BOTH ' ' FROM COALESCE(u.first_name, '') || ' ' || COALESCE(u.last_name, '')) AS bot_name,
+        s.icon_document_id, COALESCE(i.name, '') AS icon_name,
+        s.company_name, s.default_description, s.can_modify_custom_description,
+        s.enabled, s.granted_by, s.grant_reason,
+        (SELECT count(*) FROM custom_verifications cv WHERE cv.verifier_bot_id = s.bot_id) AS mark_count,
+        s.created_at, s.updated_at, s.version`
 
 // botVerifierJoins resolves the bot account behind the verifier row and the
 // catalogue label of its icon. The icon join is by document id, not by catalogue
@@ -2371,14 +2446,14 @@ func (s *readStore) ListVerificationIcons(ctx context.Context, activeOnly bool, 
 	limit = clampBotVerificationLimit(limit)
 	rows, err := s.pool.Query(ctx, `
 SELECT i.id, i.document_id, i.owner_bot_id,
-	COALESCE(NULLIF(u.username, ''), p.username_lower, '') AS owner_bot_username,
-	i.name, i.active,
-	(SELECT count(*) FROM bot_verifier_settings s WHERE s.icon_document_id = i.document_id) AS used_by_verifiers,
-	i.created_at, i.updated_at
+        COALESCE(NULLIF(u.username, ''), p.username_lower, '') AS owner_bot_username,
+        i.name, i.active,
+        (SELECT count(*) FROM bot_verifier_settings s WHERE s.icon_document_id = i.document_id) AS used_by_verifiers,
+        i.created_at, i.updated_at
 FROM verification_icons i
 LEFT JOIN users u ON i.owner_bot_id <> 0 AND u.id = i.owner_bot_id
 LEFT JOIN peer_usernames p ON i.owner_bot_id <> 0
-	AND p.peer_type = 'user' AND p.peer_id = i.owner_bot_id AND p.editable
+        AND p.peer_type = 'user' AND p.peer_id = i.owner_bot_id AND p.editable
 WHERE NOT $1::boolean OR i.active
 ORDER BY i.id DESC
 LIMIT $2`, activeOnly, limit)
@@ -2409,10 +2484,10 @@ LIMIT $2`, activeOnly, limit)
 const customVerificationPeerJoins = `
 LEFT JOIN users tu ON %[1]s.peer_type = 'user' AND tu.id = %[1]s.peer_id
 LEFT JOIN peer_usernames tup ON %[1]s.peer_type = 'user'
-	AND tup.peer_type = 'user' AND tup.peer_id = %[1]s.peer_id AND tup.editable
+        AND tup.peer_type = 'user' AND tup.peer_id = %[1]s.peer_id AND tup.editable
 LEFT JOIN channels tc ON %[1]s.peer_type = 'channel' AND tc.id = %[1]s.peer_id
 LEFT JOIN peer_usernames tcp ON %[1]s.peer_type = 'channel'
-	AND tcp.peer_type = 'channel' AND tcp.peer_id = %[1]s.peer_id AND tcp.editable`
+        AND tcp.peer_type = 'channel' AND tcp.peer_id = %[1]s.peer_id AND tcp.editable`
 
 // ListCustomVerifications pages granted marks newest first, keyset by descending
 // id. verifierBotID/peerType are exact filters; q matches a mark id, a peer id, or
@@ -2429,32 +2504,32 @@ func (s *readStore) ListCustomVerifications(
 	pattern, queryID := botVerificationSearchTerms(q)
 	rows, err := s.pool.Query(ctx, `
 SELECT cv.id, cv.verifier_bot_id,
-	COALESCE(NULLIF(vu.username, ''), vp.username_lower, '') AS verifier_bot_username,
-	COALESCE(s.company_name, '') AS company_name,
-	cv.peer_type, cv.peer_id,
-	CASE cv.peer_type
-		WHEN 'user' THEN TRIM(BOTH ' ' FROM COALESCE(tu.first_name, '') || ' ' || COALESCE(tu.last_name, ''))
-		ELSE COALESCE(tc.title, '')
-	END AS peer_title,
-	CASE cv.peer_type
-		WHEN 'user' THEN COALESCE(NULLIF(tu.username, ''), tup.username_lower, '')
-		ELSE COALESCE(NULLIF(tc.username, ''), tcp.username_lower, '')
-	END AS peer_username,
-	cv.icon_document_id, cv.description, cv.created_at, cv.updated_at, cv.version
+        COALESCE(NULLIF(vu.username, ''), vp.username_lower, '') AS verifier_bot_username,
+        COALESCE(s.company_name, '') AS company_name,
+        cv.peer_type, cv.peer_id,
+        CASE cv.peer_type
+                WHEN 'user' THEN TRIM(BOTH ' ' FROM COALESCE(tu.first_name, '') || ' ' || COALESCE(tu.last_name, ''))
+                ELSE COALESCE(tc.title, '')
+        END AS peer_title,
+        CASE cv.peer_type
+                WHEN 'user' THEN COALESCE(NULLIF(tu.username, ''), tup.username_lower, '')
+                ELSE COALESCE(NULLIF(tc.username, ''), tcp.username_lower, '')
+        END AS peer_username,
+        cv.icon_document_id, cv.description, cv.created_at, cv.updated_at, cv.version
 FROM custom_verifications cv
 LEFT JOIN users vu ON vu.id = cv.verifier_bot_id
 LEFT JOIN peer_usernames vp ON vp.peer_type = 'user' AND vp.peer_id = cv.verifier_bot_id AND vp.editable
 LEFT JOIN bot_verifier_settings s ON s.bot_id = cv.verifier_bot_id`+
 		fmt.Sprintf(customVerificationPeerJoins, "cv")+`
 WHERE ($1::bigint = 0 OR cv.verifier_bot_id = $1)
-	AND ($2::text = '' OR cv.peer_type = $2)
-	AND ($3::bigint = 0 OR cv.id < $3)
-	AND ($4::text = '' OR (
-		($5::bigint <> 0 AND (cv.id = $5 OR cv.peer_id = $5 OR cv.verifier_bot_id = $5))
-		OR lower(COALESCE(tu.username, '')) LIKE $4
-		OR lower(COALESCE(tc.username, '')) LIKE $4
-		OR lower(COALESCE(tc.title, '')) LIKE $4
-	))
+        AND ($2::text = '' OR cv.peer_type = $2)
+        AND ($3::bigint = 0 OR cv.id < $3)
+        AND ($4::text = '' OR (
+                ($5::bigint <> 0 AND (cv.id = $5 OR cv.peer_id = $5 OR cv.verifier_bot_id = $5))
+                OR lower(COALESCE(tu.username, '')) LIKE $4
+                OR lower(COALESCE(tc.username, '')) LIKE $4
+                OR lower(COALESCE(tc.title, '')) LIKE $4
+        ))
 ORDER BY cv.id DESC
 LIMIT $6`, verifierBotID, peerType, beforeID, pattern, queryID, limit+1)
 	if err != nil {
@@ -2485,21 +2560,21 @@ LIMIT $6`, verifierBotID, peerType, beforeID, pattern, queryID, limit+1)
 }
 
 const customVerificationRequestSelectColumns = `r.id, r.verifier_bot_id,
-	COALESCE(NULLIF(vu.username, ''), vp.username_lower, '') AS verifier_bot_username,
-	r.applicant_user_id,
-	COALESCE(NULLIF(au.username, ''), ap.username_lower, '') AS applicant_username,
-	r.peer_type, r.peer_id,
-	CASE r.peer_type
-		WHEN 'user' THEN COALESCE(NULLIF(TRIM(BOTH ' ' FROM COALESCE(tu.first_name, '') || ' ' || COALESCE(tu.last_name, '')), ''), r.peer_title)
-		ELSE COALESCE(NULLIF(tc.title, ''), r.peer_title)
-	END AS peer_title,
-	CASE r.peer_type
-		WHEN 'user' THEN COALESCE(NULLIF(tu.username, ''), NULLIF(tup.username_lower, ''), r.peer_username)
-		ELSE COALESCE(NULLIF(tc.username, ''), NULLIF(tcp.username_lower, ''), r.peer_username)
-	END AS peer_username,
-	r.reason, r.requested_description, r.status, r.decided_by, r.decision_reason,
-	r.internal_note, r.correlation_id,
-	r.created_at, r.updated_at, r.approved_at, r.rejected_at, r.version`
+        COALESCE(NULLIF(vu.username, ''), vp.username_lower, '') AS verifier_bot_username,
+        r.applicant_user_id,
+        COALESCE(NULLIF(au.username, ''), ap.username_lower, '') AS applicant_username,
+        r.peer_type, r.peer_id,
+        CASE r.peer_type
+                WHEN 'user' THEN COALESCE(NULLIF(TRIM(BOTH ' ' FROM COALESCE(tu.first_name, '') || ' ' || COALESCE(tu.last_name, '')), ''), r.peer_title)
+                ELSE COALESCE(NULLIF(tc.title, ''), r.peer_title)
+        END AS peer_title,
+        CASE r.peer_type
+                WHEN 'user' THEN COALESCE(NULLIF(tu.username, ''), NULLIF(tup.username_lower, ''), r.peer_username)
+                ELSE COALESCE(NULLIF(tc.username, ''), NULLIF(tcp.username_lower, ''), r.peer_username)
+        END AS peer_username,
+        r.reason, r.requested_description, r.status, r.decided_by, r.decision_reason,
+        r.internal_note, r.correlation_id,
+        r.created_at, r.updated_at, r.approved_at, r.rejected_at, r.version`
 
 // customVerificationRequestJoins resolves the verifier bot, the applicant and the
 // target peer. The peer title and username fall back to the application's snapshot
@@ -2555,17 +2630,17 @@ func (s *readStore) ListCustomVerificationRequests(
 	rows, err := s.pool.Query(ctx, `
 SELECT `+customVerificationRequestSelectColumns+customVerificationRequestJoins+`
 WHERE ($1::text = '' OR r.status = $1)
-	AND ($2::bigint = 0 OR r.verifier_bot_id = $2)
-	AND ($3::text = '' OR r.peer_type = $3)
-	AND ($4::bigint = 0 OR r.id < $4)
-	AND ($5::text = '' OR (
-		($6::bigint <> 0 AND (r.id = $6 OR r.peer_id = $6 OR r.verifier_bot_id = $6 OR r.applicant_user_id = $6))
-		OR lower(r.peer_username) LIKE $5
-		OR lower(r.peer_title) LIKE $5
-		OR lower(COALESCE(tu.username, '')) LIKE $5
-		OR lower(COALESCE(tc.username, '')) LIKE $5
-		OR lower(COALESCE(au.username, '')) LIKE $5
-	))
+        AND ($2::bigint = 0 OR r.verifier_bot_id = $2)
+        AND ($3::text = '' OR r.peer_type = $3)
+        AND ($4::bigint = 0 OR r.id < $4)
+        AND ($5::text = '' OR (
+                ($6::bigint <> 0 AND (r.id = $6 OR r.peer_id = $6 OR r.verifier_bot_id = $6 OR r.applicant_user_id = $6))
+                OR lower(r.peer_username) LIKE $5
+                OR lower(r.peer_title) LIKE $5
+                OR lower(COALESCE(tu.username, '')) LIKE $5
+                OR lower(COALESCE(tc.username, '')) LIKE $5
+                OR lower(COALESCE(au.username, '')) LIKE $5
+        ))
 ORDER BY r.id DESC
 LIMIT $7`, status, verifierBotID, peerType, beforeID, pattern, queryID, limit+1)
 	if err != nil {
@@ -2619,8 +2694,8 @@ WHERE r.id = $1`, id)
 	}
 	if err := s.pool.QueryRow(ctx, `
 SELECT EXISTS (
-	SELECT 1 FROM custom_verifications
-	WHERE verifier_bot_id = $1 AND peer_type = $2 AND peer_id = $3
+        SELECT 1 FROM custom_verifications
+        WHERE verifier_bot_id = $1 AND peer_type = $2 AND peer_id = $3
 )`, out.Request.VerifierBotID, out.Request.PeerType, out.Request.PeerID).Scan(&out.MarkActive); err != nil {
 		return out, fmt.Errorf("check custom verification mark: %w", err)
 	}
