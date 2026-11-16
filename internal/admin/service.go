@@ -57,22 +57,25 @@ const (
 	ActionSetStarGiftSortOrder    = "gifts.set_sort_order"
 	ActionUpdateStarGiftSettings  = "gifts.update_settings"
 	ActionSetStarGiftAuction      = "gifts.set_auction_settings"
-	ActionGiveGift                = "gifts.give"
-	ActionCreateBot               = "bot.create"
-	ActionCreateBroadcast         = "broadcast.create"
-	ActionSetStickerSetArchived   = "stickers.set_archived"
-	ActionSetStickerSetSortOrder  = "stickers.set_sort_order"
-	ActionRenameStickerSet        = "stickers.rename"
-	ActionDeleteStickerSet        = "stickers.delete"
-	ActionCreateStickerSet        = "stickers.create"
-	ActionAddStickerToSet         = "stickers.add_sticker"
-	ActionRemoveStickerFromSet    = "stickers.remove_sticker"
-	ActionCreateGifCatalogEntry   = "gif_catalog.create"
-	ActionSetGifCatalogEnabled    = "gif_catalog.set_enabled"
-	ActionSetGifCatalogSortOrder  = "gif_catalog.set_sort_order"
-	ActionDeleteGifCatalogEntry   = "gif_catalog.delete"
-	ActionDeleteBot               = "bot.delete"
-	ActionExportBotToken          = "bot.export_token"
+	// ActionSetStarGiftCollectibleSupply (раунд 34) — изменение лимита
+	// возможных улучшенных подарков опубликованной ревизии коллекции.
+	ActionSetStarGiftCollectibleSupply = "gifts.set_collectible_supply"
+	ActionGiveGift                     = "gifts.give"
+	ActionCreateBot                    = "bot.create"
+	ActionCreateBroadcast              = "broadcast.create"
+	ActionSetStickerSetArchived        = "stickers.set_archived"
+	ActionSetStickerSetSortOrder       = "stickers.set_sort_order"
+	ActionRenameStickerSet             = "stickers.rename"
+	ActionDeleteStickerSet             = "stickers.delete"
+	ActionCreateStickerSet             = "stickers.create"
+	ActionAddStickerToSet              = "stickers.add_sticker"
+	ActionRemoveStickerFromSet         = "stickers.remove_sticker"
+	ActionCreateGifCatalogEntry        = "gif_catalog.create"
+	ActionSetGifCatalogEnabled         = "gif_catalog.set_enabled"
+	ActionSetGifCatalogSortOrder       = "gif_catalog.set_sort_order"
+	ActionDeleteGifCatalogEntry        = "gif_catalog.delete"
+	ActionDeleteBot                    = "bot.delete"
+	ActionExportBotToken               = "bot.export_token"
 	// Collectible (Fragment-style) username lifecycle.
 	ActionMintCollectibleUsername     = "usernames.collectible.mint"
 	ActionTransferCollectibleUsername = "usernames.collectible.transfer"
@@ -310,6 +313,12 @@ type GiftsService interface {
 	CreateCollectibleRevision(ctx context.Context, write domain.StarGiftCollectibleWrite) (domain.StarGiftCollectibleRevision, error)
 	CollectiblePreview(ctx context.Context, giftID int64) (domain.StarGiftUpgradePreview, bool, error)
 	CollectibleRevision(ctx context.Context, revisionID int64) (domain.StarGiftCollectibleRevision, error)
+	// SetCollectibleSupplyTotal (раунд 34) правит лимит возможных улучшенных
+	// подарков опубликованной ревизии коллекции (supply каталога увеличен).
+	SetCollectibleSupplyTotal(ctx context.Context, write domain.StarGiftCollectibleSupplyWrite) (domain.StarGiftCollectibleRevision, error)
+	// CollectibleRevisionSummaries (раунд 34) перечисляет ревизии коллекции
+	// подарка для выбора источника копирования атрибутов блоками.
+	CollectibleRevisionSummaries(ctx context.Context, giftID int64) ([]domain.StarGiftCollectibleRevisionSummary, error)
 	CollectibleAnimationJSON(ctx context.Context, giftID int64, kind domain.StarGiftCollectibleAttributeKind, attributeID int64) ([]byte, bool, error)
 }
 
@@ -869,6 +878,11 @@ type UpdateStarGiftSettingsRequest struct {
 	GiftsPerRound       *int                       `json:"gifts_per_round,omitempty"`
 	AuctionStartDate    *int                       `json:"auction_start_date,omitempty"`
 	Whitelist           *StarGiftWhitelistSettings `json:"whitelist,omitempty"`
+	// Раунд 34: опциональная замена анимации при редактировании (multipart
+	// поле "file"). Данные пусты — команда меняет только настройки, анимация
+	// копируется из активной ревизии.
+	FileName string `json:"file_name,omitempty"`
+	Data     []byte `json:"-"`
 }
 
 // SetStarGiftAuctionSettingsRequest — настройки РАБОЧЕГО аукциона
@@ -892,6 +906,16 @@ type SetStarGiftEnabledRequest struct {
 	CommandMeta
 	GiftID  int64 `json:"gift_id"`
 	Enabled bool  `json:"enabled"`
+}
+
+// SetStarGiftCollectibleSupplyRequest (раунд 34) — изменить лимит возможных
+// улучшенных подарков опубликованной ревизии коллекции. Нужен, когда supply
+// каталога увеличен: апгрейд блокируется при issued >= supply_total. Лимит
+// можно только повысить (или оставить равным).
+type SetStarGiftCollectibleSupplyRequest struct {
+	CommandMeta
+	GiftID      int64 `json:"gift_id,string"`
+	SupplyTotal int   `json:"supply_total"`
 }
 
 type SetStarGiftSortOrderRequest struct {
@@ -932,8 +956,12 @@ type StarGiftCollectibleAnimationUpload struct {
 	// Раунд 33: копия из другой ревизии — атрибут ссылается на существующий
 	// документ (файл не загружается); метаданные анимации берутся из исходной
 	// ревизии copy_from_revision_id.
-	CopyDocumentID int64  `json:"copy_document_id,string,omitempty"`
-	Data           []byte `json:"-"`
+	CopyDocumentID int64 `json:"copy_document_id,string,omitempty"`
+	// Раунд 34: своя ревизия-источник для каждой записи — копирование блоками
+	// (модели/фоны/узоры) из РАЗНЫХ ревизий в одной команде; 0 = общий
+	// req.CopyFromRevisionID.
+	CopyFromRevisionID int64  `json:"copy_from_revision_id,string,omitempty"`
+	Data               []byte `json:"-"`
 }
 
 type StarGiftCollectibleBackdropInput struct {
@@ -4188,6 +4216,16 @@ func (s *Service) UpdateStarGiftSettings(ctx context.Context, req UpdateStarGift
 		return CommandResult{}, err
 	}
 	write.Whitelist = starGiftWhitelistWrite(req.Whitelist)
+	// Раунд 34: в окне редактирования можно загрузить новую анимацию с
+	// предпросмотром; без файла команда меняет только настройки (анимация
+	// копируется из активной ревизии внутри postgres-адаптера).
+	if len(req.Data) > 0 {
+		animation, err := s.gifts.PrepareAnimation(req.FileName, req.Data)
+		if err != nil {
+			return CommandResult{}, err
+		}
+		write.Animation = &animation
+	}
 	return s.runCommand(ctx, req.CommandMeta, ActionUpdateStarGiftSettings, req.GiftID, domain.Peer{}, req, func() (CommandResult, error) {
 		details := map[string]any{"gift_id": strconv.FormatInt(req.GiftID, 10), "title": write.Title,
 			"stars": strconv.FormatInt(req.Stars, 10), "convert_stars": strconv.FormatInt(req.ConvertStars, 10),
@@ -4208,6 +4246,10 @@ func (s *Service) UpdateStarGiftSettings(ctx context.Context, req UpdateStarGift
 		}
 		if req.DryRun {
 			return CommandResult{Message: "star gift settings validated", Details: details}, nil
+		}
+		if write.Animation != nil {
+			details["animation_replaced"] = true
+			details["animation_sha256"] = hex.EncodeToString(write.Animation.SHA256)
 		}
 		entry, err := s.gifts.UpdateCatalogSettings(ctx, write)
 		if err != nil {
@@ -4345,22 +4387,34 @@ func (s *Service) PublishStarGiftCollectibles(ctx context.Context, req PublishSt
 	// переносятся из ревизии-источника, документ и blob переиспользуются
 	// (ReuseDocument). Название/редкость/порядок берутся из запроса — их
 	// можно править поверх копии.
-	var source domain.StarGiftCollectibleRevision
-	sourceLoaded := false
+	// Раунд 34: источники копирования кэшируются по id — каждая запись может
+	// ссылаться на СВОЮ ревизию (копирование блоками из разных ревизий).
+	sources := map[int64]domain.StarGiftCollectibleRevision{}
+	loadCopySource := func(revisionID int64) (domain.StarGiftCollectibleRevision, error) {
+		if revision, ok := sources[revisionID]; ok {
+			return revision, nil
+		}
+		revision, err := s.gifts.CollectibleRevision(ctx, revisionID)
+		if err != nil {
+			return domain.StarGiftCollectibleRevision{}, fmt.Errorf("load copy source revision: %w", err)
+		}
+		sources[revisionID] = revision
+		return revision, nil
+	}
 	resolveCopy := func(kind domain.StarGiftCollectibleAttributeKind, upload StarGiftCollectibleAnimationUpload) (domain.StarGiftCollectibleAttribute, bool, error) {
 		if upload.CopyDocumentID <= 0 {
 			return domain.StarGiftCollectibleAttribute{}, false, nil
 		}
-		if req.CopyFromRevisionID <= 0 {
+		sourceRevisionID := upload.CopyFromRevisionID
+		if sourceRevisionID <= 0 {
+			sourceRevisionID = req.CopyFromRevisionID
+		}
+		if sourceRevisionID <= 0 {
 			return domain.StarGiftCollectibleAttribute{}, false, fmt.Errorf("%w: copy_document_id requires copy_from_revision_id", domain.ErrStarGiftCollectibleInvalid)
 		}
-		if !sourceLoaded {
-			revision, err := s.gifts.CollectibleRevision(ctx, req.CopyFromRevisionID)
-			if err != nil {
-				return domain.StarGiftCollectibleAttribute{}, false, fmt.Errorf("load copy source revision: %w", err)
-			}
-			source = revision
-			sourceLoaded = true
+		source, err := loadCopySource(sourceRevisionID)
+		if err != nil {
+			return domain.StarGiftCollectibleAttribute{}, false, err
 		}
 		var pool []domain.StarGiftCollectibleAttribute
 		switch kind {
@@ -4403,7 +4457,7 @@ func (s *Service) PublishStarGiftCollectibles(ctx context.Context, req PublishSt
 			return copied, true, nil
 		}
 		return domain.StarGiftCollectibleAttribute{}, false, fmt.Errorf("%w: copy source %s document %d not found in revision %d",
-			domain.ErrStarGiftCollectibleInvalid, kind, upload.CopyDocumentID, req.CopyFromRevisionID)
+			domain.ErrStarGiftCollectibleInvalid, kind, upload.CopyDocumentID, sourceRevisionID)
 	}
 	buildAttributes := func(kind domain.StarGiftCollectibleAttributeKind, uploads []StarGiftCollectibleAnimationUpload) ([]domain.StarGiftCollectibleAttribute, error) {
 		attributes := make([]domain.StarGiftCollectibleAttribute, 0, len(uploads))
@@ -5036,6 +5090,46 @@ func (s *Service) StarGiftCollectibleRevision(ctx context.Context, revisionID in
 		return domain.StarGiftCollectibleRevision{}, domain.ErrStarGiftCollectibleInvalid
 	}
 	return s.gifts.CollectibleRevision(ctx, revisionID)
+}
+
+// StarGiftCollectibleRevisionSummaries (раунд 34) — список ревизий коллекции
+// подарка в лёгкой проекции: выбор источника копирования атрибутов блоками
+// (модели/фоны/узоры) в админке без загрузки полных метаданных.
+func (s *Service) StarGiftCollectibleRevisionSummaries(ctx context.Context, giftID int64) ([]domain.StarGiftCollectibleRevisionSummary, error) {
+	if s == nil || s.gifts == nil || giftID <= 0 {
+		return nil, domain.ErrStarGiftCollectibleInvalid
+	}
+	return s.gifts.CollectibleRevisionSummaries(ctx, giftID)
+}
+
+// SetStarGiftCollectibleSupply (раунд 34) — правит лимит возможных улучшенных
+// подарков (supply_total) опубликованной ревизии коллекции. Ревизия неизменяема
+// по атрибутам; лимит только повышается (ниже issued — отказ), issued/slug не
+// трогаются.
+func (s *Service) SetStarGiftCollectibleSupply(ctx context.Context, req SetStarGiftCollectibleSupplyRequest) (CommandResult, error) {
+	if s == nil || s.gifts == nil {
+		return CommandResult{}, fmt.Errorf("star gift service is not configured")
+	}
+	if req.GiftID <= 0 || req.SupplyTotal <= 0 {
+		return CommandResult{}, domain.ErrStarGiftCollectibleInvalid
+	}
+	return s.runCommand(ctx, req.CommandMeta, ActionSetStarGiftCollectibleSupply, req.GiftID, domain.Peer{}, req, func() (CommandResult, error) {
+		details := map[string]any{"gift_id": strconv.FormatInt(req.GiftID, 10), "supply_total": req.SupplyTotal}
+		if req.DryRun {
+			return CommandResult{Message: "collectible supply validated", Details: details}, nil
+		}
+		revision, err := s.gifts.SetCollectibleSupplyTotal(ctx, domain.StarGiftCollectibleSupplyWrite{
+			GiftID: req.GiftID, SupplyTotal: req.SupplyTotal, Actor: req.Actor, CommandID: req.CommandID,
+		})
+		if err != nil {
+			return CommandResult{Details: details}, err
+		}
+		details["revision_id"] = strconv.FormatInt(revision.ID, 10)
+		details["revision"] = revision.Revision
+		details["issued"] = revision.Issued
+		details["supply_total"] = revision.SupplyTotal
+		return CommandResult{Message: "collectible supply updated", Details: details}, nil
+	})
 }
 
 func (s *Service) StarGiftCollectibleAnimation(ctx context.Context, giftID int64, kind domain.StarGiftCollectibleAttributeKind, attributeID int64) ([]byte, bool, error) {

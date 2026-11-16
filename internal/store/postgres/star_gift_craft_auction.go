@@ -1569,6 +1569,21 @@ func (s *StarGiftLifecycleStore) SetStarGiftAuctionSettings(ctx context.Context,
 		if _, err := tx.Exec(ctx, query, args...); err != nil {
 			return fmt.Errorf("update star gift auction settings: %w", err)
 		}
+		// Раунд 34 (исправление «время раундов не влияет на итог»): строка
+		// создаётся лениво с дефолтной сеткой 3600 секунд (ensureStarGiftAuctionDB),
+		// поэтому после смены длительности раундов сохранённые границы
+		// next_round_at/end_date остаются 3600-ми — аукцион реально идёт
+		// по часу на раунд, хотя клиенту проецируется новая длительность.
+		// Пересчитываем границы из start_date и новых длительностей —
+		// тот же инвариант, что и у пошагового next_round_at += duration
+		// (settle), включая накопленное продление текущего раунда
+		// (round_extend_seconds) и отложенный старт. Явный end_date из
+		// той же команды имеет приоритет над производным.
+		if write.RoundDuration != nil || strings.TrimSpace(write.RoundDurationsJSON) != "" || write.StartDate != nil {
+			if err := recomputeAuctionBoundaries(ctx, tx, write.GiftID, write.EndDate != nil); err != nil {
+				return err
+			}
+		}
 		return nil
 	})
 	if err != nil {
@@ -1579,6 +1594,56 @@ func (s *StarGiftLifecycleStore) SetStarGiftAuctionSettings(ctx context.Context,
 		return domain.StarGiftAuction{}, err
 	}
 	return ensured, nil
+}
+
+// recomputeAuctionBoundaries пересчитывает next_round_at и end_date из
+// start_date и актуальных длительностей раундов (раунд 34). Инвариант совпадает
+// с settle: граница текущего раунда = start_date + сумма длительностей
+// 1..currentRound + накопленное продление текущего раунда; end = граница плюс
+// сумма оставшихся раундов. Для ещё не начавшегося аукциона (currentRound=0,
+// pending) границей считается конец первого раунда. Завершённые/отменённые
+// аукционы не трогаются. Производное end_date замещает сохранённое (иначе
+// дефолтная 3600-сетка пережила бы смену длительностей), кроме случая, когда
+// end_date задан той же командой явно (manualEnd) — тогда админское значение
+// приоритетно, а settle при нехватке времени всё равно растянет его.
+func recomputeAuctionBoundaries(ctx context.Context, tx pgx.Tx, giftID int64, manualEnd bool) error {
+	var startDate, endDate, roundDuration, currentRound, totalRounds, roundExtendSeconds int
+	var status string
+	var roundDurationsRaw []byte
+	if err := tx.QueryRow(ctx, `SELECT start_date,end_date,round_duration,current_round,
+total_rounds,round_extend_seconds,status,round_durations FROM star_gift_auctions WHERE gift_id=$1 FOR UPDATE`, giftID).
+		Scan(&startDate, &endDate, &roundDuration, &currentRound, &totalRounds,
+			&roundExtendSeconds, &status, &roundDurationsRaw); err != nil {
+		return fmt.Errorf("reload star gift auction boundaries: %w", err)
+	}
+	if status == "completed" || status == "cancelled" {
+		return nil
+	}
+	durations := parseAuctionRoundDurations(roundDurationsRaw)
+	activeRound := currentRound
+	if activeRound < 1 {
+		activeRound = 1
+	}
+	if activeRound > totalRounds {
+		// Все раунды прошли: граница совпадает с концом последнего раунда.
+		activeRound = totalRounds
+	}
+	boundary := auctionRoundBoundary(startDate, durations, activeRound, roundDuration, roundExtendSeconds)
+	if startDate > 0 && boundary < startDate {
+		boundary = startDate
+	}
+	end := derivedAuctionEnd(durations, activeRound, totalRounds, roundDuration, boundary)
+	if manualEnd && end < endDate {
+		end = endDate
+	}
+	if end < boundary {
+		end = boundary
+	}
+	if _, err := tx.Exec(ctx, `UPDATE star_gift_auctions SET next_round_at=$2, end_date=$3, version=version+1,
+updated_at=now() WHERE gift_id=$1`, giftID, boundary, end); err != nil {
+		return fmt.Errorf("recalculate star gift auction boundaries: %w", err)
+	}
+	return nil
 }
 
 // ensureStarGiftAuctionDB лениво создаёт строку star_gift_auctions из активной

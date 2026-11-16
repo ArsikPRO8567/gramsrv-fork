@@ -172,10 +172,18 @@ func (s *StarGiftStore) UpdateCatalogSettings(_ context.Context, write domain.St
 		AuctionStartDate: write.AuctionStartDate, UpgradeVariants: write.UpgradeVariants,
 		Background: cloneStarGiftBackground(write.Background),
 	}
+	animationJSON := s.animations[write.GiftID]
+	// Раунд 34: опциональная замена анимации — тот же контракт, что и в
+	// postgres-адаптере (новый документ/blob/анимационные столбцы).
+	if write.Animation != nil && write.Document != nil {
+		animationJSON = append([]byte(nil), write.Animation.JSON...)
+		gift.Sticker = *write.Document
+	}
 	s.catalog[write.GiftID] = gift
 	s.revisions[gift.RevisionID] = gift
 	s.enabled[write.GiftID] = write.Enabled
 	s.sortOrder[write.GiftID] = write.SortOrder
+	s.animations[write.GiftID] = animationJSON
 	if write.Whitelist != nil {
 		s.whitelists[write.GiftID] = cloneWhitelistWrite(write.Whitelist)
 	}
@@ -315,6 +323,60 @@ func (s *StarGiftStore) CollectibleRevisionFull(_ context.Context, revisionID in
 		}
 	}
 	return domain.StarGiftCollectibleRevision{}, domain.ErrStarGiftCollectibleInvalid
+}
+
+// SetCollectibleSupplyTotal (раунд 34) правит лимит возможных улучшенных
+// подарков опубликованной ревизии: повышение разрешено, значение ниже уже
+// выпущенного количества отклоняется (зеркало postgres-адаптера и
+// star_gift_collectible_supply_check).
+func (s *StarGiftStore) SetCollectibleSupplyTotal(_ context.Context, write domain.StarGiftCollectibleSupplyWrite) (domain.StarGiftCollectibleRevision, error) {
+	if write.GiftID <= 0 || write.SupplyTotal <= 0 {
+		return domain.StarGiftCollectibleRevision{}, domain.ErrStarGiftCollectibleInvalid
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.catalog[write.GiftID]; !ok {
+		return domain.StarGiftCollectibleRevision{}, domain.ErrStarGiftNotFound
+	}
+	revision, ok := s.collectibles[write.GiftID]
+	if !ok || !revision.Published {
+		return domain.StarGiftCollectibleRevision{}, domain.ErrStarGiftCollectibleInvalid
+	}
+	if write.SupplyTotal < revision.Issued || write.SupplyTotal < revision.SupplyTotal {
+		return domain.StarGiftCollectibleRevision{}, domain.ErrStarGiftCollectibleInvalid
+	}
+	revision.SupplyTotal = write.SupplyTotal
+	s.collectibles[write.GiftID] = revision
+	gift := s.catalog[write.GiftID]
+	gift.UpgradeTotal = revision.SupplyTotal
+	s.catalog[write.GiftID] = gift
+	return cloneCollectibleRevision(revision), nil
+}
+
+// CollectibleRevisionSummaries (раунд 34) перечисляет ревизии коллекции
+// подарка в лёгкой проекции. В памяти хранится только одна (активная)
+// ревизия на подарок, поэтому список содержит её (если опубликована).
+func (s *StarGiftStore) CollectibleRevisionSummaries(_ context.Context, giftID int64) ([]domain.StarGiftCollectibleRevisionSummary, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]domain.StarGiftCollectibleRevisionSummary, 0, 1)
+	revision, ok := s.collectibles[giftID]
+	if !ok {
+		return out, nil
+	}
+	summary := domain.StarGiftCollectibleRevisionSummary{
+		RevisionID: revision.ID, GiftID: revision.GiftID, Revision: revision.Revision,
+		UpgradeStars: revision.UpgradeStars, SupplyTotal: revision.SupplyTotal, Issued: revision.Issued,
+		ModelCount: len(revision.Models), PatternCount: len(revision.Patterns), BackdropCount: len(revision.Backdrops),
+		CreatedBy: revision.CreatedBy, CreatedAt: revision.CreatedAt,
+	}
+	if revision.Published {
+		summary.Status = "published"
+	} else {
+		summary.Status = "draft"
+	}
+	out = append(out, summary)
+	return out, nil
 }
 
 func (s *StarGiftStore) ActiveCollectibleProjection(_ context.Context, giftID int64, samplePerKind int) (domain.StarGiftCollectibleRevision, bool, error) {

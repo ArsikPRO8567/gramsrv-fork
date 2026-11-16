@@ -453,6 +453,28 @@ export type StarGiftCollectibleRevision = {
   backdrops?: StarGiftCollectibleAttributeRow[];
 };
 
+// Раунд 34: лёгкая строка списка ревизий коллекции — выбор источника
+// копирования блоками (модели/фоны/узоры) без загрузки полных метаданных.
+export type StarGiftCollectibleRevisionSummary = {
+  revision_id: string;
+  gift_id: string;
+  revision: number;
+  status: "draft" | "published";
+  upgrade_stars: string;
+  supply_total: number;
+  issued: number;
+  model_count: number;
+  pattern_count: number;
+  backdrop_count: number;
+  created_by: string;
+  created_at: string;
+};
+
+export type StarGiftCollectibleRevisionList = {
+  gift_id: string;
+  revisions: StarGiftCollectibleRevisionSummary[];
+};
+
 export type CollectibleUsernameStatus = "vault" | "owned" | "burned";
 
 export type CollectiblePeerType = "" | "user" | "channel";

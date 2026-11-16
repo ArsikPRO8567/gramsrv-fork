@@ -85,6 +85,9 @@ func (s *server) routes() http.Handler {
 	mux.Handle("GET /api/gifts/{id}/collectibles/{kind}/{attribute_id}/animation", s.requireAuthAPI(http.HandlerFunc(s.handleStarGiftCollectibleAnimationAPI)))
 	// Раунд 33: любая ревизия коллекции по id — источник копирования атрибутов.
 	mux.Handle("GET /api/gifts/collectibles/revisions/{revision_id}", s.requireAuthAPI(http.HandlerFunc(s.handleStarGiftCollectibleRevisionAPI)))
+	// Раунд 34: список ревизий коллекции подарка — выбор источника копирования
+	// блоками (модели/фоны/узоры) в редакторе пула атрибутов.
+	mux.Handle("GET /api/gifts/{id}/collectibles/revisions", s.requireAuthAPI(http.HandlerFunc(s.handleStarGiftCollectibleRevisionSummariesAPI)))
 	mux.Handle("GET /api/collectible-usernames", s.requireAuthAPI(http.HandlerFunc(s.handleCollectibleUsernamesAPI)))
 	mux.Handle("GET /api/collectible-usernames/{id}", s.requireAuthAPI(http.HandlerFunc(s.handleCollectibleUsernameDetailAPI)))
 	mux.Handle("GET /api/collectible-phones", s.requireAuthAPI(http.HandlerFunc(s.handleCollectiblePhonesAPI)))
@@ -143,6 +146,7 @@ func (s *server) routes() http.Handler {
 	mux.Handle("POST /api/actions/set-gift-enabled", s.requireAuthAPI(http.HandlerFunc(s.handleSetStarGiftEnabledAPI)))
 	mux.Handle("POST /api/actions/update-gift-settings", s.requireAuthAPI(http.HandlerFunc(s.handleUpdateStarGiftSettingsAPI)))
 	mux.Handle("POST /api/actions/set-gift-auction-settings", s.requireAuthAPI(http.HandlerFunc(s.handleSetStarGiftAuctionSettingsAPI)))
+	mux.Handle("POST /api/actions/set-gift-collectible-supply", s.requireAuthAPI(http.HandlerFunc(s.handleSetStarGiftCollectibleSupplyAPI)))
 	mux.Handle("POST /api/actions/set-gift-sort-order", s.requireAuthAPI(http.HandlerFunc(s.handleSetStarGiftSortOrderAPI)))
 	mux.Handle("POST /api/actions/give-gift", s.requireAuthAPI(http.HandlerFunc(s.handleGiveGiftAPI)))
 	mux.Handle("POST /api/actions/mint-collectible-username", s.requireAuthAPI(http.HandlerFunc(s.handleMintCollectibleUsernameAPI)))
@@ -2382,7 +2386,55 @@ type updateStarGiftSettingsAPIRequest struct {
 	Whitelist           *starGiftWhitelistAPISettings `json:"whitelist,omitempty"`
 }
 
+// handleUpdateStarGiftSettingsAPI (раунд 34) принимает JSON (только настройки)
+// и multipart: настройки (metadata) + ОПЦИОНАЛЬНОЕ поле file — новая анимация с
+// предпросмотром. Без файла команда меняет только настройки.
 func (s *server) handleUpdateStarGiftSettingsAPI(w http.ResponseWriter, r *http.Request) {
+	if strings.HasPrefix(r.Header.Get("Content-Type"), "multipart/") {
+		defer r.Body.Close()
+		if err := r.ParseMultipartForm(1 << 20); err != nil {
+			writeAPIError(w, http.StatusBadRequest, "invalid multipart form: "+err.Error())
+			return
+		}
+		if r.MultipartForm != nil {
+			defer r.MultipartForm.RemoveAll()
+		}
+		var body updateStarGiftSettingsAPIRequest
+		dec := json.NewDecoder(strings.NewReader(r.FormValue("metadata")))
+		dec.DisallowUnknownFields()
+		if err := dec.Decode(&body); err != nil {
+			writeAPIError(w, http.StatusBadRequest, "invalid metadata: "+err.Error())
+			return
+		}
+		req := admin.UpdateStarGiftSettingsRequest{
+			CommandMeta: s.commandMetaFromAPI(r, body.CommandID, body.Reason, body.Confirm, "update-gift-settings"),
+			GiftID:      body.GiftID, Title: body.Title, Stars: body.Stars, ConvertStars: body.ConvertStars,
+			Enabled: body.Enabled, SortOrder: body.SortOrder,
+			AvailabilityTotal: body.AvailabilityTotal, AvailabilityRemains: body.AvailabilityRemains,
+			ReleasedByType: body.ReleasedByType, ReleasedByID: body.ReleasedByID,
+			PerUserTotal: body.PerUserTotal, Birthday: body.Birthday, RequirePremium: body.RequirePremium,
+			LockedUntilDate: body.LockedUntilDate,
+			Auction:         body.Auction, AuctionSlug: body.AuctionSlug, GiftsPerRound: body.GiftsPerRound,
+			AuctionStartDate: body.AuctionStartDate, Whitelist: starGiftWhitelistFromAPI(body.Whitelist),
+		}
+		file, header, err := r.FormFile("file")
+		if err == nil {
+			defer file.Close()
+			data, err := io.ReadAll(io.LimitReader(file, (4<<20)+1))
+			if err != nil || len(data) == 0 || len(data) > 4<<20 {
+				writeAPIError(w, http.StatusBadRequest, "animation file is empty or too large")
+				return
+			}
+			req.FileName = header.Filename
+			req.Data = data
+			result, err := s.callAdminMultipart(r.Context(), "/v1/gifts/update-settings", req, header.Filename, data)
+			writeCommandResultAPI(w, result, err)
+			return
+		}
+		result, err := s.callAdminMultipartMetadata(r.Context(), "/v1/gifts/update-settings", req)
+		writeCommandResultAPI(w, result, err)
+		return
+	}
 	var body updateStarGiftSettingsAPIRequest
 	if !decodeAction(w, r, &body) {
 		return
@@ -2415,6 +2467,38 @@ type setStarGiftAuctionSettingsAPIRequest struct {
 	StartDate          *flexUnix  `json:"start_date,omitempty"`
 	EndDate            *flexUnix  `json:"end_date,omitempty"`
 	Status             string     `json:"status,omitempty"`
+}
+
+// handleSetStarGiftCollectibleSupplyAPI (раунд 34) — изменить лимит возможных
+// улучшенных подарков опубликованной ревизии коллекции.
+func (s *server) handleSetStarGiftCollectibleSupplyAPI(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		CommandID   string `json:"command_id"`
+		Reason      string `json:"reason"`
+		Confirm     bool   `json:"confirm"`
+		GiftID      int64  `json:"gift_id,string"`
+		SupplyTotal int    `json:"supply_total"`
+	}
+	if !decodeAction(w, r, &body) {
+		return
+	}
+	req := admin.SetStarGiftCollectibleSupplyRequest{
+		CommandMeta: s.commandMetaFromAPI(r, body.CommandID, body.Reason, body.Confirm, "set-gift-collectible-supply"),
+		GiftID:      body.GiftID, SupplyTotal: body.SupplyTotal,
+	}
+	result, err := s.callAdminAPI(r.Context(), "/v1/gifts/set-collectible-supply", req)
+	writeCommandResultAPI(w, result, err)
+}
+
+// handleStarGiftCollectibleRevisionSummariesAPI (раунд 34) — список ревизий
+// коллекции подарка для выбора источника копирования блоками.
+func (s *server) handleStarGiftCollectibleRevisionSummariesAPI(w http.ResponseWriter, r *http.Request) {
+	giftID, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil || giftID <= 0 {
+		writeAPIError(w, http.StatusBadRequest, "invalid gift id")
+		return
+	}
+	s.proxyAdminJSONNoStore(w, r, fmt.Sprintf("/v1/gifts/%d/collectibles/revisions", giftID), 1<<20)
 }
 
 func (s *server) handleSetStarGiftAuctionSettingsAPI(w http.ResponseWriter, r *http.Request) {
@@ -3054,6 +3138,16 @@ func (s *server) callAdminCommand(ctx context.Context, apiPath string, payload a
 }
 
 func (s *server) callAdminMultipart(ctx context.Context, apiPath string, metadata any, fileName string, data []byte) (admin.CommandResult, error) {
+	return s.callAdminMultipartFile(ctx, apiPath, metadata, fileName, data, true)
+}
+
+// callAdminMultipartMetadata (раунд 34) отправляет multipart только с metadata
+// (без файла) — update-gift-settings без замены анимации, но в multipart-форме.
+func (s *server) callAdminMultipartMetadata(ctx context.Context, apiPath string, metadata any) (admin.CommandResult, error) {
+	return s.callAdminMultipartFile(ctx, apiPath, metadata, "", nil, false)
+}
+
+func (s *server) callAdminMultipartFile(ctx context.Context, apiPath string, metadata any, fileName string, data []byte, withFile bool) (admin.CommandResult, error) {
 	var body bytes.Buffer
 	writer := multipart.NewWriter(&body)
 	meta, err := json.Marshal(metadata)
@@ -3063,12 +3157,14 @@ func (s *server) callAdminMultipart(ctx context.Context, apiPath string, metadat
 	if err := writer.WriteField("metadata", string(meta)); err != nil {
 		return admin.CommandResult{}, err
 	}
-	part, err := writer.CreateFormFile("file", fileName)
-	if err != nil {
-		return admin.CommandResult{}, err
-	}
-	if _, err := part.Write(data); err != nil {
-		return admin.CommandResult{}, err
+	if withFile {
+		part, err := writer.CreateFormFile("file", fileName)
+		if err != nil {
+			return admin.CommandResult{}, err
+		}
+		if _, err := part.Write(data); err != nil {
+			return admin.CommandResult{}, err
+		}
 	}
 	if err := writer.Close(); err != nil {
 		return admin.CommandResult{}, err

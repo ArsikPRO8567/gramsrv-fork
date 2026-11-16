@@ -1680,6 +1680,41 @@ func TestSetStarGiftAuctionSettingsCommand(t *testing.T) {
 	}
 }
 
+// Раунд 34: команда изменения лимита возможных улучшенных подарков —
+// валидация, проброс в стор и dry-run без записи.
+func TestSetStarGiftCollectibleSupplyCommand(t *testing.T) {
+	gifts := &fakeGiftsService{}
+	gifts.sourceRevision = &domain.StarGiftCollectibleRevision{
+		ID: 9001, GiftID: 11, Revision: 1, UpgradeStars: 50, SupplyTotal: 5, Issued: 0, Published: true,
+	}
+	svc := NewService(Dependencies{Commands: newMemoryCommandRepo(), Gifts: gifts, Now: fixedNow})
+	req := SetStarGiftCollectibleSupplyRequest{GiftID: 11, SupplyTotal: 12}
+	req.CommandMeta = CommandMeta{CommandID: "collectible-supply", Actor: "ops", Reason: "raise limit"}
+	result, err := svc.SetStarGiftCollectibleSupply(context.Background(), req)
+	if err != nil {
+		t.Fatalf("set collectible supply: result=%+v err=%v", result, err)
+	}
+	if gifts.lastSupplyWrite.GiftID != 11 || gifts.lastSupplyWrite.SupplyTotal != 12 {
+		t.Fatalf("supply write mismatch: %+v", gifts.lastSupplyWrite)
+	}
+	// DryRun не трогает стор.
+	gifts.lastSupplyWrite = domain.StarGiftCollectibleSupplyWrite{}
+	dry := SetStarGiftCollectibleSupplyRequest{GiftID: 11, SupplyTotal: 12}
+	dry.CommandMeta = CommandMeta{CommandID: "collectible-supply-dry", Actor: "ops", Reason: "check", DryRun: true}
+	if _, err := svc.SetStarGiftCollectibleSupply(context.Background(), dry); err != nil {
+		t.Fatalf("dry run: %v", err)
+	}
+	if gifts.lastSupplyWrite.GiftID != 0 {
+		t.Fatalf("dry run must not touch the store: %+v", gifts.lastSupplyWrite)
+	}
+	// Некорректные значения отклоняются до записи.
+	bad := SetStarGiftCollectibleSupplyRequest{GiftID: 11, SupplyTotal: 0}
+	bad.CommandMeta = CommandMeta{CommandID: "collectible-supply-bad", Actor: "ops", Reason: "check", DryRun: true}
+	if _, err := svc.SetStarGiftCollectibleSupply(context.Background(), bad); err == nil {
+		t.Fatalf("invalid supply: expected validation error")
+	}
+}
+
 // Раунд 31: валидация настроек выпуска зеркалит SQL-констрейнты —
 // отрицательные/несогласованные значения отклоняются до записи в БД.
 func TestImportStarGiftIssueSettingsValidation(t *testing.T) {
@@ -1821,6 +1856,7 @@ type fakeGiftsService struct {
 	lastSettings     domain.StarGiftCatalogSettingsWrite
 	lastAuctionWrite domain.StarGiftAuctionRuntimeWrite
 	lastCollectible  *domain.StarGiftCollectibleWrite
+	lastSupplyWrite  domain.StarGiftCollectibleSupplyWrite
 	sourceRevision   *domain.StarGiftCollectibleRevision
 }
 
@@ -1887,6 +1923,33 @@ func (f *fakeGiftsService) CollectibleRevision(_ context.Context, revisionID int
 		return domain.StarGiftCollectibleRevision{}, domain.ErrStarGiftCollectibleInvalid
 	}
 	return *f.sourceRevision, nil
+}
+
+func (f *fakeGiftsService) SetCollectibleSupplyTotal(_ context.Context, write domain.StarGiftCollectibleSupplyWrite) (domain.StarGiftCollectibleRevision, error) {
+	f.lastSupplyWrite = write
+	if f.sourceRevision == nil || f.sourceRevision.GiftID != write.GiftID {
+		return domain.StarGiftCollectibleRevision{}, domain.ErrStarGiftCollectibleInvalid
+	}
+	revision := *f.sourceRevision
+	if write.SupplyTotal < revision.Issued {
+		return domain.StarGiftCollectibleRevision{}, domain.ErrStarGiftCollectibleInvalid
+	}
+	revision.SupplyTotal = write.SupplyTotal
+	f.sourceRevision = &revision
+	return revision, nil
+}
+
+func (f *fakeGiftsService) CollectibleRevisionSummaries(_ context.Context, giftID int64) ([]domain.StarGiftCollectibleRevisionSummary, error) {
+	if f.sourceRevision == nil || f.sourceRevision.GiftID != giftID {
+		return nil, nil
+	}
+	revision := *f.sourceRevision
+	return []domain.StarGiftCollectibleRevisionSummary{{
+		RevisionID: revision.ID, GiftID: revision.GiftID, Revision: revision.Revision,
+		Status: "published", UpgradeStars: revision.UpgradeStars, SupplyTotal: revision.SupplyTotal,
+		Issued: revision.Issued, ModelCount: len(revision.Models), PatternCount: len(revision.Patterns),
+		BackdropCount: len(revision.Backdrops), CreatedBy: revision.CreatedBy,
+	}}, nil
 }
 func (*fakeGiftsService) CollectibleAnimationJSON(context.Context, int64, domain.StarGiftCollectibleAttributeKind, int64) ([]byte, bool, error) {
 	return []byte(`{"v":"5.7"}`), true, nil

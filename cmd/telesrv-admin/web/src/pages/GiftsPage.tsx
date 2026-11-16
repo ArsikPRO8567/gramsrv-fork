@@ -8,7 +8,7 @@ import { Alert, Badge, EmptyRow, Metric, PageFrame, QueryPanel } from "../compon
 import { useI18n } from "../i18n";
 import { formatDate } from "../lib/format";
 import type { CommandResult, OfficialStarGiftRow, StarGiftRow } from "../types";
-import { GiftCollectiblesModal } from "./GiftCollectiblesModal";
+import { GiftCollectiblesModal, parseAnimationFile } from "./GiftCollectiblesModal";
 
 type OfficialGiftCategory = "all" | "upgrade" | "craft" | "basic";
 
@@ -80,6 +80,18 @@ function OfficialLottiePreview({ sourceGiftID }: { sourceGiftID: string }) {
   return <div className="gift-animation-shell"><div className="gift-animation" ref={host} /></div>;
 }
 
+// Раунд 34: предпросмотр выбранного в редакторе файла (разобранного локально
+// в Lottie JSON) — рядом с текущей анимацией подарка.
+function EditAnimationPreview({ data }: { data: Record<string, unknown> }) {
+  const host = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!host.current) return;
+    const player = lottie.loadAnimation({ container: host.current, renderer: "canvas", loop: true, autoplay: true, animationData: structuredClone(data) });
+    return () => player.destroy();
+  }, [data]);
+  return <div className="gift-animation-shell"><div className="gift-animation" ref={host} /></div>;
+}
+
 export function GiftsPage() {
   const { t } = useI18n();
   const [gifts, setGifts] = useState<StarGiftRow[]>([]);
@@ -137,6 +149,12 @@ export function GiftsPage() {
   // Раунд 32: режим «edit» — правка всех параметров существующего подарка без
   // загрузки новой анимации (замена файла по-прежнему через вкладку «Заменить»).
   const [editGift, setEditGift] = useState<StarGiftRow | null>(null);
+  // Раунд 34: окно загрузки и предпросмотра новой анимации в режиме
+  // редактирования. Файл не выбран — команда меняет только настройки
+  // (анимация копируется из активной ревизии на сервере).
+  const [editFile, setEditFile] = useState<File | null>(null);
+  const [editAnimation, setEditAnimation] = useState<Record<string, unknown> | null>(null);
+  const [editFileError, setEditFileError] = useState("");
   const [reason, setReason] = useState("");
   const [preview, setPreview] = useState<CommandResult | null>(null);
   const [busy, setBusy] = useState(false);
@@ -318,9 +336,10 @@ export function GiftsPage() {
     setPreview(null);
   }
 
-  // Раунд 32: payload редактирования всех параметров существующего подарка
-  // (без анимации). Отправляется целиком — форма всегда предзаполнена.
-  function editPayload(confirm: boolean, commandID = "") {
+  // Раунд 32: payload редактирования всех параметров существующего подарка.
+  // Раунд 34: когда в окне редактирования выбрана новая анимация, команда
+  // уходит multipart-формой (metadata + file); иначе JSON — только настройки.
+  function editSettingsPayload(confirm: boolean, commandID = "") {
     if (!editGift) throw new Error(t("gifts.officialRequired"));
     if (!reason.trim()) throw new Error(t("action.reasonRequired"));
     return {
@@ -329,6 +348,27 @@ export function GiftsPage() {
       stars, convert_stars: convertStars, enabled, sort_order: Number(sortOrder),
       ...issueSettings()
     };
+  }
+
+  function editPayload(confirm: boolean, commandID = ""): Record<string, unknown> | FormData {
+    if (!editFile) return editSettingsPayload(confirm, commandID);
+    const form = new FormData();
+    form.set("metadata", JSON.stringify(editSettingsPayload(confirm, commandID)));
+    form.set("file", editFile, editFile.name);
+    return form;
+  }
+
+  // Раунд 34: выбор файла новой анимации в окне редактирования — локальный
+  // разбор (TGS = gzip+lottie) для предпросмотра рядом с текущей анимацией.
+  async function chooseEditFile(file: File | null) {
+    setEditFile(file); setEditAnimation(null); setEditFileError(""); setPreview(null);
+    if (!file) return;
+    try {
+      const animation = await parseAnimationFile(file);
+      setEditAnimation(animation);
+    } catch (err) {
+      setEditFileError(errorMessage(err));
+    }
   }
 
   // Раунд 32: признак того, что рабочие настройки аукциона изменены —
@@ -367,11 +407,19 @@ export function GiftsPage() {
     setBusy(true); setImportError(""); setPreview(null);
     try {
       setPreview(editGift
-        ? await api.updateGiftSettings(editPayload(false))
+        ? await sendEditPayload(editPayload(false))
         : importSource === "official" ? await api.importOfficialGift(officialPayload(false)) : await api.importGift(uploadForm(false)));
     } catch (err) {
       setImportError(errorMessage(err));
     } finally { setBusy(false); }
+  }
+
+  // Раунд 34: редактирование уходит JSON (только настройки) или multipart
+  // (настройки + новая анимация) — один endpoint, обе формы.
+  function sendEditPayload(payload: Record<string, unknown> | FormData) {
+    return payload instanceof FormData
+      ? api.updateGiftSettingsForm(payload)
+      : api.updateGiftSettings(payload);
   }
 
   async function confirmImport() {
@@ -379,7 +427,7 @@ export function GiftsPage() {
     setBusy(true); setImportError("");
     try {
       if (editGift) {
-        await api.updateGiftSettings(editPayload(true, preview.command_id));
+        await sendEditPayload(editPayload(true, preview.command_id));
         if (auctionRuntimeDirty()) await api.setGiftAuctionSettings(auctionRuntimePayload(true));
       } else if (importSource === "official") {
         const result = await api.importOfficialGift(officialPayload(true, preview.command_id));
@@ -397,6 +445,7 @@ export function GiftsPage() {
         }
       }
                 setPreview(null); setFile(null); setGiftID("0"); setTitle(""); setSourceGiftID(""); setEditGift(null);
+                setEditFile(null); setEditAnimation(null); setEditFileError("");
       await load();
       setImportOpen(false);
     } catch (err) {
@@ -426,6 +475,7 @@ export function GiftsPage() {
   // аукцион каталога и рабочая строка star_gift_auctions).
   function startEdit(gift: StarGiftRow) {
     setEditGift(gift);
+    setEditFile(null); setEditAnimation(null); setEditFileError("");
     setGiftID(gift.GiftID); setTitle(gift.Title); setStars(String(gift.Stars));
     setConvertStars(String(gift.ConvertStars)); setSortOrder(String(gift.SortOrder)); setEnabled(gift.Enabled);
     setAvailabilityTotal(String(gift.AvailabilityTotal));
@@ -574,6 +624,34 @@ export function GiftsPage() {
                 </label>
               </>)}
               {editGift && <div className="gift-import-note"><span>{t("gifts.editHint")}</span><div className="gift-format-chips"><span>#{editGift.GiftID}</span><span>r{editGift.Revision}</span></div></div>}
+              {/* Раунд 34: окно загрузки и предпросмотра новой анимации в
+                  режиме редактирования. Файл не выбран — команда меняет только
+                  настройки; текущая анимация остаётся активной. */}
+              {editGift && <section className="gift-edit-animation">
+                <div className="gift-edit-animation-head">
+                  <strong>{t("gifts.editAnimationTitle")}</strong>
+                  <span>{t("gifts.editAnimationHint")}</span>
+                </div>
+                <div className="gift-edit-animation-grid">
+                  <div className="gift-edit-animation-current">
+                    <span className="gift-edit-animation-label">{t("gifts.editAnimationCurrent")}</span>
+                    <LottiePreview giftID={editGift.GiftID} revision={editGift.Revision} />
+                  </div>
+                  <div className="gift-edit-animation-new">
+                    <span className="gift-edit-animation-label">{t("gifts.editAnimationNew")}</span>
+                    {editAnimation
+                      ? <EditAnimationPreview data={editAnimation} />
+                      : <div className="gift-edit-animation-placeholder"><FileJson2 size={22} /><span>{t("gifts.editAnimationKeep")}</span></div>}
+                    <label className={`gift-file-picker compact ${editFile ? "has-file" : ""}`}>
+                      <input type="file" accept=".tgs,.json,.lottie,application/json,application/x-tgsticker" onChange={(e) => void chooseEditFile(e.target.files?.[0] ?? null)} />
+                      <span className="gift-file-icon"><FileJson2 size={18} /></span>
+                      <span className="gift-file-copy"><span className="gift-field-label">{t("gifts.animation")}</span><strong>{editFile ? editFile.name : t("gifts.filePrompt")}</strong><small>{editFile ? formatBytes(editFile.size) : t("gifts.editAnimationKeep")}</small></span>
+                      <span className="gift-file-action">{editFile ? t("gifts.changeFile") : t("gifts.chooseFile")}</span>
+                    </label>
+                  </div>
+                </div>
+                {editFileError && <Alert>{editFileError}</Alert>}
+              </section>}
               <div className="gift-fields-grid">
                 <label><span>{t("gifts.title")}</span><input value={title} maxLength={128} placeholder={t("gifts.titlePlaceholder")} onChange={(e) => { setTitle(e.target.value); setPreview(null); }} /></label>
                 <label><span>{t("gifts.stars")}</span><input type="number" min="1" value={stars} onChange={(e) => { setStars(e.target.value); setPreview(null); }} /></label>

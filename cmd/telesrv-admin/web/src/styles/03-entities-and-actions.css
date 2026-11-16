@@ -697,6 +697,42 @@
 .collectible-row .icon-btn { align-self: center; }
 .collectible-row .icon-btn:disabled { opacity: .28; }
 
+/* Раунд 34: поблочное копирование из другой ревизии — выбор источника
+   (список ревизий подарка) + кнопка прямо в шапке секции. */
+.collectible-copy-tools { display: flex; min-width: 0; align-items: center; gap: 6px; }
+.collectible-copy-select { height: 30px; max-width: 190px; padding: 0 8px; color: var(--text); background: var(--input-bg); border: 1px solid var(--line-strong); border-radius: var(--radius-sm); font: inherit; font-size: 11px; }
+.collectible-copy-select:focus { border-color: var(--purple); box-shadow: 0 0 0 3px var(--purple-tint); outline: none; }
+.collectible-copy-tools .btn { flex: 0 0 auto; }
+.collectible-copy-block .collectible-copy-tools-all { padding: 0; }
+.collectible-copy-block .collectible-copy-select { flex: 1 1 auto; max-width: 320px; height: 34px; }
+
+/* Раунд 34: лимит возможных улучшенных подарков опубликованной ревизии. */
+.collectible-supply-row { display: flex; flex-wrap: wrap; align-items: center; gap: 9px; padding: 10px 14px; border-bottom: 1px solid var(--purple-border); background: var(--panel-subtle); }
+.collectible-supply-row label { display: grid; gap: 4px; }
+.collectible-supply-row label > span { color: var(--muted); font-size: 9px; font-weight: 800; text-transform: uppercase; letter-spacing: .025em; }
+.collectible-supply-row input { width: 110px; height: 30px; padding: 0 8px; color: var(--text); background: var(--input-bg); border: 1px solid var(--line-strong); border-radius: var(--radius-sm); font: inherit; font-size: 11px; }
+.collectible-supply-row input:focus { border-color: var(--purple); box-shadow: 0 0 0 3px var(--purple-tint); outline: none; }
+.collectible-supply-hint { flex: 1 1 220px; min-width: 0; color: var(--muted); font-size: 10px; }
+.gift-validation.compact { padding: 9px 12px; }
+
+/* Раунд 34: окно загрузки и предпросмотра новой анимации в редакторе. */
+.gift-edit-animation { display: grid; gap: 10px; padding: 12px; border: 1px dashed var(--line); border-radius: var(--radius-sm); }
+.gift-edit-animation-head { display: grid; gap: 3px; }
+.gift-edit-animation-head span { color: var(--muted); font-size: 10px; font-weight: 500; }
+.gift-edit-animation-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 12px; }
+.gift-edit-animation-current,
+.gift-edit-animation-new { display: grid; min-width: 0; align-content: start; gap: 8px; padding: 10px; background: var(--panel-subtle); border: 1px solid var(--line); border-radius: var(--radius-sm); }
+.gift-edit-animation-label { color: var(--muted); font-size: 9px; font-weight: 800; text-transform: uppercase; letter-spacing: .025em; }
+.gift-edit-animation-current .gift-animation-shell { width: 116px; height: 116px; margin: 0 auto; }
+.gift-edit-animation-placeholder { display: grid; place-items: center; height: 116px; gap: 6px; color: var(--muted); background: var(--panel); border: 1px dashed var(--line-strong); border-radius: var(--radius-sm); font-size: 10px; text-align: center; }
+.gift-edit-animation-new .gift-file-picker { position: relative; }
+.gift-edit-animation-new .gift-animation-shell { width: 116px; height: 116px; margin: 0 auto; }
+
+@media (max-width: 900px) {
+  .gift-edit-animation-grid { grid-template-columns: 1fr; }
+  .collectible-copy-select { max-width: none; flex: 1 1 140px; }
+}
+
 @media (max-width: 900px) {
   .gift-fields-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .give-gift-layout { grid-template-columns: 1fr; }

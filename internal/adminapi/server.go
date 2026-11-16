@@ -96,6 +96,10 @@ type Service interface {
 	GifCatalogDocumentPreview(ctx context.Context, documentID int64) ([]byte, string, bool, error)
 	StarGiftCollectibles(ctx context.Context, giftID int64) (domain.StarGiftUpgradePreview, bool, error)
 	StarGiftCollectibleRevision(ctx context.Context, revisionID int64) (domain.StarGiftCollectibleRevision, error)
+	// Раунд 34: список ревизий коллекции (выбор источника копирования) и
+	// лимит возможных улучшенных подарков опубликованной ревизии.
+	StarGiftCollectibleRevisionSummaries(ctx context.Context, giftID int64) ([]domain.StarGiftCollectibleRevisionSummary, error)
+	SetStarGiftCollectibleSupply(ctx context.Context, req admin.SetStarGiftCollectibleSupplyRequest) (admin.CommandResult, error)
 	StarGiftCollectibleAnimation(ctx context.Context, giftID int64, kind domain.StarGiftCollectibleAttributeKind, attributeID int64) ([]byte, bool, error)
 	ModerationCases(ctx context.Context, filter domain.ModerationCaseFilter) ([]domain.ModerationCase, error)
 	ModerationCase(ctx context.Context, caseID int64) (domain.ModerationCaseDetail, bool, error)
@@ -271,6 +275,10 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("GET /v1/gifts/{id}/collectibles/{kind}/{attribute_id}/animation", s.authenticated(s.handleStarGiftCollectibleAnimation))
 	// Раунд 33: любая ревизия коллекции по id — источник копирования атрибутов.
 	mux.HandleFunc("GET /v1/gifts/collectibles/revisions/{revision_id}", s.authenticated(s.handleStarGiftCollectibleRevision))
+	// Раунд 34: список ревизий коллекции подарка (выбор источника копирования
+	// блоками) и правка лимита возможных улучшенных подарков.
+	mux.HandleFunc("GET /v1/gifts/{id}/collectibles/revisions", s.authenticated(s.handleStarGiftCollectibleRevisionSummaries))
+	mux.HandleFunc("POST /v1/gifts/set-collectible-supply", s.authenticated(s.handleSetStarGiftCollectibleSupply))
 	mux.HandleFunc("GET /v1/moderation/cases", s.authenticated(s.handleModerationCases))
 	mux.HandleFunc("GET /v1/moderation/cases/{id}", s.authenticated(s.handleModerationCase))
 	mux.HandleFunc("GET /v1/moderation/reports/{id}", s.authenticated(s.handleModerationReport))
@@ -1092,9 +1100,39 @@ func (s *Server) handleSetStarGiftSortOrder(w http.ResponseWriter, r *http.Reque
 	writeCommandResult(w, result, err)
 }
 
+// handleUpdateStarGiftSettings (раунд 34) принимает и JSON (только настройки),
+// и multipart (настройки + ОПЦИОНАЛЬНОЕ поле file — новая анимация с
+// предпросмотром в админке). Без файла команда меняет только настройки.
 func (s *Server) handleUpdateStarGiftSettings(w http.ResponseWriter, r *http.Request) {
 	var req admin.UpdateStarGiftSettingsRequest
-	if !decodeJSON(w, r, &req) {
+	if strings.HasPrefix(r.Header.Get("Content-Type"), "multipart/") {
+		defer r.Body.Close()
+		r.Body = http.MaxBytesReader(w, r.Body, 5<<20)
+		if err := r.ParseMultipartForm(1 << 20); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid multipart form: "+err.Error())
+			return
+		}
+		if r.MultipartForm != nil {
+			defer r.MultipartForm.RemoveAll()
+		}
+		dec := json.NewDecoder(strings.NewReader(r.FormValue("metadata")))
+		dec.DisallowUnknownFields()
+		if err := dec.Decode(&req); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid metadata: "+err.Error())
+			return
+		}
+		file, header, err := r.FormFile("file")
+		if err == nil {
+			defer file.Close()
+			data, err := io.ReadAll(io.LimitReader(file, (4<<20)+1))
+			if err != nil || len(data) == 0 || len(data) > 4<<20 {
+				writeError(w, http.StatusBadRequest, "animation file is empty or too large")
+				return
+			}
+			req.FileName = header.Filename
+			req.Data = data
+		}
+	} else if !decodeJSON(w, r, &req) {
 		return
 	}
 	result, err := s.svc.UpdateStarGiftSettings(r.Context(), req)
@@ -1283,6 +1321,51 @@ func (s *Server) handleStarGiftCollectibleRevision(w http.ResponseWriter, r *htt
 		return
 	}
 	writeJSON(w, http.StatusOK, collectibleRevisionResponse(revision))
+}
+
+// handleStarGiftCollectibleRevisionSummaries (раунд 34) — список ревизий
+// коллекции подарка для выбора источника копирования блоками (модели/фоны/
+// узоры) в редакторе пула атрибутов.
+func (s *Server) handleStarGiftCollectibleRevisionSummaries(w http.ResponseWriter, r *http.Request) {
+	giftID, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil || giftID <= 0 {
+		writeError(w, http.StatusBadRequest, "invalid gift id")
+		return
+	}
+	summaries, err := s.svc.StarGiftCollectibleRevisionSummaries(r.Context(), giftID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	rows := make([]map[string]any, 0, len(summaries))
+	for _, summary := range summaries {
+		rows = append(rows, map[string]any{
+			"revision_id":    strconv.FormatInt(summary.RevisionID, 10),
+			"gift_id":        strconv.FormatInt(summary.GiftID, 10),
+			"revision":       summary.Revision,
+			"status":         summary.Status,
+			"upgrade_stars":  strconv.FormatInt(summary.UpgradeStars, 10),
+			"supply_total":   summary.SupplyTotal,
+			"issued":         summary.Issued,
+			"model_count":    summary.ModelCount,
+			"pattern_count":  summary.PatternCount,
+			"backdrop_count": summary.BackdropCount,
+			"created_by":     summary.CreatedBy,
+			"created_at":     summary.CreatedAt.UTC().Format(time.RFC3339),
+		})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"gift_id": strconv.FormatInt(giftID, 10), "revisions": rows})
+}
+
+// handleSetStarGiftCollectibleSupply (раунд 34) — правит лимит возможных
+// улучшенных подарков опубликованной ревизии коллекции.
+func (s *Server) handleSetStarGiftCollectibleSupply(w http.ResponseWriter, r *http.Request) {
+	var req admin.SetStarGiftCollectibleSupplyRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	result, err := s.svc.SetStarGiftCollectibleSupply(r.Context(), req)
+	writeCommandResult(w, result, err)
 }
 
 func collectibleRevisionResponse(revision domain.StarGiftCollectibleRevision) map[string]any {

@@ -5,7 +5,7 @@ import { createPortal } from "react-dom";
 import { api, errorMessage } from "../api";
 import { Alert, Badge } from "../components/ui";
 import { useI18n } from "../i18n";
-import type { CommandResult, StarGiftCollectibleAttributeRow, StarGiftCollectiblePreview, StarGiftCollectibleRevision, StarGiftRow } from "../types";
+import type { CommandResult, StarGiftCollectibleAttributeRow, StarGiftCollectiblePreview, StarGiftCollectibleRevision, StarGiftCollectibleRevisionSummary, StarGiftRow } from "../types";
 
 type AnimationData = Record<string, unknown>;
 type AnimatedDraft = {
@@ -23,6 +23,9 @@ type AnimatedDraft = {
   // Раунд 33: копия из другой ревизии — document_id исходного атрибута
   // (файл не загружается, документ и анимация переиспользуются).
   copyDocumentID: string;
+  // Раунд 34: своя ревизия-источник копии (блоки могут браться из разных
+  // ревизий); пусто — общий copy_from_revision_id.
+  copyFromRevisionID: string;
 };
 type BackdropDraft = {
   key: string;
@@ -57,7 +60,8 @@ function rebalanceRarity<T extends { key: string; rarityKind?: string; rarity: s
 }
 
 const newAnimated = (kind: string, sortOrder: number): AnimatedDraft => ({
-  key: nextKey(kind), name: "", rarityKind: "permille", rarity: "1", sortOrder: String(sortOrder), file: null, animation: null, fileError: "", copyDocumentID: ""
+  key: nextKey(kind), name: "", rarityKind: "permille", rarity: "1", sortOrder: String(sortOrder),
+  file: null, animation: null, fileError: "", copyDocumentID: "", copyFromRevisionID: ""
 });
 
 function newBackdrop(rows: BackdropDraft[]): BackdropDraft {
@@ -101,7 +105,7 @@ function RemoteAnimation({ giftID, attribute }: { giftID: string; attribute: Sta
   return <AnimationPreview data={data} compact />;
 }
 
-async function parseAnimationFile(file: File): Promise<AnimationData> {
+export async function parseAnimationFile(file: File): Promise<AnimationData> {
   const bytes = new Uint8Array(await file.arrayBuffer());
   let raw: Uint8Array = bytes;
   if (bytes.length >= 2 && bytes[0] === 0x1f && bytes[1] === 0x8f) {
@@ -120,6 +124,8 @@ const hexColor = (value: number | undefined, fallback: string) =>
 const rarityLabel = (attribute: StarGiftCollectibleAttributeRow) => attribute.rarity_kind === "permille" ? `${attribute.rarity_permille}‰` : attribute.rarity_kind;
 
 const RARITY_KINDS = ["permille", "uncommon", "rare", "epic", "legendary"] as const;
+// Раунд 34: ключи блоков — единый селект источника копирования на блок.
+type CopyBlockKind = "models" | "patterns" | "backdrops";
 
 export function GiftCollectiblesModal({ gift, onClose, onPublished }: { gift: StarGiftRow; onClose: () => void; onPublished: () => void }) {
   const { t } = useI18n();
@@ -135,12 +141,28 @@ export function GiftCollectiblesModal({ gift, onClose, onPublished }: { gift: St
   const [models, setModels] = useState<AnimatedDraft[]>(() => initialAnimated("model"));
   const [patterns, setPatterns] = useState<AnimatedDraft[]>(() => initialAnimated("pattern"));
   const [backdrops, setBackdrops] = useState<BackdropDraft[]>(initialBackdrops);
-  // Раунд 33: копирование атрибутов из другой ревизии («правка существующей
-  // ревизии» = копия активной ревизии + правки поверх).
+  // Раунд 33/34: копирование атрибутов из другой ревизии («правка
+  // существующей ревизии» = копия активной ревизии + правки поверх). Список
+  // ревизий загружается один раз; у каждого блока — свой выбор источника.
+  const [revisions, setRevisions] = useState<StarGiftCollectibleRevisionSummary[]>([]);
   const [copyRevisionID, setCopyRevisionID] = useState("");
-  const [copyBusy, setCopyBusy] = useState(false);
+  const [blockCopySource, setBlockCopySource] = useState<Record<CopyBlockKind, string>>({ models: "", patterns: "", backdrops: "" });
+  const [copyBusy, setCopyBusy] = useState<CopyBlockKind | "all" | "">("");
   const [copyError, setCopyError] = useState("");
   const [copySource, setCopySource] = useState<StarGiftCollectibleRevision | null>(null);
+  // Раунд 34: лимит возможных улучшенных подарков ОПУБЛИКОВАННОЙ ревизии
+  // (нужен, когда supply каталога увеличен — иначе апгрейд блокируется).
+  const [activeSupply, setActiveSupply] = useState("");
+  const [supplyPreview, setSupplyPreview] = useState<CommandResult | null>(null);
+  const [supplyBusy, setSupplyBusy] = useState(false);
+  const [supplyError, setSupplyError] = useState("");
+
+  const refreshActive = () => {
+    api.giftCollectibles(gift.GiftID).then((value) => {
+      setActive(value);
+      if (value.found) setActiveSupply(String(value.supply_total ?? ""));
+    }).catch(() => undefined);
+  };
 
   useEffect(() => {
     let cancelled = false;
@@ -152,8 +174,12 @@ export function GiftCollectiblesModal({ gift, onClose, onPublished }: { gift: St
         setSupplyTotal(String(value.supply_total ?? 1000));
         setSlugPrefix(value.slug_prefix ?? `gift-${gift.GiftID}`);
         setCopyRevisionID(String(value.revision ?? ""));
+        setActiveSupply(String(value.supply_total ?? ""));
       }
     }).catch((err) => setError(errorMessage(err))).finally(() => { if (!cancelled) setLoading(false); });
+    api.giftCollectibleRevisions(gift.GiftID).then((value) => {
+      if (!cancelled) setRevisions(value.revisions ?? []);
+    }).catch(() => undefined);
     return () => { cancelled = true; };
   }, [gift.GiftID]);
 
@@ -175,7 +201,7 @@ export function GiftCollectiblesModal({ gift, onClose, onPublished }: { gift: St
 
   async function chooseFile(kind: "models" | "patterns", row: AnimatedDraft, file: File | null) {
     // Загрузка своего файла отменяет режим копии для этой записи.
-    updateAnimated(kind, row.key, { file, copyDocumentID: "", animation: null, fileError: "" });
+    updateAnimated(kind, row.key, { file, copyDocumentID: "", copyFromRevisionID: "", animation: null, fileError: "" });
     if (!file) return;
     try {
       const animation = await parseAnimationFile(file);
@@ -185,40 +211,73 @@ export function GiftCollectiblesModal({ gift, onClose, onPublished }: { gift: St
     }
   }
 
-  // Раунд 33: загрузить атрибуты из указанной ревизии. Модели/узоры становятся
-  // копиями (copy_document_id, файл не нужен), фоны переносятся как данные.
-  async function copyFromRevision(sourceID: string) {
+  // Раунд 34: анимированные записи копии — из указанной ревизии.
+  const animatedFromRevision = (revision: StarGiftCollectibleRevision, kind: "model" | "pattern", sourceID: string): AnimatedDraft[] => {
+    const rows = kind === "model" ? revision.models : revision.patterns;
+    return (rows ?? []).filter((row) => row.kind === kind && row.document_id).map((row, index) => ({
+      key: nextKey(kind),
+      name: row.name,
+      rarityKind: (RARITY_KINDS as readonly string[]).includes(row.rarity_kind) ? row.rarity_kind as AnimatedDraft["rarityKind"] : "permille",
+      rarity: String(row.rarity_permille || 1),
+      sortOrder: String(row.sort_order ?? index),
+      file: null,
+      animation: null,
+      fileError: "",
+      copyDocumentID: row.document_id ?? "",
+      copyFromRevisionID: sourceID
+    } as AnimatedDraft));
+  };
+
+  const backdropsFromRevision = (revision: StarGiftCollectibleRevision): BackdropDraft[] =>
+    (revision.backdrops ?? []).map((row, index) => ({
+      key: nextKey("backdrop"),
+      name: row.name,
+      backdropID: String(row.backdrop_id ?? index + 1),
+      rarity: String(row.rarity_permille || 1),
+      sortOrder: String(row.sort_order ?? index),
+      center: hexColor(row.center_color, backdropPalettes[index % backdropPalettes.length].center),
+      edge: hexColor(row.edge_color, backdropPalettes[index % backdropPalettes.length].edge),
+      pattern: hexColor(row.pattern_color, backdropPalettes[index % backdropPalettes.length].pattern),
+      text: hexColor(row.text_color, "#ffffff")
+    } as BackdropDraft));
+
+  // Раунд 34: КОПИРОВАНИЕ ОДНИМ БЛОКОМ (модели / фоны / узоры) из выбранной
+  // ревизии — список ревизий рядом, остальные блоки не затрагиваются.
+  async function copyBlock(kind: CopyBlockKind, sourceID: string) {
     const id = sourceID.trim();
     if (!id) return;
-    setCopyBusy(true); setCopyError("");
+    setCopyBusy(kind); setCopyError("");
     try {
       const revision = await api.giftCollectibleRevision(id);
       if (!revision.found) throw new Error(t("collectibles.copyFailed"));
-      const animated = (kind: "model" | "pattern", rows: StarGiftCollectibleAttributeRow[] | undefined) =>
-        (rows ?? []).filter((row) => row.kind === kind && row.document_id).map((row, index) => ({
-          key: nextKey(kind),
-          name: row.name,
-          rarityKind: (RARITY_KINDS as readonly string[]).includes(row.rarity_kind) ? row.rarity_kind as AnimatedDraft["rarityKind"] : "permille",
-          rarity: String(row.rarity_permille || 1),
-          sortOrder: String(row.sort_order ?? index),
-          file: null,
-          animation: null,
-          fileError: "",
-          copyDocumentID: row.document_id ?? ""
-        } as AnimatedDraft));
-      setModels(animated("model", revision.models));
-      setPatterns(animated("pattern", revision.patterns));
-      setBackdrops((revision.backdrops ?? []).map((row, index) => ({
-        key: nextKey("backdrop"),
-        name: row.name,
-        backdropID: String(row.backdrop_id ?? index + 1),
-        rarity: String(row.rarity_permille || 1),
-        sortOrder: String(row.sort_order ?? index),
-        center: hexColor(row.center_color, backdropPalettes[index % backdropPalettes.length].center),
-        edge: hexColor(row.edge_color, backdropPalettes[index % backdropPalettes.length].edge),
-        pattern: hexColor(row.pattern_color, backdropPalettes[index % backdropPalettes.length].pattern),
-        text: hexColor(row.text_color, "#ffffff")
-      } as BackdropDraft)));
+      if (kind === "models") setModels(animatedFromRevision(revision, "model", id));
+      else if (kind === "patterns") setPatterns(animatedFromRevision(revision, "pattern", id));
+      else setBackdrops(backdropsFromRevision(revision));
+      if (kind === "models" || kind === "patterns") {
+        // Копии из ревизии без файлов — общий источник больше не нужен,
+        // у каждой записи свой copy_from_revision_id.
+        setCopySource(null);
+      }
+      setPreview(null);
+    } catch (err) {
+      setCopyError(errorMessage(err) || t("collectibles.copyFailed"));
+    } finally {
+      setCopyBusy("");
+    }
+  }
+
+  // Раунд 33/34: полное копирование ревизии — все три блока + основные поля
+  // («правка существующей ревизии» без перезаливки файлов).
+  async function copyFromRevision(sourceID: string) {
+    const id = sourceID.trim();
+    if (!id) return;
+    setCopyBusy("all"); setCopyError("");
+    try {
+      const revision = await api.giftCollectibleRevision(id);
+      if (!revision.found) throw new Error(t("collectibles.copyFailed"));
+      setModels(animatedFromRevision(revision, "model", id));
+      setPatterns(animatedFromRevision(revision, "pattern", id));
+      setBackdrops(backdropsFromRevision(revision));
       setUpgradeStars(String(revision.upgrade_stars ?? "0"));
       setSupplyTotal(String(revision.supply_total ?? 1000));
       setSlugPrefix(revision.slug_prefix ?? `gift-${gift.GiftID}`);
@@ -228,7 +287,30 @@ export function GiftCollectiblesModal({ gift, onClose, onPublished }: { gift: St
       setCopyError(errorMessage(err) || t("collectibles.copyFailed"));
       setCopySource(null);
     } finally {
-      setCopyBusy(false);
+      setCopyBusy("");
+    }
+  }
+
+  // Раунд 34: применить лимит возможных улучшенных подарков к ОПУБЛИКОВАННОЙ
+  // ревизии (двухфазная команда: проверка → подтверждение).
+  async function applySupply() {
+    const value = Number(activeSupply);
+    if (!reason.trim()) { setSupplyError(t("action.reasonRequired")); return; }
+    if (!Number.isInteger(value) || value <= 0) { setSupplyError(t("collectibles.supplyInvalid")); return; }
+    setSupplyBusy(true); setSupplyError(""); setSupplyPreview(null);
+    try {
+      const base = { gift_id: gift.GiftID, supply_total: value, reason: reason.trim() };
+      const dry = await api.setGiftCollectibleSupply({ ...base, command_id: "", confirm: false });
+      if (dry.error) throw new Error(dry.error);
+      const result = await api.setGiftCollectibleSupply({ ...base, command_id: dry.command_id, confirm: true });
+      if (result.error) throw new Error(result.error);
+      setSupplyPreview(result);
+      refreshActive();
+      onPublished();
+    } catch (err) {
+      setSupplyError(errorMessage(err));
+    } finally {
+      setSupplyBusy(false);
     }
   }
 
@@ -249,8 +331,13 @@ export function GiftCollectiblesModal({ gift, onClose, onPublished }: { gift: St
       };
       if (row.rarityKind !== "permille") entry.rarity_kind = row.rarityKind;
       // Копия из ревизии: файл не прикладывается, документ переиспользуется.
-      if (row.copyDocumentID) entry.copy_document_id = row.copyDocumentID;
-      else entry.file_key = row.key;
+      // Раунд 34: у каждой копии может быть СВОЯ ревизия-источник.
+      if (row.copyDocumentID) {
+        entry.copy_document_id = row.copyDocumentID;
+        if (row.copyFromRevisionID) entry.copy_from_revision_id = row.copyFromRevisionID;
+      } else {
+        entry.file_key = row.key;
+      }
       return entry;
     });
     const metadata: Record<string, unknown> = {
@@ -262,8 +349,10 @@ export function GiftCollectiblesModal({ gift, onClose, onPublished }: { gift: St
         center_color: colorNumber(row.center), edge_color: colorNumber(row.edge), pattern_color: colorNumber(row.pattern), text_color: colorNumber(row.text)
       }))
     };
+    // Общий источник (полное копирование ревизии) — только если часть копий
+    // не указала собственный copy_from_revision_id.
     const source = copySource;
-    if (source && [...models, ...patterns].some((row) => row.copyDocumentID)) {
+    if (source && [...models, ...patterns].some((row) => row.copyDocumentID && !row.copyFromRevisionID)) {
       metadata.copy_from_revision_id = source.revision_id;
     }
     form.set("metadata", JSON.stringify(metadata));
@@ -288,11 +377,42 @@ export function GiftCollectiblesModal({ gift, onClose, onPublished }: { gift: St
     finally { setBusy(false); }
   }
 
+  const revisionOptions = revisions.map((revision) => (
+    <option key={revision.revision_id} value={revision.revision_id}>
+      r{revision.revision} · {t(`collectibles.status.${revision.status === "published" ? "published" : "draft"}`)} · {revision.model_count}/{revision.pattern_count}/{revision.backdrop_count}
+    </option>
+  ));
+
+  // Раунд 34: инструменты копирования в шапке блока — выбор ревизии + кнопка.
+  const blockCopyTools = (kind: CopyBlockKind, disabled = false) => (
+    <div className="collectible-copy-tools">
+      <select
+        className="collectible-copy-select"
+        value={blockCopySource[kind]}
+        onChange={(e) => setBlockCopySource((state) => ({ ...state, [kind]: e.target.value }))}
+        disabled={copyBusy !== "" || disabled}
+        aria-label={t("collectibles.copySelect")}
+      >
+        <option value="">{t("collectibles.copySelect")}</option>
+        {revisionOptions}
+      </select>
+      <button className="btn compact-btn" type="button"
+        disabled={copyBusy !== "" || disabled || !blockCopySource[kind]}
+        onClick={() => void copyBlock(kind, blockCopySource[kind])}>
+        {copyBusy === kind ? <Loader2 className="spin" size={13} /> : <Copy size={13} />}{t("collectibles.copyLoad")}
+      </button>
+    </div>
+  );
+
   const renderAnimatedRows = (kind: "models" | "patterns", rows: AnimatedDraft[], setRows: (rows: AnimatedDraft[]) => void) => (
     <section className="collectible-section">
       <div className="collectible-section-head">
         <div><strong>{t(`collectibles.${kind}`)}</strong><span>{t("collectibles.rarityHint")}</span></div>
-        <div className="collectible-section-tools"><Badge tone={rarityTotals[kind] > 0 ? "good" : "neutral"}>{rarityTotals[kind]}‰</Badge><button className="btn compact-btn" type="button" onClick={() => { setRows(rebalanceRarity([...rows, newAnimated(kind === "models" ? "model" : "pattern", rows.length)])); invalidate(); }}><Plus size={13} />{t("collectibles.addAttribute")}</button></div>
+        <div className="collectible-section-tools">
+          <Badge tone={rarityTotals[kind] > 0 ? "good" : "neutral"}>{rarityTotals[kind]}‰</Badge>
+          {blockCopyTools(kind)}
+          <button className="btn compact-btn" type="button" onClick={() => { setRows(rebalanceRarity([...rows, newAnimated(kind === "models" ? "model" : "pattern", rows.length)])); invalidate(); }}><Plus size={13} />{t("collectibles.addAttribute")}</button>
+        </div>
       </div>
       <div className="collectible-rows">
         {rows.map((row, index) => <div className="collectible-row animated" key={row.key}>
@@ -310,7 +430,7 @@ export function GiftCollectiblesModal({ gift, onClose, onPublished }: { gift: St
           {row.copyDocumentID
             ? <label className="collectible-file copied"><span>{t("gifts.animation")}</span><em><Copy size={13} />{t("collectibles.copiedBadge")} #{row.copyDocumentID}</em></label>
             : <label className="collectible-file"><span>{t("gifts.animation")}</span><input type="file" accept=".tgs,.json,.lottie,application/json,application/x-tgsticker" onChange={(e) => void chooseFile(kind, row, e.target.files?.[0] ?? null)} /><em><FileJson2 size={13} />{row.file?.name ?? t("gifts.chooseFile")}</em></label>}
-          <div className="collectible-inline-preview">{row.animation ? <AnimationPreview data={row.animation} compact /> : row.copyDocumentID && active?.found ? <Sparkles size={16} /> : <Sparkles size={16} />}</div>
+          <div className="collectible-inline-preview">{row.animation ? <AnimationPreview data={row.animation} compact /> : <Sparkles size={16} />}</div>
           <button className="icon-btn danger" type="button" disabled={rows.length <= 2} onClick={() => { setRows(rebalanceRarity(rows.filter((value) => value.key !== row.key))); invalidate(); }} aria-label={t("collectibles.remove")}><Trash2 size={14} /></button>
           {row.fileError && <span className="collectible-file-error">{row.fileError}</span>}
         </div>)}
@@ -327,6 +447,20 @@ export function GiftCollectiblesModal({ gift, onClose, onPublished }: { gift: St
       <div className="command-body collectible-modal-body">
         {loading ? <div className="collectible-loading"><Loader2 className="spin" />{t("common.loading")}</div> : active?.found ? <section className="collectible-active">
           <div className="collectible-active-head"><div><Gem size={18} /><div><strong>{t("collectibles.activeRevision", { revision: active.revision ?? 0 })}</strong><span>{active.slug_prefix} · ⭐ {active.upgrade_stars} · {active.issued} / {active.supply_total}</span></div></div><Badge tone="good">{t("collectibles.published")}</Badge></div>
+          {/* Раунд 34: лимит возможных улучшенных подарков — правится на
+              опубликованной ревизии (supply каталога может быть увеличен). */}
+          <div className="collectible-supply-row">
+            <label>
+              <span>{t("collectibles.supplyConfig")}</span>
+              <input type="number" min="1" value={activeSupply} onChange={(e) => { setActiveSupply(e.target.value); setSupplyPreview(null); }} />
+            </label>
+            <button className="btn compact-btn" type="button" disabled={supplyBusy || !activeSupply || Number(activeSupply) === Number(active.supply_total)} onClick={() => void applySupply()}>
+              {supplyBusy ? <Loader2 className="spin" size={13} /> : <ShieldCheck size={13} />}{t("collectibles.supplyApply")}
+            </button>
+            <span className="collectible-supply-hint">{t("collectibles.supplyConfigHint")}</span>
+          </div>
+          {supplyError && <Alert>{supplyError}</Alert>}
+          {supplyPreview && <div className="gift-validation compact"><div className="gift-validation-head"><CheckCircle2 size={15} /><div><strong>{t("collectibles.supplyApplied")}</strong><span>{t("collectibles.supply")}: {String(supplyPreview.details?.supply_total ?? activeSupply)} · {t("collectibles.issued")}: {String(supplyPreview.details?.issued ?? active.issued ?? 0)}</span></div></div></div>}
           <div className="collectible-active-grid">
             {[...(active.models ?? []), ...(active.patterns ?? [])].map((attribute) => <article key={`${attribute.kind}-${attribute.id}`}><RemoteAnimation giftID={gift.GiftID} attribute={attribute} /><div><strong>{attribute.name}{attribute.crafted && <Badge>{t("collectibles.craftedBadge")}</Badge>}</strong><span>{t(`collectibles.${attribute.kind}`)} · {rarityLabel(attribute)}</span></div></article>)}
             {(active.backdrops ?? []).map((attribute) => <article key={`backdrop-${attribute.id}`}><div className="collectible-backdrop-preview" style={{ background: `radial-gradient(circle, #${(attribute.center_color ?? 0).toString(16).padStart(6, "0")}, #${(attribute.edge_color ?? 0).toString(16).padStart(6, "0")})`, color: `#${(attribute.text_color ?? 0xffffff).toString(16).padStart(6, "0")}` }}>Aa</div><div><strong>{attribute.name}</strong><span>{t("collectibles.backdrop")} · {rarityLabel(attribute)}</span></div></article>)}
@@ -341,17 +475,26 @@ export function GiftCollectiblesModal({ gift, onClose, onPublished }: { gift: St
             <label><span>{t("collectibles.slug")}</span><input value={slugPrefix} maxLength={48} onChange={(e) => { setSlugPrefix(e.target.value.toLowerCase()); invalidate(); }} /></label>
             <label><span>{t("gifts.reason")}</span><input value={reason} maxLength={1000} placeholder={t("gifts.reasonPlaceholder")} onChange={(e) => setReason(e.target.value)} /></label>
           </div>
-          {/* Раунд 33: копирование атрибутов из другой ревизии — «правка
-              существующей ревизии» без перезаливки файлов. */}
+          {/* Раунд 33/34: полное копирование ревизии + поблочное копирование
+              в шапках секций ниже. Выбор из списка ревизий подарка. */}
           <div className="gift-whitelist-block collectible-copy-block">
             <div className="gift-settings-head">
               <strong>{t("collectibles.copyTitle")}</strong>
               <span>{t("collectibles.copyHint")}</span>
             </div>
-            <div className="gift-fields-grid">
-              <label><span>{t("collectibles.revisionID")}</span><input value={copyRevisionID} placeholder={String(active?.revision ?? "")} onChange={(e) => setCopyRevisionID(e.target.value)} /></label>
-              <button className="btn" type="button" disabled={copyBusy || !copyRevisionID.trim()} onClick={() => void copyFromRevision(copyRevisionID)}>
-                {copyBusy ? <Loader2 className="spin" size={15} /> : <Copy size={15} />}{t("collectibles.copyLoad")}
+            <div className="collectible-copy-tools collectible-copy-tools-all">
+              <select
+                className="collectible-copy-select"
+                value={copyRevisionID}
+                onChange={(e) => setCopyRevisionID(e.target.value)}
+                disabled={copyBusy !== ""}
+                aria-label={t("collectibles.copySelect")}
+              >
+                <option value="">{t("collectibles.copySelect")}</option>
+                {revisionOptions}
+              </select>
+              <button className="btn" type="button" disabled={copyBusy !== "" || !copyRevisionID.trim()} onClick={() => void copyFromRevision(copyRevisionID)}>
+                {copyBusy === "all" ? <Loader2 className="spin" size={15} /> : <Copy size={15} />}{t("collectibles.copyLoadAll")}
               </button>
             </div>
             {copyError && <Alert>{copyError}</Alert>}
@@ -359,7 +502,7 @@ export function GiftCollectiblesModal({ gift, onClose, onPublished }: { gift: St
           {renderAnimatedRows("models", models, setModels)}
           {renderAnimatedRows("patterns", patterns, setPatterns)}
           <section className="collectible-section">
-            <div className="collectible-section-head"><div><strong>{t("collectibles.backdrops")}</strong><span>{t("collectibles.colorHint")}</span></div><div className="collectible-section-tools"><Badge tone={rarityTotals.backdrops > 0 ? "good" : "neutral"}>{rarityTotals.backdrops}‰</Badge><button className="btn compact-btn" type="button" onClick={() => { setBackdrops(rebalanceRarity([...backdrops, newBackdrop(backdrops)])); invalidate(); }}><Plus size={13} />{t("collectibles.addAttribute")}</button></div></div>
+            <div className="collectible-section-head"><div><strong>{t("collectibles.backdrops")}</strong><span>{t("collectibles.colorHint")}</span></div><div className="collectible-section-tools"><Badge tone={rarityTotals.backdrops > 0 ? "good" : "neutral"}>{rarityTotals.backdrops}‰</Badge>{blockCopyTools("backdrops")}<button className="btn compact-btn" type="button" onClick={() => { setBackdrops(rebalanceRarity([...backdrops, newBackdrop(backdrops)])); invalidate(); }}><Plus size={13} />{t("collectibles.addAttribute")}</button></div></div>
             <div className="collectible-rows">{backdrops.map((row, index) => <div className="collectible-row backdrop" key={row.key}>
               <div className="collectible-row-index">{index + 1}</div>
               <label><span>{t("common.name")}</span><input value={row.name} maxLength={128} onChange={(e) => { setBackdrops(backdrops.map((value) => value.key === row.key ? { ...value, name: e.target.value } : value)); invalidate(); }} /></label>

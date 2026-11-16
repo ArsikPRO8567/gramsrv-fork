@@ -210,7 +210,10 @@ func (s *Service) CreateCatalogRevision(ctx context.Context, write domain.StarGi
 // UpdateCatalogSettings публикует новую ревизию без загрузки новой анимации
 // (раунд 32): все административные параметры (цена, настройки выпуска, аукцион,
 // вайтлист) замещаются, анимационные столбцы копируются из активной ревизии
-// внутри postgres-адаптера. После записи кэш каталога сбрасывается.
+// внутри postgres-адаптера. Раунд 34: если write.Animation задана (в админке
+// выбрали новый файл в окне редактирования), она валидируется и материализуется
+// здесь же (blob + новый document/blob), как при первичном импорте — адаптер
+// записывает её вместо копии. После записи кэш каталога сбрасывается.
 func (s *Service) UpdateCatalogSettings(ctx context.Context, write domain.StarGiftCatalogSettingsWrite) (domain.StarGiftCatalogEntry, error) {
 	if s == nil || s.store == nil {
 		return domain.StarGiftCatalogEntry{}, fmt.Errorf("star gift catalog importer is not configured")
@@ -219,6 +222,61 @@ func (s *Service) UpdateCatalogSettings(ctx context.Context, write domain.StarGi
 	if write.Stars <= 0 || write.ConvertStars < 0 || write.ConvertStars > write.Stars ||
 		len([]rune(write.Title)) > domain.MaxStarGiftTitleRunes {
 		return domain.StarGiftCatalogEntry{}, domain.ErrStarGiftInvalid
+	}
+	if write.Animation != nil {
+		animation := *write.Animation
+		if animation.Width != 512 || animation.Height != 512 || len(animation.TGS) == 0 ||
+			len(animation.JSON) == 0 || len(animation.SHA256) != 32 {
+			return domain.StarGiftCatalogEntry{}, domain.ErrStarGiftInvalid
+		}
+		objectKey, err := s.blobs.Put(ctx, animation.TGS)
+		if err != nil {
+			return domain.StarGiftCatalogEntry{}, fmt.Errorf("store star gift animation: %w", err)
+		}
+		documentID, err := randomPositiveInt64()
+		if err != nil {
+			return domain.StarGiftCatalogEntry{}, err
+		}
+		accessHash, err := randomPositiveInt64()
+		if err != nil {
+			return domain.StarGiftCatalogEntry{}, err
+		}
+		fileReference := make([]byte, 16)
+		if _, err := rand.Read(fileReference); err != nil {
+			return domain.StarGiftCatalogEntry{}, fmt.Errorf("generate star gift file reference: %w", err)
+		}
+		write.Document = &domain.Document{
+			ID: documentID, AccessHash: accessHash, FileReference: fileReference,
+			Date: int(time.Now().Unix()), MimeType: "application/x-tgsticker",
+			Size: int64(len(animation.TGS)), DCID: s.dc,
+			Attributes: []domain.DocumentAttribute{
+				{Kind: domain.DocAttrImageSize, W: 512, H: 512},
+				{Kind: domain.DocAttrSticker, Alt: "🎁"},
+				{Kind: domain.DocAttrFilename, FileName: "gift.tgs"},
+			},
+		}
+		write.Blob = &domain.FileBlob{
+			LocationKey: fmt.Sprintf("doc:%d", documentID),
+			Backend:     domain.MediaBackend(s.blobs.Name()),
+			ObjectKey:   objectKey,
+			Size:        int64(len(animation.TGS)),
+			SHA256:      append([]byte(nil), animation.SHA256...),
+			MimeType:    "application/x-tgsticker",
+		}
+		animation.SourceName = strings.TrimSpace(animation.SourceName)
+		if animation.SourceName == "" {
+			animation.SourceName = "gift.tgs"
+		}
+		if animation.SourceFormat == "" {
+			animation.SourceFormat = domain.StarGiftAnimationTGS
+		}
+		if animation.FrameRate <= 0 {
+			animation.FrameRate = 30
+		}
+		if animation.FrameRate > domain.MaxStarGiftAnimationFrameRate {
+			animation.FrameRate = domain.MaxStarGiftAnimationFrameRate
+		}
+		write.Animation = &animation
 	}
 	entry, err := s.store.UpdateCatalogSettings(ctx, write)
 	if err != nil {
@@ -540,6 +598,24 @@ func (s *Service) CollectibleAnimationJSON(ctx context.Context, giftID int64, ki
 		return nil, false, nil
 	}
 	return s.store.CollectibleAnimationJSON(ctx, giftID, kind, attributeID)
+}
+
+// SetCollectibleSupplyTotal (раунд 34) правит лимит возможных улучшенных
+// подарков опубликованной ревизии коллекции (supply каталога увеличен).
+func (s *Service) SetCollectibleSupplyTotal(ctx context.Context, write domain.StarGiftCollectibleSupplyWrite) (domain.StarGiftCollectibleRevision, error) {
+	if s == nil || s.store == nil {
+		return domain.StarGiftCollectibleRevision{}, fmt.Errorf("star gift service is not configured")
+	}
+	return s.store.SetCollectibleSupplyTotal(ctx, write)
+}
+
+// CollectibleRevisionSummaries (раунд 34) перечисляет ревизии коллекции
+// подарка для выбора источника копирования атрибутов в админке.
+func (s *Service) CollectibleRevisionSummaries(ctx context.Context, giftID int64) ([]domain.StarGiftCollectibleRevisionSummary, error) {
+	if s == nil || s.store == nil {
+		return nil, fmt.Errorf("star gift service is not configured")
+	}
+	return s.store.CollectibleRevisionSummaries(ctx, giftID)
 }
 
 func (s *Service) UniqueBySlug(ctx context.Context, slug string) (domain.UniqueStarGift, bool, error) {

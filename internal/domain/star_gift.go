@@ -274,6 +274,36 @@ type StarGiftCollectibleWrite struct {
 	SourceManifestSHA256 []byte
 }
 
+// StarGiftCollectibleSupplyWrite — административное изменение лимита
+// возможных улучшенных подарков опубликованной ревизии коллекции (раунд 34).
+// Нужен, когда supply каталога увеличен: published-ревизия хранит свой
+// supply_total, и апгрейд блокируется при issued >= supply_total. Лимит можно
+// только повышать (или не менять); ниже уже выпущенного количества — отказ.
+type StarGiftCollectibleSupplyWrite struct {
+	GiftID      int64
+	SupplyTotal int
+	Actor       string
+	CommandID   string
+}
+
+// StarGiftCollectibleRevisionSummary — лёгкая строка списка ревизий коллекции
+// (раунд 34): выбор источника копирования атрибутов в админке без загрузки
+// полных метаданных всех ревизий.
+type StarGiftCollectibleRevisionSummary struct {
+	RevisionID    int64
+	GiftID        int64
+	Revision      int
+	Status        string
+	UpgradeStars  int64
+	SupplyTotal   int
+	Issued        int
+	ModelCount    int
+	PatternCount  int
+	BackdropCount int
+	CreatedBy     string
+	CreatedAt     time.Time
+}
+
 // UniqueStarGift 是一份已经发行的唯一礼物。属性、编号与 slug 一经创建永久不变。
 type UniqueStarGift struct {
 	ID                    int64
@@ -1087,9 +1117,16 @@ type StarGiftCatalogSettingsWrite struct {
 	AuctionStartDate    int
 	UpgradeVariants     int
 	Background          *StarGiftBackground
-	Actor               string
-	CommandID           string
-	Whitelist           *GiftWhitelistWrite
+	// Раунд 34: опциональная замена анимации при редактировании параметров.
+	// nil — оставить текущую анимацию (postgres-адаптер копирует её из
+	// активной ревизии); заданная — новые blob/document/анимационные столбцы
+	// (материализует app-сервис, как при первичном импорте).
+	Animation *StarGiftAnimation
+	Document  *Document
+	Blob      *FileBlob
+	Actor     string
+	CommandID string
+	Whitelist *GiftWhitelistWrite
 }
 
 // StarGiftAuctionRuntimeWrite — административные настройки РАБОЧЕЙ строки

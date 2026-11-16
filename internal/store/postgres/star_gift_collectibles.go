@@ -173,6 +173,96 @@ func (s *StarGiftStore) CollectibleRevisionFull(ctx context.Context, revisionID 
 	return collectibleRevisionByID(ctx, s.db, revisionID)
 }
 
+// SetCollectibleSupplyTotal (раунд 34) правит лимит возможных улучшенных
+// подарков ОПУБЛИКОВАННОЙ ревизии коллекции подарка. Ревизия неизменяема по
+// атрибутам, но supply_total — административный лимит: когда supply каталога
+// увеличен, лимит улучшений должен вырасти, иначе апгрейд блокируется при
+// issued >= supply_total. Лимит можно только повысить (или оставить равным):
+// значение ниже issued отклоняется, чтобы выпущенные подарки не «потерялись».
+// Активация не требуется — апгрейд-путь читает строку published-ревизии
+// напрямую; issued/slug не трогаются.
+func (s *StarGiftStore) SetCollectibleSupplyTotal(ctx context.Context, write domain.StarGiftCollectibleSupplyWrite) (domain.StarGiftCollectibleRevision, error) {
+	if write.GiftID <= 0 || write.SupplyTotal <= 0 {
+		return domain.StarGiftCollectibleRevision{}, domain.ErrStarGiftCollectibleInvalid
+	}
+	var revision domain.StarGiftCollectibleRevision
+	err := withTx(ctx, s.db, "set collectible supply total", func(tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx, `SELECT active_revision_id FROM star_gift_catalog WHERE gift_id=$1 FOR UPDATE`, write.GiftID); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return domain.ErrStarGiftNotFound
+			}
+			return fmt.Errorf("lock collectible catalog gift: %w", err)
+		}
+		var revisionID int64
+		var issued, supplyTotal int
+		var status string
+		err := tx.QueryRow(ctx, `
+SELECT r.id, r.issued, r.supply_total, r.status FROM star_gift_catalog c
+JOIN star_gift_collectible_revisions r ON r.id = c.collectible_revision_id
+WHERE c.gift_id=$1 FOR UPDATE OF r`, write.GiftID).Scan(&revisionID, &issued, &supplyTotal, &status)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return domain.ErrStarGiftCollectibleInvalid
+		}
+		if err != nil {
+			return fmt.Errorf("lock collectible revision: %w", err)
+		}
+		if status != "published" {
+			return domain.ErrStarGiftCollectibleInvalid
+		}
+		// Лимит только повышается (или не меняется): понижение ниже выпущенного
+		// количества и любой сброс запрещены — и здесь (чистая ошибка), и
+		// guard-триггером 0189 (последняя линия защиты).
+		if write.SupplyTotal < issued || write.SupplyTotal < supplyTotal {
+			return domain.ErrStarGiftCollectibleInvalid
+		}
+		if _, err := tx.Exec(ctx, `
+UPDATE star_gift_collectible_revisions SET supply_total=$2 WHERE id=$1`,
+			revisionID, write.SupplyTotal); err != nil {
+			return fmt.Errorf("update collectible supply total: %w", err)
+		}
+		revision, err = collectibleRevisionByID(ctx, tx, revisionID)
+		return err
+	})
+	if err != nil {
+		return domain.StarGiftCollectibleRevision{}, err
+	}
+	return revision, nil
+}
+
+// CollectibleRevisionSummaries (раунд 34) перечисляет ревизии коллекции
+// подарка (новые первыми) в лёгкой проекции — для выбора источника копирования
+// атрибутов в админке без загрузки полных метаданных всех ревизий.
+func (s *StarGiftStore) CollectibleRevisionSummaries(ctx context.Context, giftID int64) ([]domain.StarGiftCollectibleRevisionSummary, error) {
+	rows, err := s.db.Query(ctx, `
+SELECT r.id, r.gift_id, r.revision, r.status, r.upgrade_stars, r.supply_total, r.issued,
+       (SELECT COUNT(*) FROM star_gift_collectible_models m WHERE m.collectible_revision_id = r.id),
+       (SELECT COUNT(*) FROM star_gift_collectible_patterns p WHERE p.collectible_revision_id = r.id),
+       (SELECT COUNT(*) FROM star_gift_collectible_backdrops b WHERE b.collectible_revision_id = r.id),
+       r.created_by, r.created_at
+FROM star_gift_collectible_revisions r
+WHERE r.gift_id=$1
+ORDER BY r.revision DESC, r.id DESC`, giftID)
+	if err != nil {
+		return nil, fmt.Errorf("list collectible revision summaries: %w", err)
+	}
+	defer rows.Close()
+	out := make([]domain.StarGiftCollectibleRevisionSummary, 0, 8)
+	for rows.Next() {
+		var summary domain.StarGiftCollectibleRevisionSummary
+		if err := rows.Scan(&summary.RevisionID, &summary.GiftID, &summary.Revision, &summary.Status,
+			&summary.UpgradeStars, &summary.SupplyTotal, &summary.Issued,
+			&summary.ModelCount, &summary.PatternCount, &summary.BackdropCount,
+			&summary.CreatedBy, &summary.CreatedAt); err != nil {
+			return nil, fmt.Errorf("scan collectible revision summary: %w", err)
+		}
+		out = append(out, summary)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate collectible revision summaries: %w", err)
+	}
+	return out, nil
+}
+
 func (s *StarGiftStore) ActiveCollectibleProjection(ctx context.Context, giftID int64, samplePerKind int) (domain.StarGiftCollectibleRevision, bool, error) {
 	revisionID, ok, err := activeCollectibleRevisionID(ctx, s.db, giftID)
 	if err != nil || !ok {
