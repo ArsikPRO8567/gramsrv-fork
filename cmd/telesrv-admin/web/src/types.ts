@@ -410,6 +410,9 @@ export type StarGiftCollectibleAttributeRow = {
   rarity_permille: number;
   crafted: boolean;
   official_document_id: string;
+  // Раунд 33: document_id из ревизии — нужен редактору коллекций для
+  // копирования атрибута в новую ревизию без перезаливки файла.
+  document_id?: string;
   sort_order: number;
   source_name?: string;
   source_format?: "tgs" | "lottie";
@@ -428,6 +431,23 @@ export type StarGiftCollectiblePreview = {
   supply_total?: number;
   issued?: number;
   slug_prefix?: string;
+  models?: StarGiftCollectibleAttributeRow[];
+  patterns?: StarGiftCollectibleAttributeRow[];
+  backdrops?: StarGiftCollectibleAttributeRow[];
+};
+
+// Раунд 33: любая ревизия коллекции по id — источник копирования моделей,
+// узоров и фонов в новую ревизию («правка существующей ревизии»).
+export type StarGiftCollectibleRevision = {
+  found: boolean;
+  revision_id: string;
+  gift_id: string;
+  revision: number;
+  status: "draft" | "published";
+  upgrade_stars: string;
+  supply_total: number;
+  issued: number;
+  slug_prefix: string;
   models?: StarGiftCollectibleAttributeRow[];
   patterns?: StarGiftCollectibleAttributeRow[];
   backdrops?: StarGiftCollectibleAttributeRow[];

@@ -688,6 +688,14 @@ func TestSavedStarGiftProjectionAdvertisesFreeCollectibleUpgrade(t *testing.T) {
 	} else if _, ok := gift.GetUpgradeStars(); ok {
 		t.Fatal("free-upgrade projection must not expose a zero upgrade_stars price")
 	}
+	// Раунд 33: клиент выбирает caption «Улучшить бесплатно» (и прямой
+	// payments.upgradeStarGift без платёжной формы) только при
+	// savedStarGift.upgrade_stars > 0 — без положительной обёртки рисуется
+	// платное «Улучшить». Цена каталога у аукционного подарка нулевая,
+	// поэтому используется минимальное положительное значение.
+	if wrapper, ok := projected[0].GetUpgradeStars(); !ok || wrapper <= 0 {
+		t.Fatalf("free-upgrade wrapper upgrade_stars = %d ok=%v, want positive (UpgradeButtonFree caption)", wrapper, ok)
+	}
 
 	// Исчерпанный пул: проекция остаётся консистентной с сервисным сообщением
 	// (кнопка на месте; сам апгрейд отвечает STARGIFT_COLLECTIBLE_SOLD_OUT).
@@ -698,6 +706,9 @@ func TestSavedStarGiftProjectionAdvertisesFreeCollectibleUpgrade(t *testing.T) {
 	if len(projected) != 1 || !projected[0].CanUpgrade {
 		t.Fatalf("exhausted free-upgrade saved gift = %#v, want can_upgrade consistent with service message", projected)
 	}
+	if wrapper, ok := projected[0].GetUpgradeStars(); !ok || wrapper <= 0 {
+		t.Fatalf("exhausted free-upgrade wrapper upgrade_stars = %d ok=%v, want positive", wrapper, ok)
+	}
 
 	// Платные улучшения ведут себя как раньше: пул закрыт — кнопки нет.
 	paidClosed := map[int64]domain.StarGiftCollectibleAvailability{
@@ -706,6 +717,21 @@ func TestSavedStarGiftProjectionAdvertisesFreeCollectibleUpgrade(t *testing.T) {
 	projected = tgSavedStarGifts(0, []domain.SavedStarGift{saved}, map[int64]domain.StarGift{auctionGift.RevisionID: auctionGift}, paidClosed)
 	if len(projected) != 1 || projected[0].CanUpgrade {
 		t.Fatalf("closed paid pool = %#v, want no can_upgrade", projected)
+	}
+	if _, ok := projected[0].GetUpgradeStars(); ok {
+		t.Fatalf("closed paid pool must not expose wrapper upgrade_stars")
+	}
+
+	// Цена каталога > 0 переносится в обёртку как есть: клиент показывает
+	// «Улучшить бесплатно», а значение означает цену, покрытую ставкой.
+	pricedCatalog := auctionGift
+	pricedCatalog.UpgradeStars = 25000
+	projected = tgSavedStarGifts(0, []domain.SavedStarGift{saved}, map[int64]domain.StarGift{pricedCatalog.RevisionID: pricedCatalog}, freePool)
+	if len(projected) != 1 || !projected[0].CanUpgrade {
+		t.Fatalf("priced free-upgrade saved gift = %#v, want can_upgrade", projected)
+	}
+	if wrapper, ok := projected[0].GetUpgradeStars(); !ok || wrapper != 25000 {
+		t.Fatalf("priced free-upgrade wrapper upgrade_stars = %d ok=%v, want 25000", wrapper, ok)
 	}
 }
 

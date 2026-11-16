@@ -1,21 +1,28 @@
-import { CheckCircle2, FileJson2, Gem, Loader2, Plus, ShieldCheck, Sparkles, Trash2, Upload, X } from "lucide-react";
+import { CheckCircle2, Copy, FileJson2, Gem, Loader2, Plus, ShieldCheck, Sparkles, Trash2, Upload, X } from "lucide-react";
 import lottie from "lottie-web/build/player/lottie_light_canvas";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { api, errorMessage } from "../api";
 import { Alert, Badge } from "../components/ui";
 import { useI18n } from "../i18n";
-import type { CommandResult, StarGiftCollectibleAttributeRow, StarGiftCollectiblePreview, StarGiftRow } from "../types";
+import type { CommandResult, StarGiftCollectibleAttributeRow, StarGiftCollectiblePreview, StarGiftCollectibleRevision, StarGiftRow } from "../types";
 
 type AnimationData = Record<string, unknown>;
 type AnimatedDraft = {
   key: string;
   name: string;
+  // Раунд 33: тип редкости — permille (обычная, вес обычного апгрейда) или
+  // именованная крафтовая (uncommon/rare/epic/legendary): rarity_permille в БД
+  // NULL, атрибут помечается crafted.
+  rarityKind: "permille" | "uncommon" | "rare" | "epic" | "legendary";
   rarity: string;
   sortOrder: string;
   file: File | null;
   animation: AnimationData | null;
   fileError: string;
+  // Раунд 33: копия из другой ревизии — document_id исходного атрибута
+  // (файл не загружается, документ и анимация переиспользуются).
+  copyDocumentID: string;
 };
 type BackdropDraft = {
   key: string;
@@ -38,15 +45,19 @@ const backdropPalettes = [
   { center: "#d95878", edge: "#7b2944", pattern: "#f5a1b6", text: "#ffffff" }
 ];
 
-function rebalanceRarity<T extends { rarity: string }>(rows: T[]): T[] {
-  if (!rows.length) return rows;
-  const base = Math.floor(1000 / rows.length);
-  const remainder = 1000 % rows.length;
-  return rows.map((row, index) => ({ ...row, rarity: String(base + (index < remainder ? 1 : 0)) }));
+// Раунд 33: перераспределение весов затрагивает только permille-атрибуты —
+// крафтовые (именованная редкость) не участвуют в обычном апгрейде.
+function rebalanceRarity<T extends { key: string; rarityKind?: string; rarity: string }>(rows: T[]): T[] {
+  const permille = rows.filter((row) => (row.rarityKind ?? "permille") === "permille");
+  if (!permille.length) return rows;
+  const base = Math.floor(1000 / permille.length);
+  const remainder = 1000 % permille.length;
+  const weights = new Map(permille.map((row, index) => [row.key, String(base + (index < remainder ? 1 : 0))]));
+  return rows.map((row) => ((row.rarityKind ?? "permille") === "permille" ? { ...row, rarity: weights.get(row.key) ?? row.rarity } : row));
 }
 
 const newAnimated = (kind: string, sortOrder: number): AnimatedDraft => ({
-  key: nextKey(kind), name: "", rarity: "1", sortOrder: String(sortOrder), file: null, animation: null, fileError: ""
+  key: nextKey(kind), name: "", rarityKind: "permille", rarity: "1", sortOrder: String(sortOrder), file: null, animation: null, fileError: "", copyDocumentID: ""
 });
 
 function newBackdrop(rows: BackdropDraft[]): BackdropDraft {
@@ -93,7 +104,7 @@ function RemoteAnimation({ giftID, attribute }: { giftID: string; attribute: Sta
 async function parseAnimationFile(file: File): Promise<AnimationData> {
   const bytes = new Uint8Array(await file.arrayBuffer());
   let raw: Uint8Array = bytes;
-  if (bytes.length >= 2 && bytes[0] === 0x1f && bytes[1] === 0x8b) {
+  if (bytes.length >= 2 && bytes[0] === 0x1f && bytes[1] === 0x8f) {
     if (!("DecompressionStream" in window)) throw new Error("This browser cannot preview TGS files");
     const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream("gzip"));
     raw = new Uint8Array(await new Response(stream).arrayBuffer());
@@ -104,7 +115,11 @@ async function parseAnimationFile(file: File): Promise<AnimationData> {
 }
 
 const colorNumber = (value: string) => Number.parseInt(value.replace("#", ""), 16);
+const hexColor = (value: number | undefined, fallback: string) =>
+  value === undefined || value === null ? fallback : `#${(value & 0xffffff).toString(16).padStart(6, "0")}`;
 const rarityLabel = (attribute: StarGiftCollectibleAttributeRow) => attribute.rarity_kind === "permille" ? `${attribute.rarity_permille}‰` : attribute.rarity_kind;
+
+const RARITY_KINDS = ["permille", "uncommon", "rare", "epic", "legendary"] as const;
 
 export function GiftCollectiblesModal({ gift, onClose, onPublished }: { gift: StarGiftRow; onClose: () => void; onPublished: () => void }) {
   const { t } = useI18n();
@@ -120,6 +135,12 @@ export function GiftCollectiblesModal({ gift, onClose, onPublished }: { gift: St
   const [models, setModels] = useState<AnimatedDraft[]>(() => initialAnimated("model"));
   const [patterns, setPatterns] = useState<AnimatedDraft[]>(() => initialAnimated("pattern"));
   const [backdrops, setBackdrops] = useState<BackdropDraft[]>(initialBackdrops);
+  // Раунд 33: копирование атрибутов из другой ревизии («правка существующей
+  // ревизии» = копия активной ревизии + правки поверх).
+  const [copyRevisionID, setCopyRevisionID] = useState("");
+  const [copyBusy, setCopyBusy] = useState(false);
+  const [copyError, setCopyError] = useState("");
+  const [copySource, setCopySource] = useState<StarGiftCollectibleRevision | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -130,26 +151,31 @@ export function GiftCollectiblesModal({ gift, onClose, onPublished }: { gift: St
         setUpgradeStars(String(value.upgrade_stars ?? 100));
         setSupplyTotal(String(value.supply_total ?? 1000));
         setSlugPrefix(value.slug_prefix ?? `gift-${gift.GiftID}`);
+        setCopyRevisionID(String(value.revision ?? ""));
       }
     }).catch((err) => setError(errorMessage(err))).finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
   }, [gift.GiftID]);
 
   const rarityTotals = useMemo(() => ({
-    models: models.reduce((sum, value) => sum + Number(value.rarity || 0), 0),
-    patterns: patterns.reduce((sum, value) => sum + Number(value.rarity || 0), 0),
+    models: models.reduce((sum, value) => sum + (value.rarityKind === "permille" ? Number(value.rarity || 0) : 0), 0),
+    patterns: patterns.reduce((sum, value) => sum + (value.rarityKind === "permille" ? Number(value.rarity || 0) : 0), 0),
     backdrops: backdrops.reduce((sum, value) => sum + Number(value.rarity || 0), 0)
   }), [models, patterns, backdrops]);
 
   const invalidate = () => setPreview(null);
-  const updateAnimated = (kind: "models" | "patterns", key: string, patch: Partial<AnimatedDraft>) => {
+  const updateAnimated = (kind: "models" | "patterns", key: string, patch: Partial<AnimatedDraft>, rebalance = false) => {
     const setter = kind === "models" ? setModels : setPatterns;
-    setter((rows) => rows.map((row) => row.key === key ? { ...row, ...patch } : row));
+    setter((rows) => {
+      const updated = rows.map((row) => row.key === key ? { ...row, ...patch } : row);
+      return rebalance ? rebalanceRarity(updated) : updated;
+    });
     invalidate();
   };
 
   async function chooseFile(kind: "models" | "patterns", row: AnimatedDraft, file: File | null) {
-    updateAnimated(kind, row.key, { file, animation: null, fileError: "" });
+    // Загрузка своего файла отменяет режим копии для этой записи.
+    updateAnimated(kind, row.key, { file, copyDocumentID: "", animation: null, fileError: "" });
     if (!file) return;
     try {
       const animation = await parseAnimationFile(file);
@@ -159,24 +185,89 @@ export function GiftCollectiblesModal({ gift, onClose, onPublished }: { gift: St
     }
   }
 
+  // Раунд 33: загрузить атрибуты из указанной ревизии. Модели/узоры становятся
+  // копиями (copy_document_id, файл не нужен), фоны переносятся как данные.
+  async function copyFromRevision(sourceID: string) {
+    const id = sourceID.trim();
+    if (!id) return;
+    setCopyBusy(true); setCopyError("");
+    try {
+      const revision = await api.giftCollectibleRevision(id);
+      if (!revision.found) throw new Error(t("collectibles.copyFailed"));
+      const animated = (kind: "model" | "pattern", rows: StarGiftCollectibleAttributeRow[] | undefined) =>
+        (rows ?? []).filter((row) => row.kind === kind && row.document_id).map((row, index) => ({
+          key: nextKey(kind),
+          name: row.name,
+          rarityKind: (RARITY_KINDS as readonly string[]).includes(row.rarity_kind) ? row.rarity_kind as AnimatedDraft["rarityKind"] : "permille",
+          rarity: String(row.rarity_permille || 1),
+          sortOrder: String(row.sort_order ?? index),
+          file: null,
+          animation: null,
+          fileError: "",
+          copyDocumentID: row.document_id ?? ""
+        } as AnimatedDraft));
+      setModels(animated("model", revision.models));
+      setPatterns(animated("pattern", revision.patterns));
+      setBackdrops((revision.backdrops ?? []).map((row, index) => ({
+        key: nextKey("backdrop"),
+        name: row.name,
+        backdropID: String(row.backdrop_id ?? index + 1),
+        rarity: String(row.rarity_permille || 1),
+        sortOrder: String(row.sort_order ?? index),
+        center: hexColor(row.center_color, backdropPalettes[index % backdropPalettes.length].center),
+        edge: hexColor(row.edge_color, backdropPalettes[index % backdropPalettes.length].edge),
+        pattern: hexColor(row.pattern_color, backdropPalettes[index % backdropPalettes.length].pattern),
+        text: hexColor(row.text_color, "#ffffff")
+      } as BackdropDraft)));
+      setUpgradeStars(String(revision.upgrade_stars ?? "0"));
+      setSupplyTotal(String(revision.supply_total ?? 1000));
+      setSlugPrefix(revision.slug_prefix ?? `gift-${gift.GiftID}`);
+      setCopySource(revision);
+      setPreview(null);
+    } catch (err) {
+      setCopyError(errorMessage(err) || t("collectibles.copyFailed"));
+      setCopySource(null);
+    } finally {
+      setCopyBusy(false);
+    }
+  }
+
   function buildForm(confirm: boolean, commandID = "") {
     if (!reason.trim()) throw new Error(t("action.reasonRequired"));
     if (models.length < 2 || patterns.length < 2 || backdrops.length < 2) throw new Error(t("collectibles.minimumAttributes"));
     const backdropIDs = backdrops.map((row) => Number(row.backdropID));
     if (new Set(backdropIDs).size !== backdropIDs.length) throw new Error(t("collectibles.duplicateBackdropID"));
-    for (const row of [...models, ...patterns]) if (!row.file) throw new Error(t("collectibles.fileRequired"));
+    for (const row of [...models, ...patterns]) {
+      if (!row.copyDocumentID && !row.file) throw new Error(t("collectibles.fileRequired"));
+    }
     const form = new FormData();
-    const animatedMetadata = (rows: AnimatedDraft[]) => rows.map((row) => ({ name: row.name.trim(), rarity_permille: Number(row.rarity), sort_order: Number(row.sortOrder), file_key: row.key }));
-    form.set("metadata", JSON.stringify({
+    const animatedMetadata = (rows: AnimatedDraft[]) => rows.map((row) => {
+      const entry: Record<string, unknown> = {
+        name: row.name.trim(),
+        rarity_permille: row.rarityKind === "permille" ? Number(row.rarity) : 0,
+        sort_order: Number(row.sortOrder)
+      };
+      if (row.rarityKind !== "permille") entry.rarity_kind = row.rarityKind;
+      // Копия из ревизии: файл не прикладывается, документ переиспользуется.
+      if (row.copyDocumentID) entry.copy_document_id = row.copyDocumentID;
+      else entry.file_key = row.key;
+      return entry;
+    });
+    const metadata: Record<string, unknown> = {
       command_id: commandID, reason: reason.trim(), confirm,
-		upgrade_stars: upgradeStars, supply_total: Number(supplyTotal), slug_prefix: slugPrefix.trim().toLowerCase(),
+      upgrade_stars: upgradeStars, supply_total: Number(supplyTotal), slug_prefix: slugPrefix.trim().toLowerCase(),
       models: animatedMetadata(models), patterns: animatedMetadata(patterns),
       backdrops: backdrops.map((row) => ({
         name: row.name.trim(), backdrop_id: Number(row.backdropID), rarity_permille: Number(row.rarity), sort_order: Number(row.sortOrder),
         center_color: colorNumber(row.center), edge_color: colorNumber(row.edge), pattern_color: colorNumber(row.pattern), text_color: colorNumber(row.text)
       }))
-    }));
-    for (const row of [...models, ...patterns]) form.set(row.key, row.file as File, (row.file as File).name);
+    };
+    const source = copySource;
+    if (source && [...models, ...patterns].some((row) => row.copyDocumentID)) {
+      metadata.copy_from_revision_id = source.revision_id;
+    }
+    form.set("metadata", JSON.stringify(metadata));
+    for (const row of [...models, ...patterns]) if (row.file && !row.copyDocumentID) form.set(row.key, row.file, row.file.name);
     return form;
   }
 
@@ -207,10 +298,19 @@ export function GiftCollectiblesModal({ gift, onClose, onPublished }: { gift: St
         {rows.map((row, index) => <div className="collectible-row animated" key={row.key}>
           <div className="collectible-row-index">{index + 1}</div>
           <label><span>{t("common.name")}</span><input value={row.name} maxLength={128} onChange={(e) => updateAnimated(kind, row.key, { name: e.target.value })} /></label>
-          <label><span>{t("collectibles.rarity")}</span><input type="number" min="1" max="1000" value={row.rarity} onChange={(e) => updateAnimated(kind, row.key, { rarity: e.target.value })} /></label>
+          <label><span>{t("collectibles.rarityKind")}</span>
+            <select value={row.rarityKind} onChange={(e) => updateAnimated(kind, row.key, { rarityKind: e.target.value as AnimatedDraft["rarityKind"], rarity: "1" }, true)}>
+              {RARITY_KINDS.map((value) => <option key={value} value={value}>{t(`collectibles.rarityKind.${value}`)}</option>)}
+            </select>
+          </label>
+          {row.rarityKind === "permille"
+            ? <label><span>{t("collectibles.rarity")}</span><input type="number" min="1" max="1000" value={row.rarity} onChange={(e) => updateAnimated(kind, row.key, { rarity: e.target.value })} /></label>
+            : <label><span>&nbsp;</span><Badge>{t("collectibles.craftedBadge")}</Badge></label>}
           <label><span>{t("gifts.sortOrder")}</span><input type="number" value={row.sortOrder} onChange={(e) => updateAnimated(kind, row.key, { sortOrder: e.target.value })} /></label>
-          <label className="collectible-file"><span>{t("gifts.animation")}</span><input type="file" accept=".tgs,.json,.lottie,application/json,application/x-tgsticker" onChange={(e) => void chooseFile(kind, row, e.target.files?.[0] ?? null)} /><em><FileJson2 size={13} />{row.file?.name ?? t("gifts.chooseFile")}</em></label>
-          <div className="collectible-inline-preview">{row.animation ? <AnimationPreview data={row.animation} compact /> : <Sparkles size={16} />}</div>
+          {row.copyDocumentID
+            ? <label className="collectible-file copied"><span>{t("gifts.animation")}</span><em><Copy size={13} />{t("collectibles.copiedBadge")} #{row.copyDocumentID}</em></label>
+            : <label className="collectible-file"><span>{t("gifts.animation")}</span><input type="file" accept=".tgs,.json,.lottie,application/json,application/x-tgsticker" onChange={(e) => void chooseFile(kind, row, e.target.files?.[0] ?? null)} /><em><FileJson2 size={13} />{row.file?.name ?? t("gifts.chooseFile")}</em></label>}
+          <div className="collectible-inline-preview">{row.animation ? <AnimationPreview data={row.animation} compact /> : row.copyDocumentID && active?.found ? <Sparkles size={16} /> : <Sparkles size={16} />}</div>
           <button className="icon-btn danger" type="button" disabled={rows.length <= 2} onClick={() => { setRows(rebalanceRarity(rows.filter((value) => value.key !== row.key))); invalidate(); }} aria-label={t("collectibles.remove")}><Trash2 size={14} /></button>
           {row.fileError && <span className="collectible-file-error">{row.fileError}</span>}
         </div>)}
@@ -228,7 +328,7 @@ export function GiftCollectiblesModal({ gift, onClose, onPublished }: { gift: St
         {loading ? <div className="collectible-loading"><Loader2 className="spin" />{t("common.loading")}</div> : active?.found ? <section className="collectible-active">
           <div className="collectible-active-head"><div><Gem size={18} /><div><strong>{t("collectibles.activeRevision", { revision: active.revision ?? 0 })}</strong><span>{active.slug_prefix} · ⭐ {active.upgrade_stars} · {active.issued} / {active.supply_total}</span></div></div><Badge tone="good">{t("collectibles.published")}</Badge></div>
           <div className="collectible-active-grid">
-            {[...(active.models ?? []), ...(active.patterns ?? [])].map((attribute) => <article key={`${attribute.kind}-${attribute.id}`}><RemoteAnimation giftID={gift.GiftID} attribute={attribute} /><div><strong>{attribute.name}{attribute.crafted && <Badge>crafted</Badge>}</strong><span>{t(`collectibles.${attribute.kind}`)} · {rarityLabel(attribute)}</span></div></article>)}
+            {[...(active.models ?? []), ...(active.patterns ?? [])].map((attribute) => <article key={`${attribute.kind}-${attribute.id}`}><RemoteAnimation giftID={gift.GiftID} attribute={attribute} /><div><strong>{attribute.name}{attribute.crafted && <Badge>{t("collectibles.craftedBadge")}</Badge>}</strong><span>{t(`collectibles.${attribute.kind}`)} · {rarityLabel(attribute)}</span></div></article>)}
             {(active.backdrops ?? []).map((attribute) => <article key={`backdrop-${attribute.id}`}><div className="collectible-backdrop-preview" style={{ background: `radial-gradient(circle, #${(attribute.center_color ?? 0).toString(16).padStart(6, "0")}, #${(attribute.edge_color ?? 0).toString(16).padStart(6, "0")})`, color: `#${(attribute.text_color ?? 0xffffff).toString(16).padStart(6, "0")}` }}>Aa</div><div><strong>{attribute.name}</strong><span>{t("collectibles.backdrop")} · {rarityLabel(attribute)}</span></div></article>)}
           </div>
         </section> : <div className="collectible-empty"><Gem size={22} /><div><strong>{t("collectibles.noPool")}</strong><span>{t("collectibles.noPoolHint")}</span></div></div>}
@@ -236,10 +336,25 @@ export function GiftCollectiblesModal({ gift, onClose, onPublished }: { gift: St
         <section className="collectible-definition">
           <div className="collectible-definition-head"><div><strong>{t("collectibles.publishNew")}</strong><span>{t("collectibles.immutableHint")}</span></div><div className="gift-format-chips"><span>TGS</span><span>Lottie JSON</span></div></div>
           <div className="gift-fields-grid collectible-main-fields">
-            <label><span>{t("collectibles.upgradeStars")}</span><input type="number" min="1" value={upgradeStars} onChange={(e) => { setUpgradeStars(e.target.value); invalidate(); }} /></label>
+            <label><span>{t("collectibles.upgradeStars")}</span><input type="number" min="0" value={upgradeStars} onChange={(e) => { setUpgradeStars(e.target.value); invalidate(); }} /></label>
             <label><span>{t("collectibles.supply")}</span><input type="number" min="1" value={supplyTotal} onChange={(e) => { setSupplyTotal(e.target.value); invalidate(); }} /></label>
             <label><span>{t("collectibles.slug")}</span><input value={slugPrefix} maxLength={48} onChange={(e) => { setSlugPrefix(e.target.value.toLowerCase()); invalidate(); }} /></label>
             <label><span>{t("gifts.reason")}</span><input value={reason} maxLength={1000} placeholder={t("gifts.reasonPlaceholder")} onChange={(e) => setReason(e.target.value)} /></label>
+          </div>
+          {/* Раунд 33: копирование атрибутов из другой ревизии — «правка
+              существующей ревизии» без перезаливки файлов. */}
+          <div className="gift-whitelist-block collectible-copy-block">
+            <div className="gift-settings-head">
+              <strong>{t("collectibles.copyTitle")}</strong>
+              <span>{t("collectibles.copyHint")}</span>
+            </div>
+            <div className="gift-fields-grid">
+              <label><span>{t("collectibles.revisionID")}</span><input value={copyRevisionID} placeholder={String(active?.revision ?? "")} onChange={(e) => setCopyRevisionID(e.target.value)} /></label>
+              <button className="btn" type="button" disabled={copyBusy || !copyRevisionID.trim()} onClick={() => void copyFromRevision(copyRevisionID)}>
+                {copyBusy ? <Loader2 className="spin" size={15} /> : <Copy size={15} />}{t("collectibles.copyLoad")}
+              </button>
+            </div>
+            {copyError && <Alert>{copyError}</Alert>}
           </div>
           {renderAnimatedRows("models", models, setModels)}
           {renderAnimatedRows("patterns", patterns, setPatterns)}

@@ -797,6 +797,10 @@ func (fakeService) StarGiftCollectibles(context.Context, int64) (domain.StarGift
 	return domain.StarGiftUpgradePreview{}, false, nil
 }
 
+func (fakeService) StarGiftCollectibleRevision(context.Context, int64) (domain.StarGiftCollectibleRevision, error) {
+	return domain.StarGiftCollectibleRevision{}, domain.ErrStarGiftCollectibleInvalid
+}
+
 func (fakeService) StarGiftCollectibleAnimation(context.Context, int64, domain.StarGiftCollectibleAttributeKind, int64) ([]byte, bool, error) {
 	return []byte(`{"v":"5.7","w":512,"h":512}`), true, nil
 }

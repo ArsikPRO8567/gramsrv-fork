@@ -83,6 +83,8 @@ func (s *server) routes() http.Handler {
 	mux.Handle("GET /api/gifts/{id}/animation", s.requireAuthAPI(http.HandlerFunc(s.handleStarGiftAnimationAPI)))
 	mux.Handle("GET /api/gifts/{id}/collectibles", s.requireAuthAPI(http.HandlerFunc(s.handleStarGiftCollectiblesAPI)))
 	mux.Handle("GET /api/gifts/{id}/collectibles/{kind}/{attribute_id}/animation", s.requireAuthAPI(http.HandlerFunc(s.handleStarGiftCollectibleAnimationAPI)))
+	// Раунд 33: любая ревизия коллекции по id — источник копирования атрибутов.
+	mux.Handle("GET /api/gifts/collectibles/revisions/{revision_id}", s.requireAuthAPI(http.HandlerFunc(s.handleStarGiftCollectibleRevisionAPI)))
 	mux.Handle("GET /api/collectible-usernames", s.requireAuthAPI(http.HandlerFunc(s.handleCollectibleUsernamesAPI)))
 	mux.Handle("GET /api/collectible-usernames/{id}", s.requireAuthAPI(http.HandlerFunc(s.handleCollectibleUsernameDetailAPI)))
 	mux.Handle("GET /api/collectible-phones", s.requireAuthAPI(http.HandlerFunc(s.handleCollectiblePhonesAPI)))
@@ -587,6 +589,17 @@ func (s *server) handleStarGiftCollectibleAnimationAPI(w http.ResponseWriter, r 
 		return
 	}
 	s.proxyAdminJSON(w, r, fmt.Sprintf("/v1/gifts/%d/collectibles/%s/%d/animation", giftID, kind, attributeID), 4<<20)
+}
+
+// handleStarGiftCollectibleRevisionAPI (раунд 32) проксирует чтение ЛЮБОЙ
+// ревизии коллекции по id — источник копирования моделей/узоров/фонов.
+func (s *server) handleStarGiftCollectibleRevisionAPI(w http.ResponseWriter, r *http.Request) {
+	revisionID, err := strconv.ParseInt(r.PathValue("revision_id"), 10, 64)
+	if err != nil || revisionID <= 0 {
+		writeAPIError(w, http.StatusBadRequest, "invalid revision id")
+		return
+	}
+	s.proxyAdminJSONNoStore(w, r, fmt.Sprintf("/v1/gifts/collectibles/revisions/%d", revisionID), 4<<20)
 }
 
 func (s *server) proxyAdminJSON(w http.ResponseWriter, r *http.Request, apiPath string, maxBytes int64) {
@@ -2210,15 +2223,16 @@ func (s *server) handleImportOfficialStarGiftAPI(w http.ResponseWriter, r *http.
 }
 
 type publishStarGiftCollectiblesAPIRequest struct {
-	CommandID    string                                     `json:"command_id"`
-	Reason       string                                     `json:"reason"`
-	Confirm      bool                                       `json:"confirm"`
-	UpgradeStars int64                                      `json:"upgrade_stars,string"`
-	SupplyTotal  int                                        `json:"supply_total"`
-	SlugPrefix   string                                     `json:"slug_prefix"`
-	Models       []admin.StarGiftCollectibleAnimationUpload `json:"models"`
-	Patterns     []admin.StarGiftCollectibleAnimationUpload `json:"patterns"`
-	Backdrops    []admin.StarGiftCollectibleBackdropInput   `json:"backdrops"`
+	CommandID          string                                     `json:"command_id"`
+	Reason             string                                     `json:"reason"`
+	Confirm            bool                                       `json:"confirm"`
+	UpgradeStars       int64                                      `json:"upgrade_stars,string"`
+	SupplyTotal        int                                        `json:"supply_total"`
+	SlugPrefix         string                                     `json:"slug_prefix"`
+	Models             []admin.StarGiftCollectibleAnimationUpload `json:"models"`
+	Patterns           []admin.StarGiftCollectibleAnimationUpload `json:"patterns"`
+	Backdrops          []admin.StarGiftCollectibleBackdropInput   `json:"backdrops"`
+	CopyFromRevisionID int64                                      `json:"copy_from_revision_id,string,omitempty"`
 }
 
 func (s *server) handlePublishStarGiftCollectiblesAPI(w http.ResponseWriter, r *http.Request) {
@@ -2249,6 +2263,12 @@ func (s *server) handlePublishStarGiftCollectiblesAPI(w http.ResponseWriter, r *
 	}
 	seen := make(map[string]struct{}, len(body.Models)+len(body.Patterns))
 	load := func(upload *admin.StarGiftCollectibleAnimationUpload) error {
+		// Раунд 33: скопированные записи (copy_document_id>0) файл не несут —
+		// документ переиспользуется из ревизии copy_from_revision_id.
+		if upload.CopyDocumentID > 0 {
+			upload.FileKey = ""
+			return nil
+		}
 		upload.FileKey = strings.TrimSpace(upload.FileKey)
 		if upload.FileKey == "" {
 			return errors.New("animation file key is required")
@@ -2286,6 +2306,7 @@ func (s *server) handlePublishStarGiftCollectiblesAPI(w http.ResponseWriter, r *
 		CommandMeta: s.commandMetaFromAPI(r, body.CommandID, body.Reason, body.Confirm, "publish-gift-collectibles"),
 		GiftID:      giftID, UpgradeStars: body.UpgradeStars, SupplyTotal: body.SupplyTotal,
 		SlugPrefix: body.SlugPrefix, Models: body.Models, Patterns: body.Patterns, Backdrops: body.Backdrops,
+		CopyFromRevisionID: body.CopyFromRevisionID,
 	}
 	result, err := s.callAdminCollectibleMultipart(r.Context(), fmt.Sprintf("/v1/gifts/%d/collectibles/publish", giftID), req)
 	writeCommandResultAPI(w, result, err)
@@ -3089,6 +3110,10 @@ func (s *server) callAdminCollectibleMultipart(ctx context.Context, apiPath stri
 	}
 	writeUploads := func(uploads []admin.StarGiftCollectibleAnimationUpload) error {
 		for _, upload := range uploads {
+			// Раунд 33: копии без файла не попадают в multipart.
+			if upload.CopyDocumentID > 0 || upload.Data == nil {
+				continue
+			}
 			part, err := writer.CreateFormFile(upload.FileKey, upload.FileName)
 			if err != nil {
 				return err

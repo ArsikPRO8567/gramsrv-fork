@@ -405,6 +405,85 @@ SELECT active_revision_id FROM star_gift_catalog WHERE gift_id=$1 FOR UPDATE`, w
 SELECT COALESCE(MAX(revision), 0) + 1 FROM star_gift_catalog_revisions WHERE gift_id=$1`, write.GiftID).Scan(&revision); err != nil {
 			return fmt.Errorf("count star gift revisions: %w", err)
 		}
+		// Раунд 33 (фикс SQLSTATE 23505): констрейнт
+		// star_gift_catalog_revisions_document_uniq UNIQUE(document_id) запрещает
+		// двум ревизиям делить один документ, поэтому копия ревизии со
+		// «чужим» document_id падала на duplicate key. Новый экземпляр ревизии
+		// получает КОПИЮ документа анимации: новый случайный document_id, та же
+		// метадата (access_hash/file_reference/mime/attributes) и та же ссылка
+		// на контентно-адресованный blob (object_key = SHA-256, физический файл
+		// не дублируется) — данные анимации неизменны, меняются только
+		// административные параметры.
+		var sourceDocumentID, accessHash int64
+		var fileReference []byte
+		var docDate int
+		var docMimeType string
+		var docSize int64
+		var docDCID int
+		var docAttributes, docThumbs []byte
+		if err := tx.QueryRow(ctx, `
+SELECT d.id, d.access_hash, d.file_reference, d.date, d.mime_type, d.size, d.dc_id,
+       COALESCE(d.attributes, '[]'::jsonb), COALESCE(d.thumbs, '[]'::jsonb)
+FROM star_gift_catalog_revisions r
+JOIN documents d ON d.id = r.document_id
+WHERE r.id = (SELECT active_revision_id FROM star_gift_catalog WHERE gift_id=$1)`,
+			write.GiftID).Scan(&sourceDocumentID, &accessHash, &fileReference, &docDate, &docMimeType,
+			&docSize, &docDCID, &docAttributes, &docThumbs); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return domain.ErrStarGiftNotFound
+			}
+			return fmt.Errorf("load star gift animation document: %w", err)
+		}
+		var blobBackend, blobObjectKey, blobMimeType string
+		var blobSize int64
+		var blobSHA256 []byte
+		hasBlob := false
+		var blobLocation string
+		if err := tx.QueryRow(ctx, `
+SELECT location_key, backend, object_key, size, sha256, mime_type FROM file_blobs
+WHERE location_key = 'doc:' || $1::text`, sourceDocumentID).Scan(&blobLocation, &blobBackend,
+			&blobObjectKey, &blobSize, &blobSHA256, &blobMimeType); err == nil {
+			hasBlob = true
+		} else if !errors.Is(err, pgx.ErrNoRows) {
+			return fmt.Errorf("load star gift animation blob: %w", err)
+		}
+		var documentID int64
+		for attempt := 0; attempt < 8; attempt++ {
+			candidate, err := randomPositiveInt64()
+			if err != nil {
+				return err
+			}
+			var exists bool
+			if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM documents WHERE id=$1)`, candidate).Scan(&exists); err != nil {
+				return fmt.Errorf("check star gift document id: %w", err)
+			}
+			if exists {
+				continue
+			}
+			documentID = candidate
+			break
+		}
+		if documentID == 0 {
+			return domain.ErrStarGiftUnavailable
+		}
+		if _, err := tx.Exec(ctx, `
+INSERT INTO documents (id, access_hash, file_reference, date, mime_type, size, dc_id, attributes, thumbs)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9::jsonb)`,
+			documentID, accessHash, fileReference, docDate, docMimeType, docSize, docDCID,
+			string(docAttributes), string(docThumbs)); err != nil {
+			return fmt.Errorf("copy star gift animation document: %w", err)
+		}
+		if hasBlob {
+			if _, err := tx.Exec(ctx, `
+INSERT INTO file_blobs (location_key, backend, object_key, size, sha256, mime_type)
+VALUES ($1, $2, $3, $4, $5, $6)
+ON CONFLICT (location_key) DO UPDATE SET backend=EXCLUDED.backend, object_key=EXCLUDED.object_key,
+    size=EXCLUDED.size, sha256=EXCLUDED.sha256, mime_type=EXCLUDED.mime_type`,
+				"doc:"+strconv.FormatInt(documentID, 10), blobBackend, blobObjectKey, blobSize,
+				blobSHA256, blobMimeType); err != nil {
+				return fmt.Errorf("copy star gift animation blob: %w", err)
+			}
+		}
 		// Анимация и источник копируются из активной ревизии: команда
 		// правит параметры, а не файл (замена файла — import-gift).
 		if _, err := tx.Exec(ctx, `
@@ -418,7 +497,7 @@ INSERT INTO star_gift_catalog_revisions (
     released_by_peer_type, released_by_peer_id, per_user_total, locked_until_date,
     auction_slug, gifts_per_round, auction_start_date, upgrade_variants,
     background_center_color, background_edge_color, background_text_color
-) SELECT $1, r.gift_id, $2, $3, $4, $5, r.document_id,
+) SELECT $1, r.gift_id, $2, $3, $4, $5, $28,
        r.animation_json, r.animation_sha256, r.source_name, r.source_format,
        r.width, r.height, r.frame_rate, r.in_point, r.out_point, $6, $7,
        r.official_gift_id, r.source_manifest_sha256, r.official_source,
@@ -437,6 +516,7 @@ WHERE r.id = (SELECT active_revision_id FROM star_gift_catalog WHERE gift_id=$27
 			write.AuctionSlug, write.GiftsPerRound, write.AuctionStartDate, write.UpgradeVariants,
 			nullableBackgroundColor(write.Background, "center"),
 			nullableBackgroundColor(write.Background, "edge"), nullableBackgroundColor(write.Background, "text"),
+			documentID,
 			write.GiftID,
 		); err != nil {
 			return fmt.Errorf("insert star gift revision: %w", err)

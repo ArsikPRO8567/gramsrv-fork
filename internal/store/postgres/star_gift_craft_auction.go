@@ -1119,10 +1119,9 @@ WHERE gift_id=$1 AND saved_gift_id IS NULL ORDER BY id LIMIT 100`, giftID)
 			//    что у Lime нет улучшений вовсе (upgrade_variants=null).
 			//
 			//    Раунд 24: при наличии улучшений (бесплатная ревизия либо
-			//    платная с неисчерпанным пулом) копия победителя несёт
-			//    can_upgrade — клиент рисует кнопку улучшения с описанием из
-			//    gift.upgrade_stars (бесплатно / «за N звёзд»). released_by
-			//    («кем выпущено») проецируется fillStarGiftSnapshot из каталога.
+			//    платная с неисчерпанным пулом) копия победителя несла
+			//    can_upgrade; released_by («кем выпущено») проецируется
+			//    fillStarGiftSnapshot из каталога.
 			sticker := gift.Sticker
 			winAction := fillStarGiftSnapshot(&domain.MessageStarGiftAction{GiftID: gift.ID,
 				// item.amount — выигрышная ставка победителя: цена в блоке
@@ -1134,12 +1133,14 @@ WHERE gift_id=$1 AND saved_gift_id IS NULL ORDER BY id LIMIT 100`, giftID)
 				AuctionAcquired: true,
 				GiftConvertStars: item.amount * starGiftAuctionConvertNumerator /
 					starGiftAuctionConvertDenominator}, gift)
-			// Платные улучшения ставит fillStarGiftSnapshot (gift.upgrade_stars>0
-			// при issued<total); prepaid_upgrade не ставится никогда — клиент
-			// рендерил бы строку «Вы отправили улучшение стоимостью 0 звёзд».
-			if freeUpgrade {
-				winAction.CanUpgrade = true
-			}
+			// Раунд 33: копия сервисного аккаунта (777000) кнопки улучшения не
+			// несёт НИКОГДА — клиент показывает кнопку только в сообщении о
+			// покупке (копия получателя) и в шторке профиля. fillStarGift-
+			// Snapshot ставит can_upgrade из каталога (issued<total), поэтому
+			// флаг сбрасывается уже после заполнения снимка. prepaid_upgrade не
+			// ставится никогда — клиент рендерил бы строку «Вы отправили
+			// улучшение стоимостью 0 звёзд».
+			winAction.CanUpgrade = false
 			if _, err := s.messages.SendPrivateText(ctx, domain.SendPrivateTextRequest{SenderUserID: domain.OfficialSystemUserID,
 				RecipientUserID: item.bidder, RandomID: lifecycleCommandRandomID("auction-win", giftID, item.round, item.pos),
 				Date: item.date, Media: &domain.MessageMedia{Kind: domain.MessageMediaKindService, ServiceAction: &domain.MessageServiceAction{
@@ -1163,8 +1164,21 @@ WHERE gift_id=$1 AND saved_gift_id IS NULL ORDER BY id LIMIT 100`, giftID)
 					// иначе клиент показывает «подарок виден в вашем профиле»
 					// вместо подсказки об улучшении.
 					Saved: false}, gift)
+				// Раунд 33: бесплатное улучшение аукционного экземпляра клиент
+				// рендерит кнопкой «Улучшить бесплатно» только при положительном
+				// ВНЕШНЕМ action.upgrade_stars (не блоке подарка): caption выбирается
+				// в StarGiftSheet как upgrade_stars>0 ? UpgradeButtonFree : UpgradeButton,
+				// а doUpgrade при upgrade_stars>0 идёт прямым payments.upgradeStarGift
+				// без платёжной формы. Значение — цена улучшения из каталога,
+				// покрытая выигрышной ставкой; при нулевой цене в каталоге —
+				// минимальная положительная, чтобы клиент не уходил в платный
+				// сценарий с платёжной формой.
 				if freeUpgrade {
 					action.CanUpgrade = true
+					action.UpgradeStars = gift.UpgradeStars
+					if action.UpgradeStars <= 0 {
+						action.UpgradeStars = 1
+					}
 				}
 				sent, err := s.messages.SendPrivateText(ctx, domain.SendPrivateTextRequest{SenderUserID: item.bidder,
 					RecipientUserID: owner.ID, RandomID: lifecycleCommandRandomID("auction-award", giftID, item.round, item.pos),

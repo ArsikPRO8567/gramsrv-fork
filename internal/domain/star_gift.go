@@ -232,6 +232,11 @@ type StarGiftCollectibleAttribute struct {
 	SortOrder             int
 	Animation             *StarGiftAnimation
 	Blob                  *FileBlob
+	// ReuseDocument (раунд 32) — атрибут, скопированный из другой ревизии:
+	// документ и blob УЖЕ сохранены (контент не перезаливается), новая строка
+	// атрибута ссылается на существующий document_id. Animation несёт метаданные
+	// из исходной ревизии (JSON/SHA-256/габариты) без TGS-байтов.
+	ReuseDocument bool
 }
 
 // StarGiftCollectibleRevision 是某普通礼物的一份不可变、可发布属性池。
@@ -1471,6 +1476,20 @@ func validateStarGiftAttributes(attributes []StarGiftCollectibleAttribute, kind 
 		seen[key] = struct{}{}
 		switch kind {
 		case StarGiftCollectibleModel, StarGiftCollectiblePattern:
+			if attribute.ReuseDocument {
+				// Раунд 33: скопированный атрибут ссылается на уже
+				// сохранённые документ и blob (перезаливки контента нет).
+				// Метаданные анимации копируются из исходной ревизии:
+				// JSON и SHA-256 обязательны, TGS-байты отсутствуют.
+				if attribute.Document == nil || attribute.Document.ID <= 0 ||
+					attribute.Document.MimeType != "application/x-tgsticker" ||
+					!validStarGiftCollectibleDocument(*attribute.Document, kind) ||
+					attribute.Animation == nil || len(attribute.Animation.JSON) == 0 ||
+					len(attribute.Animation.SHA256) != 32 || attribute.Blob != nil {
+					return ErrStarGiftCollectibleInvalid
+				}
+				break
+			}
 			if attribute.Animation == nil || len(attribute.Animation.JSON) == 0 ||
 				len(attribute.Animation.TGS) == 0 || len(attribute.Animation.SHA256) != 32 {
 				return ErrStarGiftCollectibleInvalid

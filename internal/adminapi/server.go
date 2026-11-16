@@ -95,6 +95,7 @@ type Service interface {
 	DeleteGifCatalogEntry(ctx context.Context, req admin.DeleteGifCatalogEntryRequest) (admin.CommandResult, error)
 	GifCatalogDocumentPreview(ctx context.Context, documentID int64) ([]byte, string, bool, error)
 	StarGiftCollectibles(ctx context.Context, giftID int64) (domain.StarGiftUpgradePreview, bool, error)
+	StarGiftCollectibleRevision(ctx context.Context, revisionID int64) (domain.StarGiftCollectibleRevision, error)
 	StarGiftCollectibleAnimation(ctx context.Context, giftID int64, kind domain.StarGiftCollectibleAttributeKind, attributeID int64) ([]byte, bool, error)
 	ModerationCases(ctx context.Context, filter domain.ModerationCaseFilter) ([]domain.ModerationCase, error)
 	ModerationCase(ctx context.Context, caseID int64) (domain.ModerationCaseDetail, bool, error)
@@ -268,6 +269,8 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("POST /v1/gif-catalog/delete", s.authenticated(s.handleDeleteGifCatalogEntry))
 	mux.HandleFunc("GET /v1/gifts/{id}/collectibles", s.authenticated(s.handleStarGiftCollectibles))
 	mux.HandleFunc("GET /v1/gifts/{id}/collectibles/{kind}/{attribute_id}/animation", s.authenticated(s.handleStarGiftCollectibleAnimation))
+	// Раунд 33: любая ревизия коллекции по id — источник копирования атрибутов.
+	mux.HandleFunc("GET /v1/gifts/collectibles/revisions/{revision_id}", s.authenticated(s.handleStarGiftCollectibleRevision))
 	mux.HandleFunc("GET /v1/moderation/cases", s.authenticated(s.handleModerationCases))
 	mux.HandleFunc("GET /v1/moderation/cases/{id}", s.authenticated(s.handleModerationCase))
 	mux.HandleFunc("GET /v1/moderation/reports/{id}", s.authenticated(s.handleModerationReport))
@@ -1028,6 +1031,12 @@ func (s *Server) handlePublishStarGiftCollectibles(w http.ResponseWriter, r *htt
 		return
 	}
 	load := func(upload *admin.StarGiftCollectibleAnimationUpload) error {
+		// Раунд 33: скопированные записи (copy_document_id>0) файл не несут —
+		// документ переиспользуется из ревизии copy_from_revision_id.
+		if upload.CopyDocumentID > 0 {
+			upload.FileKey = ""
+			return nil
+		}
 		upload.FileKey = strings.TrimSpace(upload.FileKey)
 		if upload.FileKey == "" {
 			return fmt.Errorf("animation file key is required")
@@ -1260,6 +1269,68 @@ func (s *Server) handleStarGiftCollectibles(w http.ResponseWriter, r *http.Reque
 	writeJSON(w, http.StatusOK, collectiblePreviewResponse(preview))
 }
 
+// handleStarGiftCollectibleRevision (раунд 32) отдаёт ЛЮБУЮ ревизию коллекции
+// по id — источник копирования моделей/узоров/фонов из админ-редактора.
+func (s *Server) handleStarGiftCollectibleRevision(w http.ResponseWriter, r *http.Request) {
+	revisionID, err := strconv.ParseInt(r.PathValue("revision_id"), 10, 64)
+	if err != nil || revisionID <= 0 {
+		writeError(w, http.StatusBadRequest, "invalid revision id")
+		return
+	}
+	revision, err := s.svc.StarGiftCollectibleRevision(r.Context(), revisionID)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "collectible revision not found")
+		return
+	}
+	writeJSON(w, http.StatusOK, collectibleRevisionResponse(revision))
+}
+
+func collectibleRevisionResponse(revision domain.StarGiftCollectibleRevision) map[string]any {
+	attribute := func(value domain.StarGiftCollectibleAttribute) map[string]any {
+		result := map[string]any{
+			"id": strconv.FormatInt(value.ID, 10), "name": value.Name, "rarity_kind": value.RarityKind,
+			"rarity_permille": value.RarityPermille, "crafted": value.Crafted,
+			"official_document_id": strconv.FormatInt(value.OfficialDocumentID, 10),
+			"sort_order":           value.SortOrder, "kind": value.Kind,
+		}
+		if value.Document != nil {
+			result["document_id"] = strconv.FormatInt(value.Document.ID, 10)
+		}
+		if value.Animation != nil {
+			result["source_name"] = value.Animation.SourceName
+			result["source_format"] = value.Animation.SourceFormat
+		}
+		if value.Kind == domain.StarGiftCollectibleBackdrop {
+			result["backdrop_id"] = value.BackdropID
+			result["center_color"] = value.CenterColor
+			result["edge_color"] = value.EdgeColor
+			result["pattern_color"] = value.PatternColor
+			result["text_color"] = value.TextColor
+		}
+		return result
+	}
+	mapAttributes := func(values []domain.StarGiftCollectibleAttribute) []map[string]any {
+		result := make([]map[string]any, 0, len(values))
+		for _, value := range values {
+			result = append(result, attribute(value))
+		}
+		return result
+	}
+	status := "draft"
+	if revision.Published {
+		status = "published"
+	}
+	return map[string]any{
+		"found": true, "revision_id": strconv.FormatInt(revision.ID, 10), "gift_id": strconv.FormatInt(revision.GiftID, 10),
+		"revision": revision.Revision, "status": status,
+		"upgrade_stars": strconv.FormatInt(revision.UpgradeStars, 10),
+		"supply_total":  revision.SupplyTotal, "issued": revision.Issued,
+		"slug_prefix": revision.SlugPrefix,
+		"models":      mapAttributes(revision.Models), "patterns": mapAttributes(revision.Patterns),
+		"backdrops": mapAttributes(revision.Backdrops),
+	}
+}
+
 func collectiblePreviewResponse(preview domain.StarGiftUpgradePreview) map[string]any {
 	attribute := func(value domain.StarGiftCollectibleAttribute) map[string]any {
 		result := map[string]any{
@@ -1267,6 +1338,11 @@ func collectiblePreviewResponse(preview domain.StarGiftUpgradePreview) map[strin
 			"rarity_permille": value.RarityPermille, "crafted": value.Crafted,
 			"official_document_id": strconv.FormatInt(value.OfficialDocumentID, 10),
 			"sort_order":           value.SortOrder, "kind": value.Kind,
+		}
+		// Раунд 33: document_id нужен редактору коллекций для копирования
+		// атрибута в новую ревизию без перезаливки файла.
+		if value.Document != nil {
+			result["document_id"] = strconv.FormatInt(value.Document.ID, 10)
 		}
 		if value.Animation != nil {
 			result["source_name"] = value.Animation.SourceName

@@ -1110,6 +1110,199 @@ func TestPublishStarGiftCollectiblesDryRunThenConfirm(t *testing.T) {
 	}
 }
 
+// Раунд 33: крафтовые модели — rarity_kind uncommon/rare/epic/legendary вместо
+// permille: в БД rarity_permille NULL, атрибут помечается crafted=true.
+func TestPublishStarGiftCollectiblesCraftedRarityKinds(t *testing.T) {
+	gifts := &fakeGiftsService{}
+	svc := NewService(Dependencies{Commands: newMemoryCommandRepo(), Gifts: gifts, Now: fixedNow})
+	req := PublishStarGiftCollectiblesRequest{
+		GiftID: 11, UpgradeStars: 0, SupplyTotal: 100, SlugPrefix: "cake",
+		Models: []StarGiftCollectibleAnimationUpload{
+			{Name: "Ruby", RarityPermille: 500, FileKey: "model-0", FileName: "ruby.lottie", Data: []byte("model")},
+			{Name: "Sapphire", RarityPermille: 500, FileKey: "model-1", FileName: "sapphire.lottie", Data: []byte("model-1")},
+			{Name: "Crafted", RarityKind: "legendary", SortOrder: 2, FileKey: "model-2", FileName: "crafted.lottie", Data: []byte("crafted")},
+		},
+		Patterns: []StarGiftCollectibleAnimationUpload{
+			{Name: "Stars", RarityPermille: 500, FileKey: "pattern-0", FileName: "stars.tgs", Data: []byte("pattern")},
+			{Name: "Moons", RarityPermille: 500, FileKey: "pattern-1", FileName: "moons.tgs", Data: []byte("pattern-1")},
+		},
+		Backdrops: []StarGiftCollectibleBackdropInput{
+			{Name: "Night", BackdropID: 1, CenterColor: 0x112233, EdgeColor: 0x223344, PatternColor: 0x334455, TextColor: 0xffffff, RarityPermille: 500},
+			{Name: "Day", BackdropID: 2, CenterColor: 0xaabbcc, EdgeColor: 0x778899, PatternColor: 0xddeeff, TextColor: 0x111111, RarityPermille: 500},
+		},
+	}
+	req.CommandMeta = CommandMeta{CommandID: "crafted-collectibles", Actor: "ops", Reason: "crafted pool", DryRun: false}
+	result, err := svc.PublishStarGiftCollectibles(context.Background(), req)
+	if err != nil || gifts.createCalls != 1 || result.Details["crafted_models"] != 1 {
+		t.Fatalf("result=%+v err=%v create=%d", result, err, gifts.createCalls)
+	}
+	write := gifts.lastCollectible
+	if write == nil || len(write.Models) != 3 {
+		t.Fatalf("collectible write = %+v", write)
+	}
+	crafted := write.Models[2]
+	if crafted.RarityKind != domain.StarGiftRarityLegendary || crafted.RarityPermille != 0 || !crafted.Crafted {
+		t.Fatalf("crafted model = %+v", crafted)
+	}
+	if write.Models[0].RarityKind != domain.StarGiftRarityPermille || write.Models[0].RarityPermille != 500 || write.Models[0].Crafted {
+		t.Fatalf("permille model = %+v", write.Models[0])
+	}
+	// Нулевая цена улучшения — бесплатный апгрейд (раунд 21).
+	if write.UpgradeStars != 0 {
+		t.Fatalf("upgrade stars = %d, want 0", write.UpgradeStars)
+	}
+}
+
+// Раунд 33: неизвестный или не-модельный rarity_kind отклоняется.
+func TestPublishStarGiftCollectiblesRejectsBadRarityKind(t *testing.T) {
+	base := func(kind string, kindOnPattern bool) PublishStarGiftCollectiblesRequest {
+		req := PublishStarGiftCollectiblesRequest{
+			GiftID: 11, UpgradeStars: 100, SupplyTotal: 100, SlugPrefix: "cake",
+			Models: []StarGiftCollectibleAnimationUpload{
+				{Name: "Ruby", RarityPermille: 500, FileKey: "model-0", FileName: "ruby.lottie", Data: []byte("model")},
+				{Name: "Sapphire", RarityPermille: 500, FileKey: "model-1", FileName: "sapphire.lottie", Data: []byte("model-1")},
+			},
+			Patterns: []StarGiftCollectibleAnimationUpload{
+				{Name: "Stars", RarityPermille: 500, FileKey: "pattern-0", FileName: "stars.tgs", Data: []byte("pattern")},
+				{Name: "Moons", RarityPermille: 500, FileKey: "pattern-1", FileName: "moons.tgs", Data: []byte("pattern-1")},
+			},
+			Backdrops: []StarGiftCollectibleBackdropInput{
+				{Name: "Night", BackdropID: 1, RarityPermille: 500},
+				{Name: "Day", BackdropID: 2, RarityPermille: 500},
+			},
+		}
+		if kind != "" {
+			if kindOnPattern {
+				req.Patterns[0].RarityKind = kind
+			} else {
+				req.Models[0].RarityKind = kind
+			}
+		} else {
+			// permille без цены — редкость не задана.
+			req.Models[0].RarityPermille = 0
+		}
+		req.CommandMeta = CommandMeta{CommandID: "bad-kind", Actor: "ops", Reason: "validation", DryRun: true}
+		return req
+	}
+	tests := map[string]PublishStarGiftCollectiblesRequest{
+		"unknown kind":       base("mythic", false),
+		"kind on pattern":    base("epic", true),
+		"price without kind": base("", false),
+	}
+	for name, req := range tests {
+		t.Run(name, func(t *testing.T) {
+			svc := NewService(Dependencies{Commands: newMemoryCommandRepo(), Gifts: &fakeGiftsService{}, Now: fixedNow})
+			if _, err := svc.PublishStarGiftCollectibles(context.Background(), req); !errors.Is(err, domain.ErrStarGiftCollectibleInvalid) {
+				t.Fatalf("err=%v, want ErrStarGiftCollectibleInvalid", err)
+			}
+		})
+	}
+}
+
+// Раунд 33: копирование атрибутов из другой ревизии — ReuseDocument, документ
+// и анимация берутся из источника, файлы не загружаются.
+func TestPublishStarGiftCollectiblesCopyFromRevision(t *testing.T) {
+	modelDocument := func(id int64) *domain.Document {
+		return &domain.Document{ID: id, MimeType: "application/x-tgsticker",
+			Attributes: []domain.DocumentAttribute{{Kind: domain.DocAttrSticker, Alt: "🎁"}}}
+	}
+	patternDocument := func(id int64) *domain.Document {
+		return &domain.Document{ID: id, MimeType: "application/x-tgsticker",
+			Attributes: []domain.DocumentAttribute{{Kind: domain.DocAttrCustomEmoji, TextColor: true}},
+			Thumbs:     []domain.PhotoSize{{Kind: domain.PhotoSizeKindPath, Type: "j", Bytes: []byte("path")}}}
+	}
+	source := domain.StarGiftCollectibleRevision{
+		ID: 77, GiftID: 11, Revision: 1, Published: true, UpgradeStars: 100, SupplyTotal: 50, SlugPrefix: "cake",
+		Models: []domain.StarGiftCollectibleAttribute{
+			{ID: 1, Kind: domain.StarGiftCollectibleModel, Name: "Ruby", RarityKind: domain.StarGiftRarityPermille, RarityPermille: 500, SortOrder: 0,
+				Document: modelDocument(900), Animation: &domain.StarGiftAnimation{JSON: []byte(`{"v":"5.7"}`),
+					SHA256: bytesOf(0x01, 32), SourceName: "ruby.lottie", SourceFormat: domain.StarGiftAnimationLottie, Width: 512, Height: 512}},
+			{ID: 2, Kind: domain.StarGiftCollectibleModel, Name: "Sapphire", RarityKind: domain.StarGiftRarityPermille, RarityPermille: 500, SortOrder: 1,
+				Document: modelDocument(901),
+				Animation: &domain.StarGiftAnimation{JSON: []byte(`{"v":"5.7","nm":"sapphire"}`), SHA256: bytesOf(0x02, 32),
+					SourceName: "sapphire.lottie", SourceFormat: domain.StarGiftAnimationLottie, Width: 512, Height: 512}},
+			{ID: 5, Kind: domain.StarGiftCollectibleModel, Name: "Diamond", RarityKind: domain.StarGiftRarityLegendary, Crafted: true, SortOrder: 2,
+				Document: modelDocument(904),
+				Animation: &domain.StarGiftAnimation{JSON: []byte(`{"v":"5.7","nm":"diamond"}`), SHA256: bytesOf(0x05, 32),
+					SourceName: "diamond.lottie", SourceFormat: domain.StarGiftAnimationLottie, Width: 512, Height: 512}},
+		},
+		Patterns: []domain.StarGiftCollectibleAttribute{
+			{ID: 3, Kind: domain.StarGiftCollectiblePattern, Name: "Stars", RarityKind: domain.StarGiftRarityPermille, RarityPermille: 500, SortOrder: 0,
+				Document: patternDocument(902),
+				Animation: &domain.StarGiftAnimation{JSON: []byte(`{"v":"5.7"}`), SHA256: bytesOf(0x03, 32),
+					SourceName: "stars.tgs", SourceFormat: domain.StarGiftAnimationTGS, Width: 512, Height: 512}},
+			{ID: 4, Kind: domain.StarGiftCollectiblePattern, Name: "Moons", RarityKind: domain.StarGiftRarityPermille, RarityPermille: 500, SortOrder: 1,
+				Document: patternDocument(903),
+				Animation: &domain.StarGiftAnimation{JSON: []byte(`{"v":"5.7"}`), SHA256: bytesOf(0x04, 32),
+					SourceName: "moons.tgs", SourceFormat: domain.StarGiftAnimationTGS, Width: 512, Height: 512}},
+		},
+	}
+	gifts := &fakeGiftsService{sourceRevision: &source}
+	svc := NewService(Dependencies{Commands: newMemoryCommandRepo(), Gifts: gifts, Now: fixedNow})
+	req := PublishStarGiftCollectiblesRequest{
+		GiftID: 11, UpgradeStars: 100, SupplyTotal: 50, SlugPrefix: "cake", CopyFromRevisionID: 77,
+		Models: []StarGiftCollectibleAnimationUpload{
+			{Name: "Ruby", CopyDocumentID: 900, RarityPermille: 500},
+			{Name: "Sapphire Renamed", CopyDocumentID: 901, RarityPermille: 400},
+			{Name: "Diamond", CopyDocumentID: 904},
+		},
+		Patterns: []StarGiftCollectibleAnimationUpload{
+			{Name: "Stars", CopyDocumentID: 902, RarityPermille: 500},
+			{Name: "Moons", CopyDocumentID: 903, RarityPermille: 500},
+		},
+		Backdrops: []StarGiftCollectibleBackdropInput{
+			{Name: "Night", BackdropID: 1, CenterColor: 0x112233, EdgeColor: 0x223344, PatternColor: 0x334455, TextColor: 0xffffff, RarityPermille: 500},
+			{Name: "Day", BackdropID: 2, CenterColor: 0xaabbcc, EdgeColor: 0x778899, PatternColor: 0xddeeff, TextColor: 0x111111, RarityPermille: 500},
+		},
+	}
+	req.CommandMeta = CommandMeta{CommandID: "copy-collectibles", Actor: "ops", Reason: "reuse pool", DryRun: false}
+	result, err := svc.PublishStarGiftCollectibles(context.Background(), req)
+	if err != nil || gifts.createCalls != 1 || result.Details["copied_models"] != 3 {
+		t.Fatalf("result=%+v err=%v create=%d", result, err, gifts.createCalls)
+	}
+	write := gifts.lastCollectible
+	if write == nil || len(write.Models) != 3 || len(write.Patterns) != 2 {
+		t.Fatalf("collectible write = %+v", write)
+	}
+	for _, attribute := range append(append([]domain.StarGiftCollectibleAttribute{}, write.Models...), write.Patterns...) {
+		if !attribute.ReuseDocument || attribute.Document == nil || attribute.Document.ID <= 0 ||
+			attribute.Animation == nil || len(attribute.Animation.JSON) == 0 || attribute.Blob != nil {
+			t.Fatalf("copied attribute = %+v", attribute)
+		}
+	}
+	if write.Models[0].Name != "Ruby" || write.Models[0].RarityPermille != 500 ||
+		write.Models[1].Name != "Sapphire Renamed" || write.Models[1].RarityPermille != 400 ||
+		write.Models[2].Name != "Diamond" || write.Models[2].RarityKind != domain.StarGiftRarityLegendary ||
+		write.Models[2].RarityPermille != 0 || !write.Models[2].Crafted {
+		t.Fatalf("models = %+v", write.Models)
+	}
+}
+
+// Раунд 33: копия требует известного copy_from_revision_id и существующего
+// документа в ревизии-источнике.
+func TestPublishStarGiftCollectiblesCopyRejectsUnknownSource(t *testing.T) {
+	req := PublishStarGiftCollectiblesRequest{
+		GiftID: 11, UpgradeStars: 100, SupplyTotal: 50, SlugPrefix: "cake", CopyFromRevisionID: 404,
+		Models: []StarGiftCollectibleAnimationUpload{
+			{Name: "Ruby", CopyDocumentID: 900, RarityPermille: 500},
+			{Name: "Sapphire", CopyDocumentID: 901, RarityPermille: 500},
+		},
+		Patterns: []StarGiftCollectibleAnimationUpload{
+			{Name: "Stars", RarityPermille: 500, FileKey: "pattern-0", FileName: "stars.tgs", Data: []byte("pattern")},
+			{Name: "Moons", RarityPermille: 500, FileKey: "pattern-1", FileName: "moons.tgs", Data: []byte("pattern-1")},
+		},
+		Backdrops: []StarGiftCollectibleBackdropInput{
+			{Name: "Night", BackdropID: 1, RarityPermille: 500},
+			{Name: "Day", BackdropID: 2, RarityPermille: 500},
+		},
+	}
+	req.CommandMeta = CommandMeta{CommandID: "copy-unknown", Actor: "ops", Reason: "validation", DryRun: true}
+	svc := NewService(Dependencies{Commands: newMemoryCommandRepo(), Gifts: &fakeGiftsService{}, Now: fixedNow})
+	if _, err := svc.PublishStarGiftCollectibles(context.Background(), req); !errors.Is(err, domain.ErrStarGiftCollectibleInvalid) {
+		t.Fatalf("err=%v, want ErrStarGiftCollectibleInvalid", err)
+	}
+}
+
 func TestPublishStarGiftCollectiblesRejectsUnsafeClientPreviewPool(t *testing.T) {
 	valid := func() PublishStarGiftCollectiblesRequest {
 		return PublishStarGiftCollectiblesRequest{
@@ -1627,6 +1820,8 @@ type fakeGiftsService struct {
 	lastBundle       domain.StarGiftCatalogBundleWrite
 	lastSettings     domain.StarGiftCatalogSettingsWrite
 	lastAuctionWrite domain.StarGiftAuctionRuntimeWrite
+	lastCollectible  *domain.StarGiftCollectibleWrite
+	sourceRevision   *domain.StarGiftCollectibleRevision
 }
 
 func (f *fakeGiftsService) GiftByID(_ context.Context, id int64) (domain.StarGift, bool, error) {
@@ -1680,10 +1875,18 @@ func (*fakeGiftsService) AnimationJSON(context.Context, int64) ([]byte, bool, er
 }
 func (f *fakeGiftsService) CreateCollectibleRevision(_ context.Context, write domain.StarGiftCollectibleWrite) (domain.StarGiftCollectibleRevision, error) {
 	f.createCalls++
+	copied := write
+	f.lastCollectible = &copied
 	return domain.StarGiftCollectibleRevision{ID: 33, GiftID: write.GiftID, Revision: 2, Published: true}, nil
 }
 func (*fakeGiftsService) CollectiblePreview(context.Context, int64) (domain.StarGiftUpgradePreview, bool, error) {
 	return domain.StarGiftUpgradePreview{}, false, nil
+}
+func (f *fakeGiftsService) CollectibleRevision(_ context.Context, revisionID int64) (domain.StarGiftCollectibleRevision, error) {
+	if f.sourceRevision == nil || f.sourceRevision.ID != revisionID {
+		return domain.StarGiftCollectibleRevision{}, domain.ErrStarGiftCollectibleInvalid
+	}
+	return *f.sourceRevision, nil
 }
 func (*fakeGiftsService) CollectibleAnimationJSON(context.Context, int64, domain.StarGiftCollectibleAttributeKind, int64) ([]byte, bool, error) {
 	return []byte(`{"v":"5.7"}`), true, nil

@@ -34,6 +34,9 @@ type StarGiftStore interface {
 	// projections. samplePerKind=0 returns the complete attribute metadata; a positive value
 	// returns at most that many randomly selected ordinary-upgrade attributes per kind.
 	ActiveCollectibleProjection(ctx context.Context, giftID int64, samplePerKind int) (domain.StarGiftCollectibleRevision, bool, error)
+	// CollectibleRevisionFull (раунд 32) читает любую ревизию коллекции по id
+	// с полными метаданными анимаций — источник копирования атрибутов.
+	CollectibleRevisionFull(ctx context.Context, revisionID int64) (domain.StarGiftCollectibleRevision, error)
 	CollectibleAvailability(ctx context.Context, giftIDs []int64) (map[int64]domain.StarGiftCollectibleAvailability, error)
 	CollectibleAnimationJSON(ctx context.Context, giftID int64, kind domain.StarGiftCollectibleAttributeKind, attributeID int64) ([]byte, bool, error)
 	UniqueBySlug(ctx context.Context, slug string) (domain.UniqueStarGift, bool, error)

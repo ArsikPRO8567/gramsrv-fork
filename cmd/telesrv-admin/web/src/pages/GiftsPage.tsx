@@ -333,18 +333,25 @@ export function GiftsPage() {
 
   // Раунд 32: признак того, что рабочие настройки аукциона изменены —
   // тогда после основной команды уходит вторая (set-gift-auction-settings).
+  // В режиме добавления (editGift = null) признаком считаются любые заполненные
+  // поля или включённый режим повышения — настройки применяются к только что
+  // созданному подарку сразу после импорта.
   function auctionRuntimeDirty() {
-    if (!editGift) return false;
+    if (!editGift) {
+      return Boolean(auctionRoundDuration.trim() || auctionRoundDurations.trim() || auctionRoundExtends.trim() ||
+        auctionMinBidAmount.trim() || auctionEndDate.trim() || auctionStatus.trim() || auctionRaiseMinBid);
+    }
     return Boolean(auctionRoundDuration.trim() || auctionRoundDurations.trim() || auctionRoundExtends.trim() ||
       auctionMinBidAmount.trim() || auctionEndDate.trim() || auctionStatus.trim() ||
       auctionRaiseMinBid !== editGift.AuctionRaiseMinBid);
   }
 
-  function auctionRuntimePayload(confirm: boolean, commandID = "") {
-    if (!editGift) throw new Error(t("gifts.officialRequired"));
+  function auctionRuntimePayload(confirm: boolean, commandID = "", giftIDOverride?: string) {
+    const owner = editGift?.GiftID ?? giftIDOverride;
+    if (!owner) throw new Error(t("gifts.officialRequired"));
     if (!reason.trim()) throw new Error(t("action.reasonRequired"));
     const payload: Record<string, unknown> = {
-      command_id: commandID, reason: reason.trim(), confirm, gift_id: editGift.GiftID,
+      command_id: commandID, reason: reason.trim(), confirm, gift_id: owner,
       raise_min_bid: auctionRaiseMinBid
     };
     if (auctionRoundDuration.trim()) payload.round_duration = Math.max(1, Math.floor(Number(auctionRoundDuration) || 1));
@@ -374,8 +381,21 @@ export function GiftsPage() {
       if (editGift) {
         await api.updateGiftSettings(editPayload(true, preview.command_id));
         if (auctionRuntimeDirty()) await api.setGiftAuctionSettings(auctionRuntimePayload(true));
-      } else if (importSource === "official") await api.importOfficialGift(officialPayload(true, preview.command_id));
-      else await api.importGift(uploadForm(true, preview.command_id));
+      } else if (importSource === "official") {
+        const result = await api.importOfficialGift(officialPayload(true, preview.command_id));
+        // Раунд 33: рабочие настройки аукциона из вкладки добавления применяются
+        // к только что созданному подарку (id — из ответа импорта).
+        if (auctionRuntimeDirty()) {
+          const created = String((result.details as Record<string, unknown> | undefined)?.gift_id ?? "");
+          await api.setGiftAuctionSettings(auctionRuntimePayload(true, "", created));
+        }
+      } else {
+        const result = await api.importGift(uploadForm(true, preview.command_id));
+        if (auctionRuntimeDirty()) {
+          const created = String((result.details as Record<string, unknown> | undefined)?.gift_id ?? "");
+          await api.setGiftAuctionSettings(auctionRuntimePayload(true, "", created));
+        }
+      }
                 setPreview(null); setFile(null); setGiftID("0"); setTitle(""); setSourceGiftID(""); setEditGift(null);
       await load();
       setImportOpen(false);
@@ -614,9 +634,10 @@ export function GiftsPage() {
                     <label><span>{t("gifts.auctionStartDate")}</span><input type="datetime-local" value={auctionStartDate} onChange={(e) => { setAuctionStartDate(e.target.value); setPreview(null); }} /></label>
                   </div>}
                 </div>
-                {/* Раунд 32: рабочая строка star_gift_auctions — только в режиме
-                    редактирования; пустые поля «не менять» */}
-                {editGift && <div className="gift-settings-block">
+                {/* Раунд 33: рабочая строка star_gift_auctions — доступна и во вкладке
+                    добавления (настройки применяются к созданному подарку сразу после
+                    импорта), и в режиме редактирования; пустые поля «не менять» */}
+                <div className="gift-settings-block">
                   <div className="gift-settings-head">
                     <strong>{t("gifts.auctionRuntime")}</strong>
                     <span>{t("gifts.auctionRuntimeHint")}</span>
@@ -644,7 +665,7 @@ export function GiftsPage() {
                   <div className="gift-settings-switches">
                     <label className="gift-switch"><input type="checkbox" checked={auctionRaiseMinBid} onChange={(e) => { setAuctionRaiseMinBid(e.target.checked); setPreview(null); }} /><span className="gift-switch-track" aria-hidden="true"><span /></span><span>{t("gifts.auctionRaiseMinBid")}</span></label>
                   </div>
-                </div>}
+                </div>
               <label className="gift-reason-field"><span>{t("gifts.reason")}</span><input value={reason} placeholder={t("gifts.reasonPlaceholder")} onChange={(e) => setReason(e.target.value)} /></label>
               <label className="gift-switch"><input type="checkbox" checked={enabled} onChange={(e) => { setEnabled(e.target.checked); setPreview(null); }} /><span className="gift-switch-track" aria-hidden="true"><span /></span><span>{t("gifts.enableAfterImport")}</span></label>
               {importError && <Alert>{importError}</Alert>}

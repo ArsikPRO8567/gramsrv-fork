@@ -376,6 +376,15 @@ func (s *Service) PublishCollectibleRevision(ctx context.Context, write domain.S
 	return revision, err
 }
 
+// CollectibleRevision (раунд 32) читает любую ревизию коллекции по id с полными
+// метаданными анимаций — источник копирования атрибутов для админки.
+func (s *Service) CollectibleRevision(ctx context.Context, revisionID int64) (domain.StarGiftCollectibleRevision, error) {
+	if s == nil || s.store == nil {
+		return domain.StarGiftCollectibleRevision{}, fmt.Errorf("star gift collectible store is not configured")
+	}
+	return s.store.CollectibleRevisionFull(ctx, revisionID)
+}
+
 // CreateCollectibleRevision materializes the normalized model/pattern animations and then
 // atomically publishes the complete immutable attribute pool. Callers must pass animations
 // produced by PrepareAnimation; partial revisions are never exposed to clients.
@@ -407,6 +416,11 @@ func brandCollectibleAttributes(attributes []domain.StarGiftCollectibleAttribute
 
 func (s *Service) materializeCollectibleAttributes(ctx context.Context, attributes []domain.StarGiftCollectibleAttribute) error {
 	for i := range attributes {
+		if attributes[i].ReuseDocument {
+			// Раунд 33: скопированный атрибут уже несёт сохранённые документ
+			// и blob — материализация (перезалив TGS) не требуется.
+			continue
+		}
 		animation := attributes[i].Animation
 		if animation == nil {
 			return domain.ErrStarGiftCollectibleInvalid

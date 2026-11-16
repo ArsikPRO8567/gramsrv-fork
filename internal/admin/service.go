@@ -309,6 +309,7 @@ type GiftsService interface {
 	AnimationJSON(ctx context.Context, giftID int64) ([]byte, bool, error)
 	CreateCollectibleRevision(ctx context.Context, write domain.StarGiftCollectibleWrite) (domain.StarGiftCollectibleRevision, error)
 	CollectiblePreview(ctx context.Context, giftID int64) (domain.StarGiftUpgradePreview, bool, error)
+	CollectibleRevision(ctx context.Context, revisionID int64) (domain.StarGiftCollectibleRevision, error)
 	CollectibleAnimationJSON(ctx context.Context, giftID int64, kind domain.StarGiftCollectibleAttributeKind, attributeID int64) ([]byte, bool, error)
 }
 
@@ -923,6 +924,15 @@ type StarGiftCollectibleAnimationUpload struct {
 	FileKey        string `json:"file_key"`
 	FileName       string `json:"file_name,omitempty"`
 	ContentSHA     string `json:"content_sha256,omitempty"`
+	// Раунд 33: крафтовые модели — именованная редкость вместо permille.
+	// rarity_kind ∈ permille|uncommon|rare|epic|legendary; для не-permille
+	// значение rarity_permille игнорируется (в БД NULL), атрибут помечается
+	// crafted=true (модели только — констрейнт star_gift_collectible_model_rarity_check).
+	RarityKind string `json:"rarity_kind,omitempty"`
+	// Раунд 33: копия из другой ревизии — атрибут ссылается на существующий
+	// документ (файл не загружается); метаданные анимации берутся из исходной
+	// ревизии copy_from_revision_id.
+	CopyDocumentID int64  `json:"copy_document_id,string,omitempty"`
 	Data           []byte `json:"-"`
 }
 
@@ -946,6 +956,9 @@ type PublishStarGiftCollectiblesRequest struct {
 	Models       []StarGiftCollectibleAnimationUpload `json:"models"`
 	Patterns     []StarGiftCollectibleAnimationUpload `json:"patterns"`
 	Backdrops    []StarGiftCollectibleBackdropInput   `json:"backdrops"`
+	// Раунд 33: ревизия-источник копирования атрибутов (любой подарок, любой
+	// статус); 0 = копирование не используется, все анимации загружаются файлами.
+	CopyFromRevisionID int64 `json:"copy_from_revision_id,string,omitempty"`
 }
 
 type SetAccountFrozenRequest struct {
@@ -4304,37 +4317,142 @@ func (s *Service) PublishStarGiftCollectibles(ctx context.Context, req PublishSt
 	if s == nil || s.gifts == nil {
 		return CommandResult{}, fmt.Errorf("star gift service is not configured")
 	}
-	toAttributes := func(kind domain.StarGiftCollectibleAttributeKind, uploads []StarGiftCollectibleAnimationUpload) ([]domain.StarGiftCollectibleAttribute, error) {
-		attributes := make([]domain.StarGiftCollectibleAttribute, len(uploads))
+	// Раунд 33: именованная редкость (крафтовые модели). Разрешена только для
+	// моделей — констрейнт star_gift_collectible_model_rarity_check требует
+	// для не-permille видов rarity_permille IS NULL и crafted=true; узоры и
+	// фоны остаются permille-весами обычного апгрейда.
+	resolveRarity := func(kind domain.StarGiftCollectibleAttributeKind, rarityKind string, permille int) (domain.StarGiftAttributeRarityKind, int, bool, error) {
+		normalized := strings.ToLower(strings.TrimSpace(rarityKind))
+		if normalized == "" || normalized == string(domain.StarGiftRarityPermille) {
+			if permille <= 0 {
+				return "", 0, false, fmt.Errorf("%w: %s rarity_permille is required", domain.ErrStarGiftCollectibleInvalid, kind)
+			}
+			return domain.StarGiftRarityPermille, permille, false, nil
+		}
+		named := domain.StarGiftAttributeRarityKind(normalized)
+		if !named.Valid() || named == domain.StarGiftRarityPermille {
+			return "", 0, false, fmt.Errorf("%w: unknown rarity_kind %q", domain.ErrStarGiftCollectibleInvalid, rarityKind)
+		}
+		if kind != domain.StarGiftCollectibleModel {
+			return "", 0, false, fmt.Errorf("%w: rarity_kind %q is only allowed for models", domain.ErrStarGiftCollectibleInvalid, rarityKind)
+		}
+		return named, 0, true, nil
+	}
+	// Раунд 33: копирование атрибутов из другой ревизии (та же ревизия этого
+	// подарка — «правка существующей ревизии», или любой другой подарок).
+	// Копированная запись ссылается на существующий документ: файл не
+	// загружается, метаданные анимации (JSON/SHA-256/габариты/источник)
+	// переносятся из ревизии-источника, документ и blob переиспользуются
+	// (ReuseDocument). Название/редкость/порядок берутся из запроса — их
+	// можно править поверх копии.
+	var source domain.StarGiftCollectibleRevision
+	sourceLoaded := false
+	resolveCopy := func(kind domain.StarGiftCollectibleAttributeKind, upload StarGiftCollectibleAnimationUpload) (domain.StarGiftCollectibleAttribute, bool, error) {
+		if upload.CopyDocumentID <= 0 {
+			return domain.StarGiftCollectibleAttribute{}, false, nil
+		}
+		if req.CopyFromRevisionID <= 0 {
+			return domain.StarGiftCollectibleAttribute{}, false, fmt.Errorf("%w: copy_document_id requires copy_from_revision_id", domain.ErrStarGiftCollectibleInvalid)
+		}
+		if !sourceLoaded {
+			revision, err := s.gifts.CollectibleRevision(ctx, req.CopyFromRevisionID)
+			if err != nil {
+				return domain.StarGiftCollectibleAttribute{}, false, fmt.Errorf("load copy source revision: %w", err)
+			}
+			source = revision
+			sourceLoaded = true
+		}
+		var pool []domain.StarGiftCollectibleAttribute
+		switch kind {
+		case domain.StarGiftCollectibleModel:
+			pool = source.Models
+		case domain.StarGiftCollectiblePattern:
+			pool = source.Patterns
+		default:
+			return domain.StarGiftCollectibleAttribute{}, false, domain.ErrStarGiftCollectibleInvalid
+		}
+		for _, candidate := range pool {
+			if candidate.Document == nil || candidate.Document.ID != upload.CopyDocumentID {
+				continue
+			}
+			rarity, permille, crafted, err := resolveRarity(kind, upload.RarityKind, upload.RarityPermille)
+			if err != nil {
+				// Копия без явной редкости наследует значения источника.
+				if upload.RarityKind == "" && upload.RarityPermille <= 0 {
+					rarity, permille, crafted = candidate.RarityKind, candidate.RarityPermille, candidate.Crafted
+				} else {
+					return domain.StarGiftCollectibleAttribute{}, false, err
+				}
+			}
+			name := strings.TrimSpace(upload.Name)
+			if name == "" {
+				name = candidate.Name
+			}
+			copied := candidate
+			copied.ID = 0
+			copied.CollectibleRevisionID = 0
+			copied.Kind = kind
+			copied.Name = name
+			copied.RarityKind = rarity
+			copied.RarityPermille = permille
+			copied.Crafted = crafted
+			copied.SortOrder = upload.SortOrder
+			copied.OfficialDocumentID = 0
+			copied.ReuseDocument = true
+			copied.Blob = nil
+			return copied, true, nil
+		}
+		return domain.StarGiftCollectibleAttribute{}, false, fmt.Errorf("%w: copy source %s document %d not found in revision %d",
+			domain.ErrStarGiftCollectibleInvalid, kind, upload.CopyDocumentID, req.CopyFromRevisionID)
+	}
+	buildAttributes := func(kind domain.StarGiftCollectibleAttributeKind, uploads []StarGiftCollectibleAnimationUpload) ([]domain.StarGiftCollectibleAttribute, error) {
+		attributes := make([]domain.StarGiftCollectibleAttribute, 0, len(uploads))
 		for i := range uploads {
+			copied, isCopy, err := resolveCopy(kind, uploads[i])
+			if err != nil {
+				return nil, err
+			}
+			if isCopy {
+				attributes = append(attributes, copied)
+				continue
+			}
 			animation, err := s.gifts.PrepareAnimation(uploads[i].FileName, uploads[i].Data)
 			if err != nil {
 				return nil, fmt.Errorf("prepare %s %q: %w", kind, uploads[i].Name, err)
 			}
 			uploads[i].ContentSHA = hex.EncodeToString(animation.SHA256)
-			attributes[i] = domain.StarGiftCollectibleAttribute{
-				Kind: kind, Name: strings.TrimSpace(uploads[i].Name), RarityKind: domain.StarGiftRarityPermille,
-				RarityPermille: uploads[i].RarityPermille,
-				SortOrder:      uploads[i].SortOrder, Animation: &animation,
+			rarity, permille, crafted, err := resolveRarity(kind, uploads[i].RarityKind, uploads[i].RarityPermille)
+			if err != nil {
+				return nil, err
 			}
+			attributes = append(attributes, domain.StarGiftCollectibleAttribute{
+				Kind: kind, Name: strings.TrimSpace(uploads[i].Name), RarityKind: rarity,
+				RarityPermille: permille, Crafted: crafted,
+				SortOrder: uploads[i].SortOrder, Animation: &animation,
+			})
 		}
 		return attributes, nil
 	}
-	models, err := toAttributes(domain.StarGiftCollectibleModel, req.Models)
+	models, err := buildAttributes(domain.StarGiftCollectibleModel, req.Models)
 	if err != nil {
 		return CommandResult{}, err
 	}
-	patterns, err := toAttributes(domain.StarGiftCollectiblePattern, req.Patterns)
+	patterns, err := buildAttributes(domain.StarGiftCollectiblePattern, req.Patterns)
 	if err != nil {
 		return CommandResult{}, err
 	}
 	backdrops := make([]domain.StarGiftCollectibleAttribute, len(req.Backdrops))
 	for i, backdrop := range req.Backdrops {
+		rarity, permille, crafted, err := resolveRarity(domain.StarGiftCollectibleBackdrop, "", backdrop.RarityPermille)
+		if err != nil {
+			return CommandResult{}, err
+		}
+		_ = crafted
 		backdrops[i] = domain.StarGiftCollectibleAttribute{
 			Kind: domain.StarGiftCollectibleBackdrop, Name: strings.TrimSpace(backdrop.Name), BackdropID: backdrop.BackdropID,
 			CenterColor: backdrop.CenterColor, EdgeColor: backdrop.EdgeColor, PatternColor: backdrop.PatternColor,
-			TextColor: backdrop.TextColor, RarityKind: domain.StarGiftRarityPermille,
-			RarityPermille: backdrop.RarityPermille, SortOrder: backdrop.SortOrder,
+			TextColor: backdrop.TextColor, RarityKind: rarity,
+			RarityPermille: permille, SortOrder: backdrop.SortOrder,
 		}
 	}
 	write := domain.StarGiftCollectibleWrite{
@@ -4347,11 +4465,33 @@ func (s *Service) PublishStarGiftCollectibles(ctx context.Context, req PublishSt
 	}
 	// Persist normalized content hashes in the command payload so retries with changed files are
 	// rejected by the shared idempotency boundary even though raw file bytes are not audit-logged.
+	// Скопированные записи не несут анимации — их ContentSHA остаётся пустым.
 	for i := range req.Models {
+		if req.Models[i].CopyDocumentID > 0 || models[i].Animation == nil {
+			continue
+		}
 		req.Models[i].ContentSHA = hex.EncodeToString(models[i].Animation.SHA256)
 	}
 	for i := range req.Patterns {
+		if req.Patterns[i].CopyDocumentID > 0 || patterns[i].Animation == nil {
+			continue
+		}
 		req.Patterns[i].ContentSHA = hex.EncodeToString(patterns[i].Animation.SHA256)
+	}
+	copiedModels, craftedModels := 0, 0
+	for _, attribute := range models {
+		if attribute.ReuseDocument {
+			copiedModels++
+		}
+		if attribute.Crafted {
+			craftedModels++
+		}
+	}
+	copiedPatterns := 0
+	for _, attribute := range patterns {
+		if attribute.ReuseDocument {
+			copiedPatterns++
+		}
 	}
 	return s.runCommand(ctx, req.CommandMeta, ActionPublishGiftCollectibles, 0, domain.Peer{}, req, func() (CommandResult, error) {
 		details := map[string]any{
@@ -4359,6 +4499,10 @@ func (s *Service) PublishStarGiftCollectibles(ctx context.Context, req PublishSt
 			"supply_total": req.SupplyTotal,
 			"slug_prefix":  write.SlugPrefix, "models": collectibleUploadDetails(req.Models),
 			"patterns": collectibleUploadDetails(req.Patterns), "backdrops": len(req.Backdrops),
+			"copied_models": copiedModels, "copied_patterns": copiedPatterns, "crafted_models": craftedModels,
+		}
+		if req.CopyFromRevisionID > 0 {
+			details["copy_from_revision_id"] = strconv.FormatInt(req.CopyFromRevisionID, 10)
 		}
 		if req.DryRun {
 			return CommandResult{Message: "star gift collectible pool validated", Details: details}, nil
@@ -4377,10 +4521,18 @@ func (s *Service) PublishStarGiftCollectibles(ctx context.Context, req PublishSt
 func collectibleUploadDetails(uploads []StarGiftCollectibleAnimationUpload) []map[string]any {
 	details := make([]map[string]any, 0, len(uploads))
 	for _, upload := range uploads {
-		details = append(details, map[string]any{
+		entry := map[string]any{
 			"name": strings.TrimSpace(upload.Name), "rarity_permille": upload.RarityPermille,
 			"sort_order": upload.SortOrder, "source_name": upload.FileName, "sha256": upload.ContentSHA,
-		})
+		}
+		if kind := strings.ToLower(strings.TrimSpace(upload.RarityKind)); kind != "" && kind != "permille" {
+			entry["rarity_kind"] = kind
+			entry["crafted"] = true
+		}
+		if upload.CopyDocumentID > 0 {
+			entry["copy_document_id"] = strconv.FormatInt(upload.CopyDocumentID, 10)
+		}
+		details = append(details, entry)
 	}
 	return details
 }
@@ -4874,6 +5026,16 @@ func (s *Service) StarGiftCollectibles(ctx context.Context, giftID int64) (domai
 		return domain.StarGiftUpgradePreview{}, false, nil
 	}
 	return s.gifts.CollectiblePreview(ctx, giftID)
+}
+
+// StarGiftCollectibleRevision (раунд 32) читает ЛЮБУЮ ревизию коллекции по id —
+// источник копирования моделей/узоров/фонов для новой ревизии («правка»
+// существующей ревизии или перенос пула с другого подарка).
+func (s *Service) StarGiftCollectibleRevision(ctx context.Context, revisionID int64) (domain.StarGiftCollectibleRevision, error) {
+	if s == nil || s.gifts == nil || revisionID <= 0 {
+		return domain.StarGiftCollectibleRevision{}, domain.ErrStarGiftCollectibleInvalid
+	}
+	return s.gifts.CollectibleRevision(ctx, revisionID)
 }
 
 func (s *Service) StarGiftCollectibleAnimation(ctx context.Context, giftID int64, kind domain.StarGiftCollectibleAttributeKind, attributeID int64) ([]byte, bool, error) {

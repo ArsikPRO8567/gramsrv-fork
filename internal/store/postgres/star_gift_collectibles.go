@@ -76,11 +76,17 @@ RETURNING id`, write.GiftID, revision, write.UpgradeStars, write.SupplyTotal, wr
 		media := NewMediaStore(tx)
 		insertAnimated := func(table string, attributes []domain.StarGiftCollectibleAttribute, models bool) error {
 			for _, attribute := range attributes {
-				if err := media.PutDocument(ctx, *attribute.Document); err != nil {
-					return fmt.Errorf("put collectible %s document: %w", attribute.Kind, err)
-				}
-				if err := media.PutFileBlob(ctx, *attribute.Blob); err != nil {
-					return fmt.Errorf("put collectible %s blob: %w", attribute.Kind, err)
+				// Раунд 33: скопированные атрибуты (ReuseDocument) ссылаются на
+				// УЖЕ сохранённые документ и blob — перезапись дедуплицированных
+				// строк не нужна, достаточно вставить строку атрибута с чужим
+				// document_id (FK documents проверит существование).
+				if !attribute.ReuseDocument {
+					if err := media.PutDocument(ctx, *attribute.Document); err != nil {
+						return fmt.Errorf("put collectible %s document: %w", attribute.Kind, err)
+					}
+					if err := media.PutFileBlob(ctx, *attribute.Blob); err != nil {
+						return fmt.Errorf("put collectible %s blob: %w", attribute.Kind, err)
+					}
 				}
 				animation := attribute.Animation
 				var query string
@@ -158,6 +164,13 @@ func (s *StarGiftStore) ActiveCollectibleRevision(ctx context.Context, giftID in
 		return domain.StarGiftCollectibleRevision{}, false, err
 	}
 	return revision, true, nil
+}
+
+// CollectibleRevisionFull (раунд 32) читает ЛЮБУЮ ревизию коллекции по id
+// независимо от статуса с полными метаданными анимаций (JSON) — источник для
+// копирования моделей/узоров/фонов в новую ревизию из админки.
+func (s *StarGiftStore) CollectibleRevisionFull(ctx context.Context, revisionID int64) (domain.StarGiftCollectibleRevision, error) {
+	return collectibleRevisionByID(ctx, s.db, revisionID)
 }
 
 func (s *StarGiftStore) ActiveCollectibleProjection(ctx context.Context, giftID int64, samplePerKind int) (domain.StarGiftCollectibleRevision, bool, error) {
@@ -482,9 +495,9 @@ func (s *StarGiftStore) ListUniqueThemeAvailable(ctx context.Context, userID int
 	}
 	rows, err := s.db.Query(ctx, uniqueStarGiftQuery(`
 ((u.owner_peer_type='user' AND u.owner_peer_id=$1)
-	OR (u.host_peer_type='user' AND u.host_peer_id=$1))
-	AND u.theme_available AND NOT u.burned AND u.owner_address=''
-	AND sg.lifecycle_status='active'`)+`
+        OR (u.host_peer_type='user' AND u.host_peer_id=$1))
+        AND u.theme_available AND NOT u.burned AND u.owner_address=''
+        AND sg.lifecycle_status='active'`)+`
 ORDER BY u.id DESC
 LIMIT $2`, userID, limit)
 	if err != nil {

@@ -304,6 +304,19 @@ func (s *StarGiftStore) ActiveCollectibleRevision(_ context.Context, giftID int6
 	return cloneCollectibleRevision(revision), ok, nil
 }
 
+// CollectibleRevisionFull (раунд 32) ищет ревизию по id среди всех подарков —
+// источник копирования атрибутов в памяти.
+func (s *StarGiftStore) CollectibleRevisionFull(_ context.Context, revisionID int64) (domain.StarGiftCollectibleRevision, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, revision := range s.collectibles {
+		if revision.ID == revisionID {
+			return cloneCollectibleRevision(revision), nil
+		}
+	}
+	return domain.StarGiftCollectibleRevision{}, domain.ErrStarGiftCollectibleInvalid
+}
+
 func (s *StarGiftStore) ActiveCollectibleProjection(_ context.Context, giftID int64, samplePerKind int) (domain.StarGiftCollectibleRevision, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

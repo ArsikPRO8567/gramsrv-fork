@@ -1016,7 +1016,7 @@ func (r *Router) starsTopupPaymentForm(ctx context.Context, userID int64, purpos
 		SpendPurposePeer: peer,
 		Stars:            purpose.Stars, Currency: purpose.Currency, Amount: purpose.Amount,
 		IssuedAt: now, ExpiresAt: now + 600,
-		// Раунд 32: канал приобретения фиксируется на форме и перепроверяется
+		// Раунд 33: канал приобретения фиксируется на форме и перепроверяется
 		// при settlement — транзакция получает корректный counterpart.
 		Acquisition: starsTopupAcquisitionForClient(r, ctx),
 	})
@@ -1069,7 +1069,7 @@ func (r *Router) sendStarsTopupForm(ctx context.Context, userID, formID int64, i
 			FormID: formID, Kind: domain.StarsPurchaseTopup, BuyerUserID: userID,
 			SpendPurposePeer: peer,
 			Stars:            purpose.Stars, Currency: purpose.Currency, Amount: purpose.Amount,
-			// Раунд 32: тот же канал, что был зафиксирован на форме —
+			// Раунд 33: тот же канал, что был зафиксирован на форме —
 			// store сверяет purpose_json и пишет корректный reason.
 			Acquisition: starsTopupAcquisitionForClient(r, ctx),
 		},
@@ -2133,6 +2133,24 @@ func tgSavedStarGifts(viewerUserID int64, gifts []domain.SavedStarGift, catalog 
 			if g.PrepaidUpgradeStars > 0 && canIssue {
 				item.SetUpgradeStars(g.PrepaidUpgradeStars)
 				item.CanUpgrade = true
+			} else if canIssue && current.UpgradeStars == 0 && g.PrepaidUpgradeStars <= 0 {
+				// Раунд 33: бесплатное улучшение (опубликованная ревизия с
+				// ценой 0 — аукционные экземпляры) в профиле тоже требует
+				// положительного ВНЕШНЕГО savedStarGift.upgrade_stars:
+				// клиент выбирает caption «Улучшить бесплатно» (UpgradeButtonFree)
+				// и прямой payments.upgradeStarGift без платёжной формы только
+				// при upgrade_stars>0, иначе рисует платное «Улучшить». Значение —
+				// цена улучшения из каталога, покрытая выигрышной ставкой
+				// (при нулевой цене в каталоге — минимальная положительная,
+				// чтобы клиент не уходил в платный сценарий).
+				wrapperUpgrade := int64(0)
+				if catalogGift, ok := catalog[g.RevisionID]; ok {
+					wrapperUpgrade = catalogGift.UpgradeStars
+				}
+				if wrapperUpgrade <= 0 {
+					wrapperUpgrade = 1
+				}
+				item.SetUpgradeStars(wrapperUpgrade)
 			}
 			// Раунд 21: savedStarGift.refunded — платёж за подарок
 			// возвращён, улучшение откачено до исходного состояния; клиент
