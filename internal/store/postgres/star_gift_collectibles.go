@@ -1184,3 +1184,284 @@ func samePostgresIntSet(a, b []int) bool {
 	}
 	return len(seen) == 0
 }
+
+// SyncActiveCollectibleRevision (раунд 37) правит СУЩЕСТВУЮЩУЮ опубликованную
+// ревизию подарка «на месте». Форма присылает ПОЛНЫЙ пул: строки атрибутов с
+// ID обновляются (id и, значит, ссылки выпущенных подарков сохраняются), без
+// ID — добавляются, отсутствующие в форме — снимаются. Снятие строки, на
+// которую ссылается выпущенный подарок, отклоняется понятной ошибкой (FK
+// RESTRICT тоже защищает, но явная проверка даёт осмысленный текст).
+//
+// Основные поля ревизии (upgrade_stars/supply_total/slug_prefix) обновляются
+// в той же строке ревизии; новая ревизия не создаётся и issued не трогается.
+// Валидация та же, что и у публикации: полный пул, минимум два selectable
+// атрибута каждого анимированного вида, различные документы.
+func (s *StarGiftStore) SyncActiveCollectibleRevision(ctx context.Context, write domain.StarGiftCollectibleWrite) (domain.StarGiftCollectibleRevision, error) {
+	write.SlugPrefix = strings.ToLower(strings.TrimSpace(write.SlugPrefix))
+	write.Actor = strings.TrimSpace(write.Actor)
+	write.CommandID = strings.TrimSpace(write.CommandID)
+	// Нормализация строк правки: UPDATE-строки, ссылающиеся на сохранённый
+	// документ (Document есть, Blob нет — как их отдаёт чтение ревизии),
+	// валидируются как переиспользование; новые строки с файлами материализует
+	// вызывающий (app-слой).
+	for i := range write.Models {
+		if write.Models[i].ID > 0 && write.Models[i].Document != nil && write.Models[i].Blob == nil {
+			write.Models[i].ReuseDocument = true
+		}
+	}
+	for i := range write.Patterns {
+		if write.Patterns[i].ID > 0 && write.Patterns[i].Document != nil && write.Patterns[i].Blob == nil {
+			write.Patterns[i].ReuseDocument = true
+		}
+	}
+	if err := domain.ValidateStarGiftCollectibleWrite(write); err != nil {
+		return domain.StarGiftCollectibleRevision{}, err
+	}
+	var result domain.StarGiftCollectibleRevision
+	err := withTx(ctx, s.db, "sync collectible star gift revision", func(tx pgx.Tx) error {
+		var activeRevisionID pgtype.Int8
+		if err := tx.QueryRow(ctx, `SELECT collectible_revision_id FROM star_gift_catalog WHERE gift_id=$1 FOR UPDATE`,
+			write.GiftID).Scan(&activeRevisionID); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return domain.ErrStarGiftNotFound
+			}
+			return fmt.Errorf("lock collectible catalog gift: %w", err)
+		}
+		if !activeRevisionID.Valid {
+			// Активной ревизии нет — синхронизировать нечего; вызывающий
+			// должен публиковать новую (PublishCollectibleRevision).
+			return domain.ErrStarGiftCollectibleInvalid
+		}
+		revisionID := activeRevisionID.Int64
+		var revisionGiftID int64
+		if err := tx.QueryRow(ctx, `SELECT gift_id FROM star_gift_collectible_revisions WHERE id=$1 FOR UPDATE`,
+			revisionID).Scan(&revisionGiftID); err != nil {
+			return fmt.Errorf("lock collectible revision: %w", err)
+		}
+		if revisionGiftID != write.GiftID {
+			return domain.ErrStarGiftCollectibleInvalid
+		}
+		if _, err := tx.Exec(ctx, `
+UPDATE star_gift_collectible_revisions
+SET upgrade_stars=$2, supply_total=$3, slug_prefix=$4, created_by=$5, command_id=$6
+WHERE id=$1`, revisionID, write.UpgradeStars, write.SupplyTotal, write.SlugPrefix, write.Actor, write.CommandID); err != nil {
+			return fmt.Errorf("update collectible revision: %w", err)
+		}
+		media := NewMediaStore(tx)
+		if err := syncAnimatedCollectibleAttributes(ctx, tx, media, revisionID, "star_gift_collectible_models",
+			domain.StarGiftCollectibleModel, write.Models); err != nil {
+			return err
+		}
+		if err := syncAnimatedCollectibleAttributes(ctx, tx, media, revisionID, "star_gift_collectible_patterns",
+			domain.StarGiftCollectiblePattern, write.Patterns); err != nil {
+			return err
+		}
+		if err := syncCollectibleBackdrops(ctx, tx, revisionID, write.Backdrops); err != nil {
+			return err
+		}
+		var err error
+		result, err = collectibleRevisionByID(ctx, tx, revisionID)
+		return err
+	})
+	return result, err
+}
+
+// syncAnimatedCollectibleAttributes синхронизирует один анимированный пул
+// (модели или узоры) опубликованной ревизии: UPDATE по ID, INSERT без ID,
+// DELETE отсутствующих (с проверкой ссылок выпущенных подарков).
+func syncAnimatedCollectibleAttributes(ctx context.Context, tx pgx.Tx, media *MediaStore, revisionID int64,
+	table string, kind domain.StarGiftCollectibleAttributeKind, attributes []domain.StarGiftCollectibleAttribute) error {
+	if kind == domain.StarGiftCollectibleModel {
+		// Редкость моделей: permille с ограничением 1..1000 либо именованная
+		// crafted-редкость — констрейнт star_gift_collectible_model_rarity_check.
+	} else if kind != domain.StarGiftCollectiblePattern {
+		return domain.ErrStarGiftCollectibleInvalid
+	}
+	rows, err := tx.Query(ctx, fmt.Sprintf(`SELECT id FROM %s WHERE collectible_revision_id=$1`, table), revisionID)
+	if err != nil {
+		return fmt.Errorf("list collectible %s ids: %w", kind, err)
+	}
+	existing := make(map[int64]struct{})
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return fmt.Errorf("scan collectible %s id: %w", kind, err)
+		}
+		existing[id] = struct{}{}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("iterate collectible %s ids: %w", kind, err)
+	}
+	rows.Close()
+
+	kept := make(map[int64]struct{}, len(attributes))
+	for _, attribute := range attributes {
+		if attribute.ID > 0 {
+			if _, ok := existing[attribute.ID]; !ok {
+				return fmt.Errorf("%w: %s attribute %d does not belong to revision %d",
+					domain.ErrStarGiftCollectibleInvalid, kind, attribute.ID, revisionID)
+			}
+			kept[attribute.ID] = struct{}{}
+			// crafted существует только у моделей (как в INSERT-пути).
+			updateQuery := fmt.Sprintf(`
+UPDATE %s SET
+    name=$3, document_id=$4, animation_json=$5::jsonb, animation_sha256=$6,
+    source_name=$7, source_format=$8, width=$9, height=$10, frame_rate=$11, in_point=$12, out_point=$13,
+    rarity_kind=$14, rarity_permille=$15, crafted=$16, sort_order=$17
+WHERE id=$1 AND collectible_revision_id=$2`, table)
+			updateArgs := []any{attribute.ID, revisionID, strings.TrimSpace(attribute.Name), attribute.Document.ID,
+				string(attribute.Animation.JSON), attribute.Animation.SHA256, attribute.Animation.SourceName,
+				string(attribute.Animation.SourceFormat), attribute.Animation.Width, attribute.Animation.Height,
+				attribute.Animation.FrameRate, attribute.Animation.InPoint, attribute.Animation.OutPoint,
+				string(attribute.RarityKind), nullablePermille(attribute), attribute.Crafted, attribute.SortOrder}
+			if kind != domain.StarGiftCollectibleModel {
+				updateQuery = fmt.Sprintf(`
+UPDATE %s SET
+    name=$3, document_id=$4, animation_json=$5::jsonb, animation_sha256=$6,
+    source_name=$7, source_format=$8, width=$9, height=$10, frame_rate=$11, in_point=$12, out_point=$13,
+    rarity_kind=$14, rarity_permille=$15, sort_order=$16
+WHERE id=$1 AND collectible_revision_id=$2`, table)
+				updateArgs = []any{attribute.ID, revisionID, strings.TrimSpace(attribute.Name), attribute.Document.ID,
+					string(attribute.Animation.JSON), attribute.Animation.SHA256, attribute.Animation.SourceName,
+					string(attribute.Animation.SourceFormat), attribute.Animation.Width, attribute.Animation.Height,
+					attribute.Animation.FrameRate, attribute.Animation.InPoint, attribute.Animation.OutPoint,
+					string(attribute.RarityKind), nullablePermille(attribute), attribute.SortOrder}
+			}
+			if _, err := tx.Exec(ctx, updateQuery, updateArgs...); err != nil {
+				return fmt.Errorf("update collectible %s attribute: %w", kind, err)
+			}
+			continue
+		}
+		// Новая строка: документ и blob сохраняются (если не копия).
+		if !attribute.ReuseDocument {
+			if err := media.PutDocument(ctx, *attribute.Document); err != nil {
+				return fmt.Errorf("put collectible %s document: %w", kind, err)
+			}
+			if err := media.PutFileBlob(ctx, *attribute.Blob); err != nil {
+				return fmt.Errorf("put collectible %s blob: %w", kind, err)
+			}
+		}
+		animation := attribute.Animation
+		if _, err := tx.Exec(ctx, fmt.Sprintf(`
+INSERT INTO %s
+    (collectible_revision_id, name, document_id, animation_json, animation_sha256,
+     source_name, source_format, width, height, frame_rate, in_point, out_point,
+     rarity_kind, rarity_permille, crafted, official_document_id, sort_order)
+VALUES ($1,$2,$3,$4::jsonb,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)`, table),
+			revisionID, strings.TrimSpace(attribute.Name), attribute.Document.ID,
+			string(animation.JSON), animation.SHA256, animation.SourceName, string(animation.SourceFormat),
+			animation.Width, animation.Height, animation.FrameRate, animation.InPoint, animation.OutPoint,
+			string(attribute.RarityKind), nullablePermille(attribute), attribute.Crafted,
+			nullablePositiveInt64(attribute.OfficialDocumentID), attribute.SortOrder); err != nil {
+			return fmt.Errorf("insert collectible %s attribute: %w", kind, err)
+		}
+	}
+	// Снятие отсутствующих в форме строк: выпущенные подарки держат составной
+	// FK (attribute_id, collectible_revision_id) — отказ с понятной ошибкой.
+	removed := make([]int64, 0, len(existing))
+	for id := range existing {
+		if _, ok := kept[id]; !ok {
+			removed = append(removed, id)
+		}
+	}
+	if len(removed) == 0 {
+		return nil
+	}
+	idColumn := "model_attribute_id"
+	if kind == domain.StarGiftCollectiblePattern {
+		idColumn = "pattern_attribute_id"
+	}
+	var referenced int64
+	if err := tx.QueryRow(ctx, fmt.Sprintf(`
+SELECT COUNT(*) FROM unique_star_gifts
+WHERE collectible_revision_id=$1 AND %s = ANY($2)`, idColumn), revisionID, removed).Scan(&referenced); err != nil {
+		return fmt.Errorf("check collectible %s attribute references: %w", kind, err)
+	}
+	if referenced > 0 {
+		return fmt.Errorf("%w: %d issued gift(s) reference removed %s attributes",
+			domain.ErrStarGiftCollectibleAttributeInUse, referenced, kind)
+	}
+	if _, err := tx.Exec(ctx, fmt.Sprintf(`DELETE FROM %s WHERE collectible_revision_id=$1 AND id = ANY($2)`, table),
+		revisionID, removed); err != nil {
+		return fmt.Errorf("delete collectible %s attributes: %w", kind, err)
+	}
+	return nil
+}
+
+// syncCollectibleBackdrops синхронизирует пул фонов опубликованной ревизии:
+// UPDATE по ID, INSERT без ID, DELETE отсутствующих (с проверкой ссылок).
+func syncCollectibleBackdrops(ctx context.Context, tx pgx.Tx, revisionID int64, attributes []domain.StarGiftCollectibleAttribute) error {
+	rows, err := tx.Query(ctx, `SELECT id FROM star_gift_collectible_backdrops WHERE collectible_revision_id=$1`, revisionID)
+	if err != nil {
+		return fmt.Errorf("list collectible backdrop ids: %w", err)
+	}
+	existing := make(map[int64]struct{})
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return fmt.Errorf("scan collectible backdrop id: %w", err)
+		}
+		existing[id] = struct{}{}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("iterate collectible backdrop ids: %w", err)
+	}
+	rows.Close()
+
+	kept := make(map[int64]struct{}, len(attributes))
+	for _, attribute := range attributes {
+		if attribute.ID > 0 {
+			if _, ok := existing[attribute.ID]; !ok {
+				return fmt.Errorf("%w: backdrop attribute %d does not belong to revision %d",
+					domain.ErrStarGiftCollectibleInvalid, attribute.ID, revisionID)
+			}
+			kept[attribute.ID] = struct{}{}
+			if _, err := tx.Exec(ctx, `
+UPDATE star_gift_collectible_backdrops SET
+    name=$3, backdrop_id=$4, center_color=$5, edge_color=$6, pattern_color=$7, text_color=$8,
+    rarity_kind=$9, rarity_permille=$10, sort_order=$11
+WHERE id=$1 AND collectible_revision_id=$2`,
+				attribute.ID, revisionID, strings.TrimSpace(attribute.Name), attribute.BackdropID,
+				attribute.CenterColor, attribute.EdgeColor, attribute.PatternColor, attribute.TextColor,
+				string(attribute.RarityKind), nullablePermille(attribute), attribute.SortOrder); err != nil {
+				return fmt.Errorf("update collectible backdrop: %w", err)
+			}
+			continue
+		}
+		if _, err := tx.Exec(ctx, `
+INSERT INTO star_gift_collectible_backdrops
+    (collectible_revision_id, name, backdrop_id, center_color, edge_color, pattern_color,
+     text_color, rarity_kind, rarity_permille, sort_order)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`, revisionID, strings.TrimSpace(attribute.Name), attribute.BackdropID,
+			attribute.CenterColor, attribute.EdgeColor, attribute.PatternColor, attribute.TextColor,
+			string(attribute.RarityKind), nullablePermille(attribute), attribute.SortOrder); err != nil {
+			return fmt.Errorf("insert collectible backdrop: %w", err)
+		}
+	}
+	removed := make([]int64, 0, len(existing))
+	for id := range existing {
+		if _, ok := kept[id]; !ok {
+			removed = append(removed, id)
+		}
+	}
+	if len(removed) == 0 {
+		return nil
+	}
+	var referenced int64
+	if err := tx.QueryRow(ctx, `
+SELECT COUNT(*) FROM unique_star_gifts
+WHERE collectible_revision_id=$1 AND backdrop_attribute_id = ANY($2)`, revisionID, removed).Scan(&referenced); err != nil {
+		return fmt.Errorf("check collectible backdrop references: %w", err)
+	}
+	if referenced > 0 {
+		return fmt.Errorf("%w: %d issued gift(s) reference removed backdrop attributes",
+			domain.ErrStarGiftCollectibleAttributeInUse, referenced)
+	}
+	if _, err := tx.Exec(ctx, `DELETE FROM star_gift_collectible_backdrops WHERE collectible_revision_id=$1 AND id = ANY($2)`,
+		revisionID, removed); err != nil {
+		return fmt.Errorf("delete collectible backdrops: %w", err)
+	}
+	return nil
+}

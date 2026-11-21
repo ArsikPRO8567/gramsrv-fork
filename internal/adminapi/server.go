@@ -1048,6 +1048,11 @@ func (s *Server) handlePublishStarGiftCollectibles(w http.ResponseWriter, r *htt
 		}
 		upload.FileKey = strings.TrimSpace(upload.FileKey)
 		if upload.FileKey == "" {
+			// Раунд 37: правка строки активной ревизии (attribute_id>0) без
+			// файла — анимация остаётся прежней; с файлом — заменяется.
+			if upload.AttributeID > 0 {
+				return nil
+			}
 			return fmt.Errorf("animation file key is required")
 		}
 		if _, ok := seen[upload.FileKey]; ok {

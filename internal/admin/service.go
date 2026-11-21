@@ -311,6 +311,9 @@ type GiftsService interface {
 	SetCatalogSortOrder(ctx context.Context, giftID int64, sortOrder int) (bool, error)
 	AnimationJSON(ctx context.Context, giftID int64) ([]byte, bool, error)
 	CreateCollectibleRevision(ctx context.Context, write domain.StarGiftCollectibleWrite) (domain.StarGiftCollectibleRevision, error)
+	// ActiveCollectibleRevision (раунд 37) — активная ревизия подарка с полными
+	// метаданными строк атрибутов: источник правки «на месте».
+	ActiveCollectibleRevision(ctx context.Context, giftID int64) (domain.StarGiftCollectibleRevision, bool, error)
 	CollectiblePreview(ctx context.Context, giftID int64) (domain.StarGiftUpgradePreview, bool, error)
 	CollectibleRevision(ctx context.Context, revisionID int64) (domain.StarGiftCollectibleRevision, error)
 	// SetCollectibleSupplyTotal (раунд 34) правит лимит возможных улучшенных
@@ -969,8 +972,13 @@ type StarGiftCollectibleAnimationUpload struct {
 	// Раунд 34: своя ревизия-источник для каждой записи — копирование блоками
 	// (модели/фоны/узоры) из РАЗНЫХ ревизий в одной команде; 0 = общий
 	// req.CopyFromRevisionID.
-	CopyFromRevisionID int64  `json:"copy_from_revision_id,string,omitempty"`
-	Data               []byte `json:"-"`
+	CopyFromRevisionID int64 `json:"copy_from_revision_id,string,omitempty"`
+	// Раунд 37: правка существующей строки атрибута активной ревизии этого
+	// подарка («на месте»). >0 — строка ОБНОВЛЯЕТСЯ (id и ссылки выпущенных
+	// подарков сохраняются); файл опционален: без файла анимация остаётся
+	// прежней. 0 = новая строка (INSERT).
+	AttributeID int64  `json:"attribute_id,string,omitempty"`
+	Data        []byte `json:"-"`
 }
 
 type StarGiftCollectibleBackdropInput struct {
@@ -982,6 +990,8 @@ type StarGiftCollectibleBackdropInput struct {
 	TextColor      int    `json:"text_color"`
 	RarityPermille int    `json:"rarity_permille"`
 	SortOrder      int    `json:"sort_order"`
+	// Раунд 37: правка существующей строки фона активной ревизии; 0 = новая.
+	AttributeID int64 `json:"attribute_id,string,omitempty"`
 }
 
 type PublishStarGiftCollectiblesRequest struct {
@@ -4402,6 +4412,13 @@ func (s *Service) PublishStarGiftCollectibles(ctx context.Context, req PublishSt
 		}
 		return named, 0, true, nil
 	}
+	// Раунд 37: активная ревизия подарка (если есть) — источник правки строк
+	// «на месте»: записи с attribute_id обновляются в тех же строках, что
+	// сохраняет ссылки выпущенных подарков.
+	activeRevision, hasActive, activeErr := s.gifts.ActiveCollectibleRevision(ctx, req.GiftID)
+	if activeErr != nil {
+		return CommandResult{}, activeErr
+	}
 	// Раунд 33: копирование атрибутов из другой ревизии (та же ревизия этого
 	// подарка — «правка существующей ревизии», или любой другой подарок).
 	// Копированная запись ссылается на существующий документ: файл не
@@ -4481,9 +4498,82 @@ func (s *Service) PublishStarGiftCollectibles(ctx context.Context, req PublishSt
 		return domain.StarGiftCollectibleAttribute{}, false, fmt.Errorf("%w: copy source %s document %d not found in revision %d",
 			domain.ErrStarGiftCollectibleInvalid, kind, upload.CopyDocumentID, sourceRevisionID)
 	}
+	// Раунд 37: правка строки активной ревизии. Запись с attribute_id>0
+	// обязана ссылаться на строку АКТИВНОЙ ревизии этого подарка; файл
+	// опционален — без него документ и метаданные анимации берутся из
+	// существующей строки (ReuseDocument), с файлом анимация заменяется
+	// (документ перезаписывается на новый в материализации).
+	resolveUpdate := func(kind domain.StarGiftCollectibleAttributeKind, upload StarGiftCollectibleAnimationUpload) (domain.StarGiftCollectibleAttribute, error) {
+		if !hasActive {
+			return domain.StarGiftCollectibleAttribute{}, fmt.Errorf(
+				"%w: attribute_id %d without an active revision of gift %d",
+				domain.ErrStarGiftCollectibleInvalid, upload.AttributeID, req.GiftID)
+		}
+		var pool []domain.StarGiftCollectibleAttribute
+		switch kind {
+		case domain.StarGiftCollectibleModel:
+			pool = activeRevision.Models
+		case domain.StarGiftCollectiblePattern:
+			pool = activeRevision.Patterns
+		default:
+			return domain.StarGiftCollectibleAttribute{}, domain.ErrStarGiftCollectibleInvalid
+		}
+		for _, candidate := range pool {
+			if candidate.ID != upload.AttributeID {
+				continue
+			}
+			rarity, permille, crafted, err := resolveRarity(kind, upload.RarityKind, upload.RarityPermille)
+			if err != nil {
+				// Без явной редкости строка сохраняет текущую.
+				if upload.RarityKind == "" && upload.RarityPermille <= 0 {
+					rarity, permille, crafted = candidate.RarityKind, candidate.RarityPermille, candidate.Crafted
+				} else {
+					return domain.StarGiftCollectibleAttribute{}, err
+				}
+			}
+			name := strings.TrimSpace(upload.Name)
+			if name == "" {
+				name = candidate.Name
+			}
+			updated := candidate
+			updated.Kind = kind
+			updated.Name = name
+			updated.RarityKind = rarity
+			updated.RarityPermille = permille
+			updated.Crafted = crafted
+			updated.SortOrder = upload.SortOrder
+			if strings.TrimSpace(upload.FileKey) == "" || len(upload.Data) == 0 {
+				// Анимация не меняется: документ/blob/метаданные из строки.
+				updated.ReuseDocument = true
+				updated.Blob = nil
+				return updated, nil
+			}
+			animation, err := s.gifts.PrepareAnimation(upload.FileName, upload.Data)
+			if err != nil {
+				return domain.StarGiftCollectibleAttribute{}, fmt.Errorf("prepare %s %q: %w", kind, upload.Name, err)
+			}
+			upload.ContentSHA = hex.EncodeToString(animation.SHA256)
+			updated.Animation = &animation
+			updated.Document = nil
+			updated.Blob = nil
+			updated.ReuseDocument = false
+			return updated, nil
+		}
+		return domain.StarGiftCollectibleAttribute{}, fmt.Errorf(
+			"%w: %s attribute %d not found in active revision %d of gift %d",
+			domain.ErrStarGiftCollectibleInvalid, kind, upload.AttributeID, activeRevision.ID, req.GiftID)
+	}
 	buildAttributes := func(kind domain.StarGiftCollectibleAttributeKind, uploads []StarGiftCollectibleAnimationUpload) ([]domain.StarGiftCollectibleAttribute, error) {
 		attributes := make([]domain.StarGiftCollectibleAttribute, 0, len(uploads))
 		for i := range uploads {
+			if uploads[i].AttributeID > 0 {
+				updated, err := resolveUpdate(kind, uploads[i])
+				if err != nil {
+					return nil, err
+				}
+				attributes = append(attributes, updated)
+				continue
+			}
 			copied, isCopy, err := resolveCopy(kind, uploads[i])
 			if err != nil {
 				return nil, err
@@ -4524,12 +4614,38 @@ func (s *Service) PublishStarGiftCollectibles(ctx context.Context, req PublishSt
 			return CommandResult{}, err
 		}
 		_ = crafted
-		backdrops[i] = domain.StarGiftCollectibleAttribute{
+		row := domain.StarGiftCollectibleAttribute{
 			Kind: domain.StarGiftCollectibleBackdrop, Name: strings.TrimSpace(backdrop.Name), BackdropID: backdrop.BackdropID,
 			CenterColor: backdrop.CenterColor, EdgeColor: backdrop.EdgeColor, PatternColor: backdrop.PatternColor,
 			TextColor: backdrop.TextColor, RarityKind: rarity,
 			RarityPermille: permille, SortOrder: backdrop.SortOrder,
 		}
+		// Раунд 37: правка строки фона активной ревизии «на месте».
+		if backdrop.AttributeID > 0 {
+			if !hasActive {
+				return CommandResult{}, fmt.Errorf(
+					"%w: backdrop attribute_id %d without an active revision of gift %d",
+					domain.ErrStarGiftCollectibleInvalid, backdrop.AttributeID, req.GiftID)
+			}
+			matched := false
+			for _, candidate := range activeRevision.Backdrops {
+				if candidate.ID != backdrop.AttributeID {
+					continue
+				}
+				matched = true
+				if row.Name == "" {
+					row.Name = candidate.Name
+				}
+				break
+			}
+			if !matched {
+				return CommandResult{}, fmt.Errorf(
+					"%w: backdrop attribute %d not found in active revision %d of gift %d",
+					domain.ErrStarGiftCollectibleInvalid, backdrop.AttributeID, activeRevision.ID, req.GiftID)
+			}
+			row.ID = backdrop.AttributeID
+		}
+		backdrops[i] = row
 	}
 	write := domain.StarGiftCollectibleWrite{
 		GiftID: req.GiftID, UpgradeStars: req.UpgradeStars, SupplyTotal: req.SupplyTotal,
@@ -4543,13 +4659,13 @@ func (s *Service) PublishStarGiftCollectibles(ctx context.Context, req PublishSt
 	// rejected by the shared idempotency boundary even though raw file bytes are not audit-logged.
 	// Скопированные записи не несут анимации — их ContentSHA остаётся пустым.
 	for i := range req.Models {
-		if req.Models[i].CopyDocumentID > 0 || models[i].Animation == nil {
+		if req.Models[i].CopyDocumentID > 0 || req.Models[i].AttributeID > 0 && req.Models[i].FileKey == "" || models[i].Animation == nil {
 			continue
 		}
 		req.Models[i].ContentSHA = hex.EncodeToString(models[i].Animation.SHA256)
 	}
 	for i := range req.Patterns {
-		if req.Patterns[i].CopyDocumentID > 0 || patterns[i].Animation == nil {
+		if req.Patterns[i].CopyDocumentID > 0 || req.Patterns[i].AttributeID > 0 && req.Patterns[i].FileKey == "" || patterns[i].Animation == nil {
 			continue
 		}
 		req.Patterns[i].ContentSHA = hex.EncodeToString(patterns[i].Animation.SHA256)
@@ -4570,12 +4686,33 @@ func (s *Service) PublishStarGiftCollectibles(ctx context.Context, req PublishSt
 		}
 	}
 	return s.runCommand(ctx, req.CommandMeta, ActionPublishGiftCollectibles, 0, domain.Peer{}, req, func() (CommandResult, error) {
+		updatedModels, updatedPatterns, updatedBackdrops := 0, 0, 0
+		for i := range req.Models {
+			if req.Models[i].AttributeID > 0 {
+				updatedModels++
+			}
+		}
+		for i := range req.Patterns {
+			if req.Patterns[i].AttributeID > 0 {
+				updatedPatterns++
+			}
+		}
+		for i := range req.Backdrops {
+			if req.Backdrops[i].AttributeID > 0 {
+				updatedBackdrops++
+			}
+		}
 		details := map[string]any{
 			"gift_id": strconv.FormatInt(req.GiftID, 10), "upgrade_stars": strconv.FormatInt(req.UpgradeStars, 10),
 			"supply_total": req.SupplyTotal,
 			"slug_prefix":  write.SlugPrefix, "models": collectibleUploadDetails(req.Models),
 			"patterns": collectibleUploadDetails(req.Patterns), "backdrops": len(req.Backdrops),
 			"copied_models": copiedModels, "copied_patterns": copiedPatterns, "crafted_models": craftedModels,
+			"updated_models": updatedModels, "updated_patterns": updatedPatterns, "updated_backdrops": updatedBackdrops,
+		}
+		if hasActive {
+			details["sync_revision_id"] = strconv.FormatInt(activeRevision.ID, 10)
+			details["sync_revision"] = activeRevision.Revision
 		}
 		if req.CopyFromRevisionID > 0 {
 			details["copy_from_revision_id"] = strconv.FormatInt(req.CopyFromRevisionID, 10)

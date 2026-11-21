@@ -96,8 +96,12 @@ func TestStarGiftCollectibleUpgradeAggregatePostgres(t *testing.T) {
         if _, ok := availability[entry.Gift.ID+1]; ok {
                 t.Fatalf("unknown gift must not have collectible availability: %+v", availability)
         }
-        if _, err := pool.Exec(ctx, `UPDATE star_gift_collectible_revisions SET issued=issued WHERE id=$1`, poolRevision.ID); err == nil {
-                t.Fatal("published collectible revision accepted a non-advancing issuance update")
+        // Раунд 37: правка опубликованной ревизии «на месте» разрешена —
+        // опубликованный пул больше не заморожен целиком; охрана запрещает
+        // только откат выдачи (issued), смену подарка/номера/статуса и
+        // перемещение строк атрибутов между ревизиями.
+        if _, err := pool.Exec(ctx, `UPDATE star_gift_collectible_revisions SET issued=issued-1 WHERE id=$1`, poolRevision.ID); err == nil {
+                t.Fatal("published collectible revision accepted an issuance decrease")
         }
         var guardedIssued int
         if err := pool.QueryRow(ctx, `SELECT issued FROM star_gift_collectible_revisions WHERE id=$1`, poolRevision.ID).Scan(&guardedIssued); err != nil || guardedIssued != 0 {

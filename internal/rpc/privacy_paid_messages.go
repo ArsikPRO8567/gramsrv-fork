@@ -98,40 +98,50 @@ func (r *Router) viewerIsPremiumForPrivacy(ctx context.Context, viewerUserID int
 	return premium, nil
 }
 
-func (r *Router) ensurePrivateContactAllowed(
+// privateContactPaidStarsFor решает, сколько Stars нужно заплатить за ОДНО
+// сообщение получателю. Гейт официального клиента:
+//  1. не-контакт с require_premium без Premium → PREMIUM_ACCOUNT_REQUIRED;
+//  2. не-контакт с ценой paidStars: allow_paid_stars из запроса должен
+//     покрывать paidStars × messageCount, иначе ALLOW_PAYMENT_REQUIRED(сумма) —
+//     клиент показывает платёжную форму и повторяет отправку с авторизацией;
+//  3. иначе возвращает цену ОДНОГО сообщения (0 = бесплатно).
+//
+// Раунд 37: сам платёж выполняет store в транзакции отправки
+// (chargePrivatePaidMessageTx) — списание отправителю и зачисление
+// получателю с одним публичным ID транзакции. Здесь PAYMENT_UNSUPPORTED
+// больше не возвращается: проверка без списания и была причиной
+// неработающих платных сообщений.
+func (r *Router) privateContactPaidStarsFor(
 	ctx context.Context,
 	senderUserID, recipientUserID, allowPaidStars int64,
 	messageCount int,
-) error {
+) (int64, error) {
 	if allowPaidStars < 0 || messageCount < 1 {
-		return starsAmountInvalidErr()
+		return 0, starsAmountInvalidErr()
 	}
 	requirement, err := r.privateContactRestrictionFor(ctx, senderUserID, recipientUserID)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	if requirement.requirePremium {
 		premium, err := r.viewerIsPremiumForPrivacy(ctx, senderUserID)
 		if err != nil {
-			return err
+			return 0, err
 		}
 		if !premium {
-			return premiumAccountRequiredErr()
+			return 0, premiumAccountRequiredErr()
 		}
-		return nil
+		return 0, nil
 	}
 	if requirement.paidStars <= 0 {
-		return nil
+		return 0, nil
 	}
 	if requirement.paidStars > math.MaxInt64/int64(messageCount) {
-		return starsAmountInvalidErr()
+		return 0, starsAmountInvalidErr()
 	}
 	required := requirement.paidStars * int64(messageCount)
 	if allowPaidStars < required {
-		return allowPaymentRequiredErr(required)
+		return 0, allowPaymentRequiredErr(required)
 	}
-	// The privacy gate and no-paid exception are complete here. The separate
-	// private paid-message ledger is not part of the current message store yet;
-	// never accept an authorization without an atomic debit.
-	return paymentUnsupportedErr()
+	return requirement.paidStars, nil
 }

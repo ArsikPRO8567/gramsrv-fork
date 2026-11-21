@@ -435,6 +435,20 @@ WHERE b.owner_user_id=$1 AND b.box_id=$2`, owner.ID, upgraded.Send.SenderMessage
 	if err != nil || tonPage.Balance != 999000 || len(tonPage.Transactions) < 2 {
 		t.Fatalf("TON ledger page = %+v err %v", tonPage, err)
 	}
+	// Раунд 37: перевод между аккаунтами — у списания покупателя и зачисления
+	// продавца ОДИН публичный transaction_id.
+	var buyerResaleTxnID, sellerResaleTxnID string
+	if err := pool.QueryRow(ctx, `SELECT transaction_id FROM ton_transactions WHERE user_id=$1 AND reason='gift_resale' AND amount_nanoton<0`,
+		resaleBuyer.ID).Scan(&buyerResaleTxnID); err != nil || buyerResaleTxnID == "" {
+		t.Fatalf("buyer resale txn id = %q err %v", buyerResaleTxnID, err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT transaction_id FROM ton_transactions WHERE user_id=$1 AND reason='gift_resale' AND amount_nanoton>0`,
+		offerBuyer.ID).Scan(&sellerResaleTxnID); err != nil || sellerResaleTxnID == "" {
+		t.Fatalf("seller resale txn id = %q err %v", sellerResaleTxnID, err)
+	}
+	if buyerResaleTxnID != sellerResaleTxnID {
+		t.Fatalf("resale transaction ids must match: buyer %q seller %q", buyerResaleTxnID, sellerResaleTxnID)
+	}
 
 	transferred, err := lifecycle.TransferStarGift(ctx, domain.StarGiftTransferRequest{ActorUserID: resaleBuyer.ID,
 		Ref: domain.SavedStarGiftRef{Owner: domain.Peer{Type: domain.PeerTypeUser, ID: resaleBuyer.ID}, MsgID: resold.Saved.MsgID},
@@ -1315,6 +1329,20 @@ AND media #>> '{service_action,star_gift_unique,transferred}' IS NULL`,
 	}
 	if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM channel_ton_transactions WHERE channel_id=$1 AND gift_id=$2`, created.Channel.ID, listed.ID).Scan(&channelTONTxns); err != nil || channelTONTxns != 1 {
 		t.Fatalf("channel local TON transactions = %d err %v", channelTONTxns, err)
+	}
+	// Раунд 37: покупка в канал — списание покупателя и зачисление каналу
+	// тоже носят один публичный transaction_id.
+	var buyerChannelResaleTxnID, channelResaleTxnID string
+	if err := pool.QueryRow(ctx, `SELECT transaction_id FROM ton_transactions WHERE user_id=$1 AND reason='gift_resale' AND amount_nanoton<0`,
+		actor.ID).Scan(&buyerChannelResaleTxnID); err != nil || buyerChannelResaleTxnID == "" {
+		t.Fatalf("channel resale buyer txn id = %q err %v", buyerChannelResaleTxnID, err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT transaction_id FROM channel_ton_transactions WHERE channel_id=$1 AND reason='gift_resale' AND amount_nanoton>0`,
+		created.Channel.ID).Scan(&channelResaleTxnID); err != nil || channelResaleTxnID == "" {
+		t.Fatalf("channel resale credit txn id = %q err %v", channelResaleTxnID, err)
+	}
+	if buyerChannelResaleTxnID != channelResaleTxnID {
+		t.Fatalf("channel resale transaction ids must match: buyer %q channel %q", buyerChannelResaleTxnID, channelResaleTxnID)
 	}
 	if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM channel_admin_log_events WHERE channel_id=$1 AND message::text LIKE '%star_gift_unique%'`,
 		createdTarget.Channel.ID).Scan(&targetResaleLogs); err != nil || targetResaleLogs != 1 {

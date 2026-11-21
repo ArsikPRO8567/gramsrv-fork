@@ -29,21 +29,22 @@ type channelSendSnapshotEnvelope struct {
 // auth/session、当前 block 状态与 automation 元数据均为执行环境，不得让同一请求在
 // 重连或状态变化后变成另一条逻辑消息。sender/random_id 由幂等索引键单独约束。
 type privateSendFingerprintPayload struct {
-	Version         int                        `json:"version"`
-	RecipientUserID int64                      `json:"recipient_user_id"`
-	Message         string                     `json:"message"`
-	Entities        []domain.MessageEntity     `json:"entities"`
-	Media           *domain.MessageMedia       `json:"media"`
-	Silent          bool                       `json:"silent"`
-	NoForwards      bool                       `json:"noforwards"`
-	ReplyTo         *domain.MessageReply       `json:"reply_to,omitempty"`
-	Forward         *domain.MessageForward     `json:"forward,omitempty"`
-	TTLPeriod       int                        `json:"ttl_period"`
-	ViaBotID        int64                      `json:"via_bot_id"`
-	GroupedID       int64                      `json:"grouped_id"`
-	Effect          int64                      `json:"effect"`
-	ReplyMarkup     *domain.MessageReplyMarkup `json:"reply_markup"`
-	RichMessage     *domain.MessageRichMessage `json:"rich_message"`
+	Version          int                        `json:"version"`
+	RecipientUserID  int64                      `json:"recipient_user_id"`
+	Message          string                     `json:"message"`
+	Entities         []domain.MessageEntity     `json:"entities"`
+	Media            *domain.MessageMedia       `json:"media"`
+	Silent           bool                       `json:"silent"`
+	NoForwards       bool                       `json:"noforwards"`
+	ReplyTo          *domain.MessageReply       `json:"reply_to,omitempty"`
+	Forward          *domain.MessageForward     `json:"forward,omitempty"`
+	TTLPeriod        int                        `json:"ttl_period"`
+	ViaBotID         int64                      `json:"via_bot_id"`
+	GroupedID        int64                      `json:"grouped_id"`
+	Effect           int64                      `json:"effect"`
+	ReplyMarkup      *domain.MessageReplyMarkup `json:"reply_markup"`
+	RichMessage      *domain.MessageRichMessage `json:"rich_message"`
+	PaidMessageStars int64                      `json:"paid_message_stars"`
 }
 
 // channelSendFingerprintPayload contains only the durable intent of an internal channel send.
@@ -94,21 +95,22 @@ func PrivateSendFingerprint(req domain.SendPrivateTextRequest) ([]byte, error) {
 		return append([]byte(nil), req.IdempotencyFingerprint...), nil
 	}
 	payload, err := json.Marshal(privateSendFingerprintPayload{
-		Version:         privateSendFingerprintVersion,
-		RecipientUserID: req.RecipientUserID,
-		Message:         req.Message,
-		Entities:        req.Entities,
-		Media:           req.Media,
-		Silent:          req.Silent,
-		NoForwards:      req.NoForwards,
-		ReplyTo:         req.ReplyTo,
-		Forward:         req.Forward,
-		TTLPeriod:       req.TTLPeriod,
-		ViaBotID:        req.ViaBotID,
-		GroupedID:       req.GroupedID,
-		Effect:          req.Effect,
-		ReplyMarkup:     req.ReplyMarkup,
-		RichMessage:     req.RichMessage,
+		Version:          privateSendFingerprintVersion,
+		RecipientUserID:  req.RecipientUserID,
+		Message:          req.Message,
+		Entities:         req.Entities,
+		Media:            req.Media,
+		Silent:           req.Silent,
+		NoForwards:       req.NoForwards,
+		ReplyTo:          req.ReplyTo,
+		Forward:          req.Forward,
+		TTLPeriod:        req.TTLPeriod,
+		ViaBotID:         req.ViaBotID,
+		GroupedID:        req.GroupedID,
+		Effect:           req.Effect,
+		ReplyMarkup:      req.ReplyMarkup,
+		RichMessage:      req.RichMessage,
+		PaidMessageStars: req.PaidMessageStars,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("marshal private send fingerprint: %w", err)

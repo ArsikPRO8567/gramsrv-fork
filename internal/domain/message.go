@@ -151,6 +151,10 @@ type Message struct {
 	// （🎉/👍 等），发送方与接收方双盒持同一非零值并各自播放一次；非特效消息恒 0。
 	// 转发不携带特效（新消息恒 0）。仅私聊；群/频道不渲染。
 	Effect int64
+	// PaidMessageStars 是本条私聊消息实际扣除的 Stars（message.paid_message_stars）。
+	// 收件人设置了付费消息价格时，发送方按此金额扣款、收件人等额入账（同一
+	// 公开交易 ID）；普通消息与管理员/免费路径恒 0。双方双盒持同一值。
+	PaidMessageStars int64
 	// ReplyMarkup 是 bot 消息携带的 reply/inline keyboard 快照。仅 bot 出站消息可
 	// 非空；普通用户消息恒 nil（发送侧 is_bot 闸门）。双盒持同一快照（无 per-viewer 差异）。
 	ReplyMarkup *MessageReplyMarkup
@@ -337,6 +341,10 @@ type SendPrivateTextRequest struct {
 	ReplyMarkup *MessageReplyMarkup
 	// RichMessage 是 Layer 228 富文本消息（richMessage）快照，可选；普通消息恒 nil。
 	RichMessage *MessageRichMessage
+	// PaidMessageStars 是本条消息应扣的 Stars（RPC 闸门按收件人当前价格计算）。
+	// store 在发送事务内原子扣款并给收件人等额入账；0 = 免费（无付费闸门）。
+	// 该值属于不可变发送意图：进入幂等指纹，重放不重复扣款。
+	PaidMessageStars int64
 }
 
 // HasContent reports whether the command contains a client-visible message payload.

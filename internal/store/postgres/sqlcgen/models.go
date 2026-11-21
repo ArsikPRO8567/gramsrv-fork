@@ -917,15 +917,18 @@ type ChannelStarsBalance struct {
 }
 
 type ChannelStarsTransaction struct {
-	ID          int64
-	ChannelID   int64
-	ActorUserID int64
-	Amount      int64
-	Reason      string
-	PeerType    string
-	PeerID      int64
-	GiftID      *int64
-	Date        int32
+	ID            int64
+	ChannelID     int64
+	ActorUserID   int64
+	Amount        int64
+	Reason        string
+	PeerType      string
+	PeerID        int64
+	GiftID        *int64
+	Date          int32
+	TransactionID string
+	Refunded      bool
+	GiftIsUnique  bool
 }
 
 type ChannelTonBalance struct {
@@ -944,6 +947,9 @@ type ChannelTonTransaction struct {
 	PeerID        int64
 	GiftID        *int64
 	Date          int32
+	TransactionID string
+	Refunded      bool
+	GiftIsUnique  bool
 }
 
 type ChannelTopicRead struct {
@@ -1411,6 +1417,16 @@ type GifCatalogCapacity struct {
 	EntryCount int32
 }
 
+type GiftWhitelist struct {
+	GiftID           int64
+	AllowedBuyers    []byte
+	GiftHidden       bool
+	Numbered         bool
+	DisallowUpgrades bool
+	DisallowResell   bool
+	ApplyWhitelist   bool
+}
+
 type GroupCall struct {
 	CallID                  int64
 	AccessHash              int64
@@ -1578,6 +1594,7 @@ type MessageBox struct {
 	ReplyToStoryID       int32
 	Effect               int64
 	HideEdited           bool
+	PaidMessageStars     int64
 }
 
 type MessageBoxMedium struct {
@@ -1762,6 +1779,9 @@ type PeerStarGift struct {
 	CanResellAt              int32
 	DropOriginalDetailsStars int64
 	CanCraftAt               int32
+	MessageEntities          []byte
+	Refunded                 bool
+	PaidStars                int64
 }
 
 type PeerTranslationSetting struct {
@@ -1951,6 +1971,7 @@ type PrivateMessage struct {
 	SenderDeletePtsCount   int32
 	SenderDeleteDate       int32
 	SenderDeleteMessageIds []byte
+	PaidMessageStars       int64
 }
 
 type PrivateMessageReaction struct {
@@ -2148,21 +2169,25 @@ type StarGiftAdminGrantCommand struct {
 }
 
 type StarGiftAuction struct {
-	GiftID        int64
-	Slug          string
-	Version       int32
-	StartDate     int32
-	EndDate       int32
-	RoundDuration int32
-	GiftsPerRound int32
-	TotalRounds   int32
-	CurrentRound  int32
-	NextRoundAt   int32
-	LastGiftNum   int32
-	GiftsLeft     int32
-	MinBidAmount  int64
-	Status        string
-	UpdatedAt     pgtype.Timestamptz
+	GiftID             int64
+	Slug               string
+	Version            int32
+	StartDate          int32
+	EndDate            int32
+	RoundDuration      int32
+	GiftsPerRound      int32
+	TotalRounds        int32
+	CurrentRound       int32
+	NextRoundAt        int32
+	LastGiftNum        int32
+	GiftsLeft          int32
+	MinBidAmount       int64
+	Status             string
+	UpdatedAt          pgtype.Timestamptz
+	RoundDurations     []byte
+	RaiseMinBid        bool
+	RoundExtends       []byte
+	RoundExtendSeconds int32
 }
 
 type StarGiftAuctionAcquired struct {
@@ -2203,6 +2228,11 @@ type StarGiftAuctionBidPayment struct {
 	BidAmount    int64
 	BalanceAfter int64
 	CreatedAt    int32
+}
+
+type StarGiftAuctionState struct {
+	GiftID      int64
+	LastGiftNum int64
 }
 
 type StarGiftBoxMediaRepair struct {
@@ -2286,6 +2316,7 @@ type StarGiftChannelNotificationJob struct {
 	LastError     string
 	CreatedAt     pgtype.Timestamptz
 	UpdatedAt     pgtype.Timestamptz
+	ActionKind    string
 }
 
 type StarGiftCollectibleBackdrop struct {
@@ -2684,6 +2715,10 @@ type StarsTransaction struct {
 	PremiumPaymentIntentID *int64
 	PremiumRecipientUserID *int64
 	PremiumMonths          *int32
+	TransactionID          string
+	Refunded               bool
+	GiftID                 *int64
+	GiftIsUnique           bool
 }
 
 type StickerSet struct {
@@ -2931,6 +2966,9 @@ type TonTransaction struct {
 	PeerID        *int64
 	GiftID        *int64
 	Date          int32
+	TransactionID string
+	Refunded      bool
+	GiftIsUnique  bool
 }
 
 type UniqueStarGift struct {

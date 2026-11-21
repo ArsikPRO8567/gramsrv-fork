@@ -128,7 +128,8 @@ func (r *Router) sendOutgoing(ctx context.Context, userID int64, peer domain.Pee
 	if r.deps.Messages == nil {
 		return nil, false, peerIDInvalidErr()
 	}
-	if err := r.ensurePrivateContactAllowed(ctx, userID, peer.ID, p.allowPaidStars, 1); err != nil {
+	paidMessageStars, err := r.privateContactPaidStarsFor(ctx, userID, peer.ID, p.allowPaidStars, 1)
+	if err != nil {
 		return nil, false, err
 	}
 	if err := r.ensureVoiceMessagesAllowed(ctx, userID, peer, p.media != nil && p.media.HasUnreadPayload()); err != nil {
@@ -179,6 +180,7 @@ func (r *Router) sendOutgoing(ctx context.Context, userID int64, peer domain.Pee
 		ViaBotID:               p.viaBotID,
 		GroupedID:              p.groupedID,
 		Effect:                 p.effect,
+		PaidMessageStars:       paidMessageStars,
 	})
 	if err != nil {
 		fields := append(r.contextLogFields(ctx),
@@ -530,8 +532,11 @@ func (r *Router) onMessagesSendMultiMedia(ctx context.Context, req *tg.MessagesS
 		if req.AllowPaidFloodskip {
 			return nil, paymentUnsupportedErr()
 		}
-		if err := r.ensurePrivateContactAllowed(ctx, userID, peer.ID, req.AllowPaidStars, absentCount); err != nil {
-			return nil, err
+		// Раунд 37: пакетная проверка до загрузки медиа — быстрый
+		// ALLOW_PAYMENT_REQUIRED на весь альбом. Списание выполняется в
+		// sendOutgoing/store для каждого элемента (цена за одно сообщение).
+		if _, gateErr := r.privateContactPaidStarsFor(ctx, userID, peer.ID, req.AllowPaidStars, absentCount); gateErr != nil {
+			return nil, gateErr
 		}
 	}
 	pendingMedia := make([]tg.InputMediaClass, 0, absentCount)

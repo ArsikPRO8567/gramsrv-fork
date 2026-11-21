@@ -434,6 +434,16 @@ func (s *Service) PublishCollectibleRevision(ctx context.Context, write domain.S
 	return revision, err
 }
 
+// ActiveCollectibleRevision (раунд 37) возвращает активную опубликованную
+// ревизию подарка с ПОЛНЫМИ метаданными (id строк атрибутов, документы,
+// анимации) — источник правки «на месте» для админки.
+func (s *Service) ActiveCollectibleRevision(ctx context.Context, giftID int64) (domain.StarGiftCollectibleRevision, bool, error) {
+	if s == nil || s.store == nil {
+		return domain.StarGiftCollectibleRevision{}, false, fmt.Errorf("star gift collectible store is not configured")
+	}
+	return s.store.ActiveCollectibleRevision(ctx, giftID)
+}
+
 // CollectibleRevision (раунд 32) читает любую ревизию коллекции по id с полными
 // метаданными анимаций — источник копирования атрибутов для админки.
 func (s *Service) CollectibleRevision(ctx context.Context, revisionID int64) (domain.StarGiftCollectibleRevision, error) {
@@ -462,6 +472,18 @@ func (s *Service) CreateCollectibleRevision(ctx context.Context, write domain.St
 	}
 	if err := s.materializeCollectibleAttributes(ctx, write.Patterns); err != nil {
 		return domain.StarGiftCollectibleRevision{}, err
+	}
+	// Раунд 37: правка опубликованной ревизии того же подарка идёт «на месте»
+	// (строки атрибутов сохраняют id — сервер и выпущенные подарки продолжают
+	// работать с ними). Новая ревизия создаётся только когда активной нет.
+	if _, active, activeErr := s.store.ActiveCollectibleRevision(ctx, write.GiftID); activeErr != nil {
+		return domain.StarGiftCollectibleRevision{}, activeErr
+	} else if active {
+		revision, err := s.store.SyncActiveCollectibleRevision(ctx, write)
+		if err == nil {
+			s.InvalidateStarGiftCatalog()
+		}
+		return revision, err
 	}
 	return s.PublishCollectibleRevision(ctx, write)
 }

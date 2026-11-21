@@ -1225,9 +1225,12 @@ func (s *StarGiftLifecycleStore) PurchaseResaleStarGift(ctx context.Context, req
 			// require_premium на коллекционных подарках — только маркетинговый
 			// признак (наследуется от исходного для отображения на рынке),
 			// покупка разрешена независимо от наличия подписки.
+			// Раунд 37: перевод между аккаунтами — списание покупателя и
+			// зачисление продавцу идут с ОДНИМ публичным ID транзакции.
+			transferID := domain.NewStarsTransactionID(req.Amount.Currency == domain.StarGiftCurrencyTON)
 			balance, err := s.debitLifecycleAmount(ctx, tx, req.BuyerUserID, req.Amount, domain.StarsReasonGiftResale,
 				saved.Owner, req.Date, "",
-				starsLedgerExtra{giftID: uniqueID, giftIsUnique: true})
+				starsLedgerExtra{giftID: uniqueID, giftIsUnique: true, transactionID: transferID})
 			if err != nil {
 				return err
 			}
@@ -1241,7 +1244,7 @@ func (s *StarGiftLifecycleStore) PurchaseResaleStarGift(ctx context.Context, req
 			proceeds := req.Amount
 			if _, commission, err := s.creditPeerLifecycleAmount(ctx, tx, seller, req.BuyerUserID, proceeds,
 				domain.StarsReasonGiftResale, domain.Peer{Type: domain.PeerTypeUser, ID: req.BuyerUserID},
-				gift.ID, req.Date, "", starsLedgerExtra{giftIsUnique: true}); err != nil {
+				gift.ID, req.Date, "", starsLedgerExtra{giftIsUnique: true, transactionID: transferID}); err != nil {
 				return err
 			} else {
 				commissionAmount = commission
@@ -1418,9 +1421,12 @@ WHERE actor_user_id=$1 AND command_key=$2`, req.BuyerUserID, strings.TrimSpace(r
 		}
 		// require_premium на коллекционных подарках — маркетинговый признак,
 		// покупка в канал разрешена независимо от подписки (как в user-ветке).
+		// Раунд 37: тот же публичный ID у списания покупателя и зачисления
+		// продавцу (аккаунт или канал).
+		transferID := domain.NewStarsTransactionID(req.Amount.Currency == domain.StarGiftCurrencyTON)
 		balance, err := s.debitLifecycleAmount(ctx, tx, req.BuyerUserID, req.Amount, domain.StarsReasonGiftResale,
 			saved.Owner, req.Date, "",
-			starsLedgerExtra{giftID: uniqueID, giftIsUnique: true})
+			starsLedgerExtra{giftID: uniqueID, giftIsUnique: true, transactionID: transferID})
 		if err != nil {
 			return err
 		}
@@ -1430,7 +1436,7 @@ WHERE actor_user_id=$1 AND command_key=$2`, req.BuyerUserID, strings.TrimSpace(r
 		proceeds := req.Amount
 		if _, commission, err := s.creditPeerLifecycleAmount(ctx, tx, seller, req.BuyerUserID, proceeds,
 			domain.StarsReasonGiftResale, domain.Peer{Type: domain.PeerTypeUser, ID: req.BuyerUserID},
-			gift.ID, req.Date, "", starsLedgerExtra{giftIsUnique: true}); err != nil {
+			gift.ID, req.Date, "", starsLedgerExtra{giftIsUnique: true, transactionID: transferID}); err != nil {
 			return err
 		} else {
 			commissionAmount = commission
@@ -2202,6 +2208,10 @@ type starsLedgerExtra struct {
 	giftID       int64
 	giftIsUnique bool
 	refunded     bool
+	// transactionID — явный публичный ID транзакции: перевод между аккаунтами
+	// (покупка на маркете, платные сообщения) пишется двумя строками двух
+	// леджеров с ОДНИМ ID; пусто — сгенерировать новую случайную пару символов.
+	transactionID string
 }
 
 func (s *StarGiftLifecycleStore) debitLifecycleAmount(ctx context.Context, tx pgx.Tx, userID int64, amount domain.StarGiftAmount,
@@ -2209,6 +2219,7 @@ func (s *StarGiftLifecycleStore) debitLifecycleAmount(ctx context.Context, tx pg
 	flags := domain.StarsLedgerFlags{}
 	if len(extra) > 0 {
 		flags.GiftID, flags.GiftIsUnique, flags.Refunded = extra[0].giftID, extra[0].giftIsUnique, extra[0].refunded
+		flags.TransactionID = extra[0].transactionID
 	}
 	if amount.Amount == 0 {
 		var balance domain.StarsBalance
@@ -2261,6 +2272,7 @@ func (s *StarGiftLifecycleStore) creditLifecycleAmount(ctx context.Context, tx p
 	flags := domain.StarsLedgerFlags{}
 	if len(extra) > 0 {
 		flags.GiftID, flags.GiftIsUnique, flags.Refunded = extra[0].giftID, extra[0].giftIsUnique, extra[0].refunded
+		flags.TransactionID = extra[0].transactionID
 	}
 	if amount.Currency == domain.StarGiftCurrencyTON {
 		if _, err := tx.Exec(ctx, `INSERT INTO ton_balances(user_id,balance_nanoton,granted) VALUES($1,$2,false)
@@ -2277,16 +2289,29 @@ func (s *StarGiftLifecycleStore) creditLifecycleAmount(ctx context.Context, tx p
 	return err
 }
 
+// sharedLedgerTransactionID 返回显式共享的公开交易 ID（账户间转账的双方行
+// 必须一致），否则为该账本生成新的随机 ID。
+func sharedLedgerTransactionID(flags domain.StarsLedgerFlags, ton bool) string {
+	if flags.TransactionID != "" {
+		return flags.TransactionID
+	}
+	return domain.NewStarsTransactionID(ton)
+}
+
 // insertTonTxnFull 写一条用户 TON 流水，含公开交易 ID 与官方投影属性。
 func insertTonTxnFull(ctx context.Context, tx pgx.Tx, userID, amount int64, reason domain.StarsTransactionReason, peer domain.Peer, date int, flags domain.StarsLedgerFlags) error {
 	var giftID any
 	if flags.GiftID > 0 {
 		giftID = flags.GiftID
 	}
+	transactionID := flags.TransactionID
+	if transactionID == "" {
+		transactionID = domain.NewStarsTransactionID(true)
+	}
 	_, err := tx.Exec(ctx, `INSERT INTO ton_transactions(user_id,amount_nanoton,reason,peer_type,peer_id,date,
         transaction_id,refunded,gift_id,gift_is_unique)
         VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`, userID, amount, string(reason), nullableStarGiftPeerType(peer),
-		nullableStarGiftPeerID(peer), date, domain.NewStarsTransactionID(true), flags.Refunded, giftID, flags.GiftIsUnique)
+		nullableStarGiftPeerID(peer), date, transactionID, flags.Refunded, giftID, flags.GiftIsUnique)
 	return err
 }
 
@@ -2302,6 +2327,7 @@ func (s *StarGiftLifecycleStore) creditPeerLifecycleAmount(ctx context.Context, 
 	flags := domain.StarsLedgerFlags{GiftID: giftID}
 	if len(extra) > 0 {
 		flags.GiftIsUnique, flags.Refunded = extra[0].giftIsUnique, extra[0].refunded
+		flags.TransactionID = extra[0].transactionID
 	}
 	permille := s.market.StarsProceedsPermille
 	if amount.Currency == domain.StarGiftCurrencyTON {
@@ -2314,7 +2340,8 @@ func (s *StarGiftLifecycleStore) creditPeerLifecycleAmount(ctx context.Context, 
 	if owner.Type == domain.PeerTypeUser {
 		if proceeds > 0 {
 			if err := s.creditLifecycleAmount(ctx, tx, owner.ID, credited, reason, counterparty, date, title,
-				starsLedgerExtra{giftID: giftID, giftIsUnique: flags.GiftIsUnique, refunded: flags.Refunded}); err != nil {
+				starsLedgerExtra{giftID: giftID, giftIsUnique: flags.GiftIsUnique, refunded: flags.Refunded,
+					transactionID: flags.TransactionID}); err != nil {
 				return 0, 0, err
 			}
 		}
@@ -2343,7 +2370,7 @@ func (s *StarGiftLifecycleStore) creditPeerLifecycleAmount(ctx context.Context, 
 		if _, err := tx.Exec(ctx, `INSERT INTO channel_ton_transactions
                         (channel_id,actor_user_id,amount_nanoton,reason,peer_type,peer_id,gift_id,date,transaction_id,refunded,gift_is_unique)
                         VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`, owner.ID, actorUserID, proceeds, string(reason),
-			string(counterparty.Type), counterparty.ID, giftID, date, domain.NewStarsTransactionID(true),
+			string(counterparty.Type), counterparty.ID, giftID, date, sharedLedgerTransactionID(flags, true),
 			flags.Refunded, flags.GiftIsUnique); err != nil {
 			return 0, 0, err
 		}
@@ -2361,7 +2388,7 @@ func (s *StarGiftLifecycleStore) creditPeerLifecycleAmount(ctx context.Context, 
 	if _, err := tx.Exec(ctx, `INSERT INTO channel_stars_transactions
                 (channel_id,actor_user_id,amount,reason,peer_type,peer_id,gift_id,date,transaction_id,refunded,gift_is_unique)
                 VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`, owner.ID, actorUserID, proceeds, string(reason),
-		string(counterparty.Type), counterparty.ID, giftID, date, domain.NewStarsTransactionID(false),
+		string(counterparty.Type), counterparty.ID, giftID, date, sharedLedgerTransactionID(flags, false),
 		flags.Refunded, flags.GiftIsUnique); err != nil {
 		return 0, 0, err
 	}

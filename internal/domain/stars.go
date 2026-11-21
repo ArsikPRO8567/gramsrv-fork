@@ -198,6 +198,10 @@ type StarsLedgerFlags struct {
 	GiftID       int64 // 关联礼物；0 = 无礼物载荷
 	GiftIsUnique bool  // GiftID 指向 unique_star_gifts.id（否则为目录礼物）
 	Refunded     bool  // starsTransaction.refund
+	// TransactionID 是显式指定的公开交易 ID（stars_/ton_ 前缀由写入表决定）。
+	// 账户间转账（转售购买、付费消息等）的两条流水必须共用同一 ID，调用方
+	// 生成一次并传入双方；为空时由写入点自动生成。
+	TransactionID string
 }
 
 // NewStarsTransactionID 生成官方形状的公开交易 ID：前缀 + 60 位 [A-Za-z0-9]

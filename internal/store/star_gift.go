@@ -29,6 +29,13 @@ type StarGiftStore interface {
 	AnimationJSON(ctx context.Context, giftID int64) ([]byte, bool, error)
 	// PublishCollectibleRevision validates and atomically publishes a new immutable attribute pool.
 	PublishCollectibleRevision(ctx context.Context, write domain.StarGiftCollectibleWrite) (domain.StarGiftCollectibleRevision, error)
+	// SyncActiveCollectibleRevision (раунд 37) правит СУЩЕСТВУЮЩУЮ опубликованную
+	// ревизию того же подарка «на месте»: строки атрибутов с ID обновляются
+	// (id сохраняются — выпущенные подарки продолжают ссылаться на них), без
+	// ID — добавляются, отсутствующие в форме — снимаются (на задействованные
+	// выпущенными подарками — отказ). Основные поля ревизии обновляются в той
+	// же строке; новая ревизия не создаётся.
+	SyncActiveCollectibleRevision(ctx context.Context, write domain.StarGiftCollectibleWrite) (domain.StarGiftCollectibleRevision, error)
 	ActiveCollectibleRevision(ctx context.Context, giftID int64) (domain.StarGiftCollectibleRevision, bool, error)
 	// SetCollectibleSupplyTotal (раунд 34) правит лимит возможных улучшенных
 	// подарков опубликованной ревизии коллекции: supply_total можно повысить

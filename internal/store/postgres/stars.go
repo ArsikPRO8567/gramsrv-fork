@@ -261,6 +261,13 @@ func insertStarsTxnFull(ctx context.Context, tx pgx.Tx, userID, amount int64, re
 	if flags.GiftID > 0 {
 		giftID = flags.GiftID
 	}
+	// Раунд 37: перевод между аккаунтами (покупка на маркете, платные
+	// сообщения) пишется двумя строками двух леджеров с ОДНИМ публичным ID —
+	// вызывающий генерирует его один раз и передаёт в flags.TransactionID.
+	transactionID := flags.TransactionID
+	if transactionID == "" {
+		transactionID = domain.NewStarsTransactionID(false)
+	}
 	var rowID int64
 	if err := tx.QueryRow(ctx, `
 INSERT INTO stars_transactions (user_id, peer_type, peer_id, amount, reason, title, description, date,
@@ -268,10 +275,17 @@ INSERT INTO stars_transactions (user_id, peer_type, peer_id, amount, reason, tit
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
 RETURNING id`,
 		userID, string(peer.Type), peer.ID, amount, string(reason), title, desc, date,
-		domain.NewStarsTransactionID(false), flags.Refunded, giftID, flags.GiftIsUnique).Scan(&rowID); err != nil {
+		transactionID, flags.Refunded, giftID, flags.GiftIsUnique).Scan(&rowID); err != nil {
 		return 0, fmt.Errorf("insert stars transaction: %w", err)
 	}
 	return rowID, nil
+}
+
+// insertStarsTxnWithID 写一条流水并使用调用方指定的公开交易 ID（账户间转账
+// 的双方行必须共用同一 ID）；amount 带符号。
+func insertStarsTxnWithID(ctx context.Context, tx pgx.Tx, userID, amount int64, reason domain.StarsTransactionReason, peer domain.Peer, date int, transactionID string) error {
+	_, err := insertStarsTxnFull(ctx, tx, userID, amount, reason, peer, date, "", "", domain.StarsLedgerFlags{TransactionID: transactionID})
+	return err
 }
 
 // ListTransactionsByID 按公开交易 ID 批量读取本人账本流水（

@@ -300,7 +300,8 @@ INSERT INTO message_boxes (
   rich_message,
   via_bot_id,
   grouped_id,
-  effect
+  effect,
+  paid_message_stars
 ) VALUES (
   $1, $2, $3, $4, $5, $6, $7, $8,
   $11::int,
@@ -333,7 +334,8 @@ INSERT INTO message_boxes (
   $38::jsonb,
   $39::bigint,
   $40::bigint,
-  $41::bigint
+  $41::bigint,
+  $42::bigint
 )
 RETURNING
   box_id,
@@ -377,6 +379,7 @@ RETURNING
   via_bot_id,
   grouped_id,
   effect,
+  paid_message_stars,
   reply_markup::text AS reply_markup_json,
   rich_message::text AS rich_message_json
 `
@@ -423,6 +426,7 @@ type CreateMessageBoxParams struct {
 	ViaBotID             int64
 	GroupedID            int64
 	Effect               int64
+	PaidMessageStars     int64
 }
 
 type CreateMessageBoxRow struct {
@@ -467,6 +471,7 @@ type CreateMessageBoxRow struct {
 	ViaBotID             int64
 	GroupedID            int64
 	Effect               int64
+	PaidMessageStars     int64
 	ReplyMarkupJson      string
 	RichMessageJson      string
 }
@@ -514,6 +519,7 @@ func (q *Queries) CreateMessageBox(ctx context.Context, arg CreateMessageBoxPara
 		arg.ViaBotID,
 		arg.GroupedID,
 		arg.Effect,
+		arg.PaidMessageStars,
 	)
 	var i CreateMessageBoxRow
 	err := row.Scan(
@@ -558,6 +564,7 @@ func (q *Queries) CreateMessageBox(ctx context.Context, arg CreateMessageBoxPara
 		&i.ViaBotID,
 		&i.GroupedID,
 		&i.Effect,
+		&i.PaidMessageStars,
 		&i.ReplyMarkupJson,
 		&i.RichMessageJson,
 	)
@@ -599,7 +606,8 @@ INSERT INTO private_messages (
   rich_message,
   via_bot_id,
   grouped_id,
-  effect
+  effect,
+  paid_message_stars
 ) VALUES (
   $1, $2, $3, $6::bytea, $7::boolean,
   0, 0, 0, 0,
@@ -623,7 +631,8 @@ INSERT INTO private_messages (
   $27::jsonb,
   $28::bigint,
   $29::bigint,
-  $30::bigint
+  $30::bigint,
+  $31::bigint
 )
 ON CONFLICT (sender_user_id, random_id) WHERE random_id <> 0 DO NOTHING
 RETURNING
@@ -670,6 +679,7 @@ type CreatePrivateMessageParams struct {
 	ViaBotID           int64
 	GroupedID          int64
 	Effect             int64
+	PaidMessageStars   int64
 }
 
 type CreatePrivateMessageRow struct {
@@ -717,6 +727,7 @@ func (q *Queries) CreatePrivateMessage(ctx context.Context, arg CreatePrivateMes
 		arg.ViaBotID,
 		arg.GroupedID,
 		arg.Effect,
+		arg.PaidMessageStars,
 	)
 	var i CreatePrivateMessageRow
 	err := row.Scan(
@@ -1148,6 +1159,7 @@ SELECT
   via_bot_id,
   grouped_id,
   effect,
+  paid_message_stars,
   reply_markup::text AS reply_markup_json,
   rich_message::text AS rich_message_json
 FROM message_boxes
@@ -1203,6 +1215,7 @@ type GetMessageBoxByPrivateMessageRow struct {
 	ViaBotID             int64
 	GroupedID            int64
 	Effect               int64
+	PaidMessageStars     int64
 	ReplyMarkupJson      string
 	RichMessageJson      string
 }
@@ -1252,6 +1265,7 @@ func (q *Queries) GetMessageBoxByPrivateMessage(ctx context.Context, arg GetMess
 		&i.ViaBotID,
 		&i.GroupedID,
 		&i.Effect,
+		&i.PaidMessageStars,
 		&i.ReplyMarkupJson,
 		&i.RichMessageJson,
 	)
@@ -1558,6 +1572,7 @@ SELECT
   m.via_bot_id,
   m.grouped_id,
   m.effect,
+  m.paid_message_stars,
   m.reply_markup::text AS reply_markup_json,
   m.rich_message::text AS rich_message_json,
   COALESCE(peer_u.id, 0)::bigint AS peer_user_id,
@@ -1648,6 +1663,7 @@ type GetMessageBoxesByIDsRow struct {
 	ViaBotID                      int64
 	GroupedID                     int64
 	Effect                        int64
+	PaidMessageStars              int64
 	ReplyMarkupJson               string
 	RichMessageJson               string
 	PeerUserID                    int64
@@ -1734,6 +1750,7 @@ func (q *Queries) GetMessageBoxesByIDs(ctx context.Context, arg GetMessageBoxesB
 			&i.ViaBotID,
 			&i.GroupedID,
 			&i.Effect,
+			&i.PaidMessageStars,
 			&i.ReplyMarkupJson,
 			&i.RichMessageJson,
 			&i.PeerUserID,
@@ -1826,7 +1843,8 @@ SELECT
   m.reaction_unread,
   m.pinned,
   m.via_bot_id,
-  m.grouped_id
+  m.grouped_id,
+  m.paid_message_stars
 FROM requested r
 JOIN message_boxes m
   ON m.owner_user_id = $1::bigint
@@ -1887,6 +1905,7 @@ type GetMessageBoxesForForwardRow struct {
 	Pinned               bool
 	ViaBotID             int64
 	GroupedID            int64
+	PaidMessageStars     int64
 }
 
 func (q *Queries) GetMessageBoxesForForward(ctx context.Context, arg GetMessageBoxesForForwardParams) ([]GetMessageBoxesForForwardRow, error) {
@@ -1946,6 +1965,7 @@ func (q *Queries) GetMessageBoxesForForward(ctx context.Context, arg GetMessageB
 			&i.Pinned,
 			&i.ViaBotID,
 			&i.GroupedID,
+			&i.PaidMessageStars,
 		); err != nil {
 			return nil, err
 		}
@@ -2271,6 +2291,7 @@ SELECT
   m.via_bot_id,
   m.grouped_id,
   m.effect,
+  m.paid_message_stars,
   m.reply_markup::text AS reply_markup_json,
   m.rich_message::text AS rich_message_json,
   COALESCE(peer_u.id, 0)::bigint AS peer_user_id,
@@ -2426,6 +2447,7 @@ type ListMessagesBackwardRow struct {
 	ViaBotID                      int64
 	GroupedID                     int64
 	Effect                        int64
+	PaidMessageStars              int64
 	ReplyMarkupJson               string
 	RichMessageJson               string
 	PeerUserID                    int64
@@ -2537,6 +2559,7 @@ func (q *Queries) ListMessagesBackward(ctx context.Context, arg ListMessagesBack
 			&i.ViaBotID,
 			&i.GroupedID,
 			&i.Effect,
+			&i.PaidMessageStars,
 			&i.ReplyMarkupJson,
 			&i.RichMessageJson,
 			&i.PeerUserID,
@@ -2636,6 +2659,7 @@ base AS NOT MATERIALIZED (
     m.via_bot_id,
     m.grouped_id,
     m.effect,
+    m.paid_message_stars,
     m.reply_markup::text AS reply_markup_json,
     m.rich_message::text AS rich_message_json,
     COALESCE(peer_u.id, 0)::bigint AS peer_user_id,
@@ -2724,7 +2748,7 @@ total AS (
   WHERE $21::boolean
 ),
 backward AS (
-  SELECT b.box_id, b.private_message_id, b.owner_user_id, b.peer_type, b.peer_id, b.from_user_id, b.message_date, b.ttl_period, b.expires_at, b.edit_date, b.hide_edited, b.outgoing, b.body, b.entities_json, b.silent, b.noforwards, b.reply_to_msg_id, b.reply_to_peer_type, b.reply_to_peer_id, b.reply_to_top_id, b.reply_to_story_id, b.quote_text, b.quote_entities_json, b.quote_offset, b.fwd_from_peer_type, b.fwd_from_peer_id, b.fwd_from_name, b.fwd_date, b.fwd_saved_from_peer_type, b.fwd_saved_from_peer_id, b.fwd_saved_from_msg_id, b.saved_peer_type, b.saved_peer_id, b.pts, b.media_json, b.media_unread, b.reaction_unread, b.pinned, b.via_bot_id, b.grouped_id, b.effect, b.reply_markup_json, b.rich_message_json, b.peer_user_id, b.peer_access_hash, b.peer_phone, b.peer_first_name, b.peer_last_name, b.peer_username, b.peer_country_code, b.peer_verified, b.peer_support, b.peer_is_bot, b.peer_bot_info_version, b.peer_premium_until, b.peer_emoji_status_document_id, b.peer_emoji_status_until, b.peer_last_seen_at, b.from_user_user_id, b.from_user_access_hash, b.from_user_phone, b.from_user_first_name, b.from_user_last_name, b.from_user_username, b.from_user_country_code, b.from_user_verified, b.from_user_support, b.from_user_is_bot, b.from_user_bot_info_version, b.from_user_premium_until, b.from_user_emoji_status_document_id, b.from_user_emoji_status_until, b.from_user_last_seen_at
+  SELECT b.box_id, b.private_message_id, b.owner_user_id, b.peer_type, b.peer_id, b.from_user_id, b.message_date, b.ttl_period, b.expires_at, b.edit_date, b.hide_edited, b.outgoing, b.body, b.entities_json, b.silent, b.noforwards, b.reply_to_msg_id, b.reply_to_peer_type, b.reply_to_peer_id, b.reply_to_top_id, b.reply_to_story_id, b.quote_text, b.quote_entities_json, b.quote_offset, b.fwd_from_peer_type, b.fwd_from_peer_id, b.fwd_from_name, b.fwd_date, b.fwd_saved_from_peer_type, b.fwd_saved_from_peer_id, b.fwd_saved_from_msg_id, b.saved_peer_type, b.saved_peer_id, b.pts, b.media_json, b.media_unread, b.reaction_unread, b.pinned, b.via_bot_id, b.grouped_id, b.effect, b.paid_message_stars, b.reply_markup_json, b.rich_message_json, b.peer_user_id, b.peer_access_hash, b.peer_phone, b.peer_first_name, b.peer_last_name, b.peer_username, b.peer_country_code, b.peer_verified, b.peer_support, b.peer_is_bot, b.peer_bot_info_version, b.peer_premium_until, b.peer_emoji_status_document_id, b.peer_emoji_status_until, b.peer_last_seen_at, b.from_user_user_id, b.from_user_access_hash, b.from_user_phone, b.from_user_first_name, b.from_user_last_name, b.from_user_username, b.from_user_country_code, b.from_user_verified, b.from_user_support, b.from_user_is_bot, b.from_user_bot_info_version, b.from_user_premium_until, b.from_user_emoji_status_document_id, b.from_user_emoji_status_until, b.from_user_last_seen_at
   FROM base b
   CROSS JOIN load_params p
   WHERE p.load_type = 'backward'
@@ -2737,9 +2761,9 @@ backward AS (
   LIMIT (SELECT limit_count FROM load_params)
 ),
 around_forward AS (
-  SELECT f.box_id, f.private_message_id, f.owner_user_id, f.peer_type, f.peer_id, f.from_user_id, f.message_date, f.ttl_period, f.expires_at, f.edit_date, f.hide_edited, f.outgoing, f.body, f.entities_json, f.silent, f.noforwards, f.reply_to_msg_id, f.reply_to_peer_type, f.reply_to_peer_id, f.reply_to_top_id, f.reply_to_story_id, f.quote_text, f.quote_entities_json, f.quote_offset, f.fwd_from_peer_type, f.fwd_from_peer_id, f.fwd_from_name, f.fwd_date, f.fwd_saved_from_peer_type, f.fwd_saved_from_peer_id, f.fwd_saved_from_msg_id, f.saved_peer_type, f.saved_peer_id, f.pts, f.media_json, f.media_unread, f.reaction_unread, f.pinned, f.via_bot_id, f.grouped_id, f.effect, f.reply_markup_json, f.rich_message_json, f.peer_user_id, f.peer_access_hash, f.peer_phone, f.peer_first_name, f.peer_last_name, f.peer_username, f.peer_country_code, f.peer_verified, f.peer_support, f.peer_is_bot, f.peer_bot_info_version, f.peer_premium_until, f.peer_emoji_status_document_id, f.peer_emoji_status_until, f.peer_last_seen_at, f.from_user_user_id, f.from_user_access_hash, f.from_user_phone, f.from_user_first_name, f.from_user_last_name, f.from_user_username, f.from_user_country_code, f.from_user_verified, f.from_user_support, f.from_user_is_bot, f.from_user_bot_info_version, f.from_user_premium_until, f.from_user_emoji_status_document_id, f.from_user_emoji_status_until, f.from_user_last_seen_at
+  SELECT f.box_id, f.private_message_id, f.owner_user_id, f.peer_type, f.peer_id, f.from_user_id, f.message_date, f.ttl_period, f.expires_at, f.edit_date, f.hide_edited, f.outgoing, f.body, f.entities_json, f.silent, f.noforwards, f.reply_to_msg_id, f.reply_to_peer_type, f.reply_to_peer_id, f.reply_to_top_id, f.reply_to_story_id, f.quote_text, f.quote_entities_json, f.quote_offset, f.fwd_from_peer_type, f.fwd_from_peer_id, f.fwd_from_name, f.fwd_date, f.fwd_saved_from_peer_type, f.fwd_saved_from_peer_id, f.fwd_saved_from_msg_id, f.saved_peer_type, f.saved_peer_id, f.pts, f.media_json, f.media_unread, f.reaction_unread, f.pinned, f.via_bot_id, f.grouped_id, f.effect, f.paid_message_stars, f.reply_markup_json, f.rich_message_json, f.peer_user_id, f.peer_access_hash, f.peer_phone, f.peer_first_name, f.peer_last_name, f.peer_username, f.peer_country_code, f.peer_verified, f.peer_support, f.peer_is_bot, f.peer_bot_info_version, f.peer_premium_until, f.peer_emoji_status_document_id, f.peer_emoji_status_until, f.peer_last_seen_at, f.from_user_user_id, f.from_user_access_hash, f.from_user_phone, f.from_user_first_name, f.from_user_last_name, f.from_user_username, f.from_user_country_code, f.from_user_verified, f.from_user_support, f.from_user_is_bot, f.from_user_bot_info_version, f.from_user_premium_until, f.from_user_emoji_status_document_id, f.from_user_emoji_status_until, f.from_user_last_seen_at
   FROM (
-    SELECT b.box_id, b.private_message_id, b.owner_user_id, b.peer_type, b.peer_id, b.from_user_id, b.message_date, b.ttl_period, b.expires_at, b.edit_date, b.hide_edited, b.outgoing, b.body, b.entities_json, b.silent, b.noforwards, b.reply_to_msg_id, b.reply_to_peer_type, b.reply_to_peer_id, b.reply_to_top_id, b.reply_to_story_id, b.quote_text, b.quote_entities_json, b.quote_offset, b.fwd_from_peer_type, b.fwd_from_peer_id, b.fwd_from_name, b.fwd_date, b.fwd_saved_from_peer_type, b.fwd_saved_from_peer_id, b.fwd_saved_from_msg_id, b.saved_peer_type, b.saved_peer_id, b.pts, b.media_json, b.media_unread, b.reaction_unread, b.pinned, b.via_bot_id, b.grouped_id, b.effect, b.reply_markup_json, b.rich_message_json, b.peer_user_id, b.peer_access_hash, b.peer_phone, b.peer_first_name, b.peer_last_name, b.peer_username, b.peer_country_code, b.peer_verified, b.peer_support, b.peer_is_bot, b.peer_bot_info_version, b.peer_premium_until, b.peer_emoji_status_document_id, b.peer_emoji_status_until, b.peer_last_seen_at, b.from_user_user_id, b.from_user_access_hash, b.from_user_phone, b.from_user_first_name, b.from_user_last_name, b.from_user_username, b.from_user_country_code, b.from_user_verified, b.from_user_support, b.from_user_is_bot, b.from_user_bot_info_version, b.from_user_premium_until, b.from_user_emoji_status_document_id, b.from_user_emoji_status_until, b.from_user_last_seen_at
+    SELECT b.box_id, b.private_message_id, b.owner_user_id, b.peer_type, b.peer_id, b.from_user_id, b.message_date, b.ttl_period, b.expires_at, b.edit_date, b.hide_edited, b.outgoing, b.body, b.entities_json, b.silent, b.noforwards, b.reply_to_msg_id, b.reply_to_peer_type, b.reply_to_peer_id, b.reply_to_top_id, b.reply_to_story_id, b.quote_text, b.quote_entities_json, b.quote_offset, b.fwd_from_peer_type, b.fwd_from_peer_id, b.fwd_from_name, b.fwd_date, b.fwd_saved_from_peer_type, b.fwd_saved_from_peer_id, b.fwd_saved_from_msg_id, b.saved_peer_type, b.saved_peer_id, b.pts, b.media_json, b.media_unread, b.reaction_unread, b.pinned, b.via_bot_id, b.grouped_id, b.effect, b.paid_message_stars, b.reply_markup_json, b.rich_message_json, b.peer_user_id, b.peer_access_hash, b.peer_phone, b.peer_first_name, b.peer_last_name, b.peer_username, b.peer_country_code, b.peer_verified, b.peer_support, b.peer_is_bot, b.peer_bot_info_version, b.peer_premium_until, b.peer_emoji_status_document_id, b.peer_emoji_status_until, b.peer_last_seen_at, b.from_user_user_id, b.from_user_access_hash, b.from_user_phone, b.from_user_first_name, b.from_user_last_name, b.from_user_username, b.from_user_country_code, b.from_user_verified, b.from_user_support, b.from_user_is_bot, b.from_user_bot_info_version, b.from_user_premium_until, b.from_user_emoji_status_document_id, b.from_user_emoji_status_until, b.from_user_last_seen_at
     FROM base b
     CROSS JOIN load_params p
     WHERE p.load_type = 'around'
@@ -2752,7 +2776,7 @@ around_forward AS (
   ) f
 ),
 around_backward AS (
-  SELECT b.box_id, b.private_message_id, b.owner_user_id, b.peer_type, b.peer_id, b.from_user_id, b.message_date, b.ttl_period, b.expires_at, b.edit_date, b.hide_edited, b.outgoing, b.body, b.entities_json, b.silent, b.noforwards, b.reply_to_msg_id, b.reply_to_peer_type, b.reply_to_peer_id, b.reply_to_top_id, b.reply_to_story_id, b.quote_text, b.quote_entities_json, b.quote_offset, b.fwd_from_peer_type, b.fwd_from_peer_id, b.fwd_from_name, b.fwd_date, b.fwd_saved_from_peer_type, b.fwd_saved_from_peer_id, b.fwd_saved_from_msg_id, b.saved_peer_type, b.saved_peer_id, b.pts, b.media_json, b.media_unread, b.reaction_unread, b.pinned, b.via_bot_id, b.grouped_id, b.effect, b.reply_markup_json, b.rich_message_json, b.peer_user_id, b.peer_access_hash, b.peer_phone, b.peer_first_name, b.peer_last_name, b.peer_username, b.peer_country_code, b.peer_verified, b.peer_support, b.peer_is_bot, b.peer_bot_info_version, b.peer_premium_until, b.peer_emoji_status_document_id, b.peer_emoji_status_until, b.peer_last_seen_at, b.from_user_user_id, b.from_user_access_hash, b.from_user_phone, b.from_user_first_name, b.from_user_last_name, b.from_user_username, b.from_user_country_code, b.from_user_verified, b.from_user_support, b.from_user_is_bot, b.from_user_bot_info_version, b.from_user_premium_until, b.from_user_emoji_status_document_id, b.from_user_emoji_status_until, b.from_user_last_seen_at
+  SELECT b.box_id, b.private_message_id, b.owner_user_id, b.peer_type, b.peer_id, b.from_user_id, b.message_date, b.ttl_period, b.expires_at, b.edit_date, b.hide_edited, b.outgoing, b.body, b.entities_json, b.silent, b.noforwards, b.reply_to_msg_id, b.reply_to_peer_type, b.reply_to_peer_id, b.reply_to_top_id, b.reply_to_story_id, b.quote_text, b.quote_entities_json, b.quote_offset, b.fwd_from_peer_type, b.fwd_from_peer_id, b.fwd_from_name, b.fwd_date, b.fwd_saved_from_peer_type, b.fwd_saved_from_peer_id, b.fwd_saved_from_msg_id, b.saved_peer_type, b.saved_peer_id, b.pts, b.media_json, b.media_unread, b.reaction_unread, b.pinned, b.via_bot_id, b.grouped_id, b.effect, b.paid_message_stars, b.reply_markup_json, b.rich_message_json, b.peer_user_id, b.peer_access_hash, b.peer_phone, b.peer_first_name, b.peer_last_name, b.peer_username, b.peer_country_code, b.peer_verified, b.peer_support, b.peer_is_bot, b.peer_bot_info_version, b.peer_premium_until, b.peer_emoji_status_document_id, b.peer_emoji_status_until, b.peer_last_seen_at, b.from_user_user_id, b.from_user_access_hash, b.from_user_phone, b.from_user_first_name, b.from_user_last_name, b.from_user_username, b.from_user_country_code, b.from_user_verified, b.from_user_support, b.from_user_is_bot, b.from_user_bot_info_version, b.from_user_premium_until, b.from_user_emoji_status_document_id, b.from_user_emoji_status_until, b.from_user_last_seen_at
   FROM base b
   CROSS JOIN load_params p
   WHERE p.load_type = 'around'
@@ -2764,9 +2788,9 @@ around_backward AS (
   LIMIT GREATEST((SELECT limit_count + add_offset FROM load_params), 0)
 ),
 forward AS (
-  SELECT f.box_id, f.private_message_id, f.owner_user_id, f.peer_type, f.peer_id, f.from_user_id, f.message_date, f.ttl_period, f.expires_at, f.edit_date, f.hide_edited, f.outgoing, f.body, f.entities_json, f.silent, f.noforwards, f.reply_to_msg_id, f.reply_to_peer_type, f.reply_to_peer_id, f.reply_to_top_id, f.reply_to_story_id, f.quote_text, f.quote_entities_json, f.quote_offset, f.fwd_from_peer_type, f.fwd_from_peer_id, f.fwd_from_name, f.fwd_date, f.fwd_saved_from_peer_type, f.fwd_saved_from_peer_id, f.fwd_saved_from_msg_id, f.saved_peer_type, f.saved_peer_id, f.pts, f.media_json, f.media_unread, f.reaction_unread, f.pinned, f.via_bot_id, f.grouped_id, f.effect, f.reply_markup_json, f.rich_message_json, f.peer_user_id, f.peer_access_hash, f.peer_phone, f.peer_first_name, f.peer_last_name, f.peer_username, f.peer_country_code, f.peer_verified, f.peer_support, f.peer_is_bot, f.peer_bot_info_version, f.peer_premium_until, f.peer_emoji_status_document_id, f.peer_emoji_status_until, f.peer_last_seen_at, f.from_user_user_id, f.from_user_access_hash, f.from_user_phone, f.from_user_first_name, f.from_user_last_name, f.from_user_username, f.from_user_country_code, f.from_user_verified, f.from_user_support, f.from_user_is_bot, f.from_user_bot_info_version, f.from_user_premium_until, f.from_user_emoji_status_document_id, f.from_user_emoji_status_until, f.from_user_last_seen_at
+  SELECT f.box_id, f.private_message_id, f.owner_user_id, f.peer_type, f.peer_id, f.from_user_id, f.message_date, f.ttl_period, f.expires_at, f.edit_date, f.hide_edited, f.outgoing, f.body, f.entities_json, f.silent, f.noforwards, f.reply_to_msg_id, f.reply_to_peer_type, f.reply_to_peer_id, f.reply_to_top_id, f.reply_to_story_id, f.quote_text, f.quote_entities_json, f.quote_offset, f.fwd_from_peer_type, f.fwd_from_peer_id, f.fwd_from_name, f.fwd_date, f.fwd_saved_from_peer_type, f.fwd_saved_from_peer_id, f.fwd_saved_from_msg_id, f.saved_peer_type, f.saved_peer_id, f.pts, f.media_json, f.media_unread, f.reaction_unread, f.pinned, f.via_bot_id, f.grouped_id, f.effect, f.paid_message_stars, f.reply_markup_json, f.rich_message_json, f.peer_user_id, f.peer_access_hash, f.peer_phone, f.peer_first_name, f.peer_last_name, f.peer_username, f.peer_country_code, f.peer_verified, f.peer_support, f.peer_is_bot, f.peer_bot_info_version, f.peer_premium_until, f.peer_emoji_status_document_id, f.peer_emoji_status_until, f.peer_last_seen_at, f.from_user_user_id, f.from_user_access_hash, f.from_user_phone, f.from_user_first_name, f.from_user_last_name, f.from_user_username, f.from_user_country_code, f.from_user_verified, f.from_user_support, f.from_user_is_bot, f.from_user_bot_info_version, f.from_user_premium_until, f.from_user_emoji_status_document_id, f.from_user_emoji_status_until, f.from_user_last_seen_at
   FROM (
-    SELECT b.box_id, b.private_message_id, b.owner_user_id, b.peer_type, b.peer_id, b.from_user_id, b.message_date, b.ttl_period, b.expires_at, b.edit_date, b.hide_edited, b.outgoing, b.body, b.entities_json, b.silent, b.noforwards, b.reply_to_msg_id, b.reply_to_peer_type, b.reply_to_peer_id, b.reply_to_top_id, b.reply_to_story_id, b.quote_text, b.quote_entities_json, b.quote_offset, b.fwd_from_peer_type, b.fwd_from_peer_id, b.fwd_from_name, b.fwd_date, b.fwd_saved_from_peer_type, b.fwd_saved_from_peer_id, b.fwd_saved_from_msg_id, b.saved_peer_type, b.saved_peer_id, b.pts, b.media_json, b.media_unread, b.reaction_unread, b.pinned, b.via_bot_id, b.grouped_id, b.effect, b.reply_markup_json, b.rich_message_json, b.peer_user_id, b.peer_access_hash, b.peer_phone, b.peer_first_name, b.peer_last_name, b.peer_username, b.peer_country_code, b.peer_verified, b.peer_support, b.peer_is_bot, b.peer_bot_info_version, b.peer_premium_until, b.peer_emoji_status_document_id, b.peer_emoji_status_until, b.peer_last_seen_at, b.from_user_user_id, b.from_user_access_hash, b.from_user_phone, b.from_user_first_name, b.from_user_last_name, b.from_user_username, b.from_user_country_code, b.from_user_verified, b.from_user_support, b.from_user_is_bot, b.from_user_bot_info_version, b.from_user_premium_until, b.from_user_emoji_status_document_id, b.from_user_emoji_status_until, b.from_user_last_seen_at
+    SELECT b.box_id, b.private_message_id, b.owner_user_id, b.peer_type, b.peer_id, b.from_user_id, b.message_date, b.ttl_period, b.expires_at, b.edit_date, b.hide_edited, b.outgoing, b.body, b.entities_json, b.silent, b.noforwards, b.reply_to_msg_id, b.reply_to_peer_type, b.reply_to_peer_id, b.reply_to_top_id, b.reply_to_story_id, b.quote_text, b.quote_entities_json, b.quote_offset, b.fwd_from_peer_type, b.fwd_from_peer_id, b.fwd_from_name, b.fwd_date, b.fwd_saved_from_peer_type, b.fwd_saved_from_peer_id, b.fwd_saved_from_msg_id, b.saved_peer_type, b.saved_peer_id, b.pts, b.media_json, b.media_unread, b.reaction_unread, b.pinned, b.via_bot_id, b.grouped_id, b.effect, b.paid_message_stars, b.reply_markup_json, b.rich_message_json, b.peer_user_id, b.peer_access_hash, b.peer_phone, b.peer_first_name, b.peer_last_name, b.peer_username, b.peer_country_code, b.peer_verified, b.peer_support, b.peer_is_bot, b.peer_bot_info_version, b.peer_premium_until, b.peer_emoji_status_document_id, b.peer_emoji_status_until, b.peer_last_seen_at, b.from_user_user_id, b.from_user_access_hash, b.from_user_phone, b.from_user_first_name, b.from_user_last_name, b.from_user_username, b.from_user_country_code, b.from_user_verified, b.from_user_support, b.from_user_is_bot, b.from_user_bot_info_version, b.from_user_premium_until, b.from_user_emoji_status_document_id, b.from_user_emoji_status_until, b.from_user_last_seen_at
     FROM base b
     CROSS JOIN load_params p
     WHERE p.load_type = 'forward'
@@ -2779,13 +2803,13 @@ forward AS (
   ) f
 ),
 paged AS (
-  SELECT box_id, private_message_id, owner_user_id, peer_type, peer_id, from_user_id, message_date, ttl_period, expires_at, edit_date, hide_edited, outgoing, body, entities_json, silent, noforwards, reply_to_msg_id, reply_to_peer_type, reply_to_peer_id, reply_to_top_id, reply_to_story_id, quote_text, quote_entities_json, quote_offset, fwd_from_peer_type, fwd_from_peer_id, fwd_from_name, fwd_date, fwd_saved_from_peer_type, fwd_saved_from_peer_id, fwd_saved_from_msg_id, saved_peer_type, saved_peer_id, pts, media_json, media_unread, reaction_unread, pinned, via_bot_id, grouped_id, effect, reply_markup_json, rich_message_json, peer_user_id, peer_access_hash, peer_phone, peer_first_name, peer_last_name, peer_username, peer_country_code, peer_verified, peer_support, peer_is_bot, peer_bot_info_version, peer_premium_until, peer_emoji_status_document_id, peer_emoji_status_until, peer_last_seen_at, from_user_user_id, from_user_access_hash, from_user_phone, from_user_first_name, from_user_last_name, from_user_username, from_user_country_code, from_user_verified, from_user_support, from_user_is_bot, from_user_bot_info_version, from_user_premium_until, from_user_emoji_status_document_id, from_user_emoji_status_until, from_user_last_seen_at FROM backward
+  SELECT box_id, private_message_id, owner_user_id, peer_type, peer_id, from_user_id, message_date, ttl_period, expires_at, edit_date, hide_edited, outgoing, body, entities_json, silent, noforwards, reply_to_msg_id, reply_to_peer_type, reply_to_peer_id, reply_to_top_id, reply_to_story_id, quote_text, quote_entities_json, quote_offset, fwd_from_peer_type, fwd_from_peer_id, fwd_from_name, fwd_date, fwd_saved_from_peer_type, fwd_saved_from_peer_id, fwd_saved_from_msg_id, saved_peer_type, saved_peer_id, pts, media_json, media_unread, reaction_unread, pinned, via_bot_id, grouped_id, effect, paid_message_stars, reply_markup_json, rich_message_json, peer_user_id, peer_access_hash, peer_phone, peer_first_name, peer_last_name, peer_username, peer_country_code, peer_verified, peer_support, peer_is_bot, peer_bot_info_version, peer_premium_until, peer_emoji_status_document_id, peer_emoji_status_until, peer_last_seen_at, from_user_user_id, from_user_access_hash, from_user_phone, from_user_first_name, from_user_last_name, from_user_username, from_user_country_code, from_user_verified, from_user_support, from_user_is_bot, from_user_bot_info_version, from_user_premium_until, from_user_emoji_status_document_id, from_user_emoji_status_until, from_user_last_seen_at FROM backward
   UNION ALL
-  SELECT box_id, private_message_id, owner_user_id, peer_type, peer_id, from_user_id, message_date, ttl_period, expires_at, edit_date, hide_edited, outgoing, body, entities_json, silent, noforwards, reply_to_msg_id, reply_to_peer_type, reply_to_peer_id, reply_to_top_id, reply_to_story_id, quote_text, quote_entities_json, quote_offset, fwd_from_peer_type, fwd_from_peer_id, fwd_from_name, fwd_date, fwd_saved_from_peer_type, fwd_saved_from_peer_id, fwd_saved_from_msg_id, saved_peer_type, saved_peer_id, pts, media_json, media_unread, reaction_unread, pinned, via_bot_id, grouped_id, effect, reply_markup_json, rich_message_json, peer_user_id, peer_access_hash, peer_phone, peer_first_name, peer_last_name, peer_username, peer_country_code, peer_verified, peer_support, peer_is_bot, peer_bot_info_version, peer_premium_until, peer_emoji_status_document_id, peer_emoji_status_until, peer_last_seen_at, from_user_user_id, from_user_access_hash, from_user_phone, from_user_first_name, from_user_last_name, from_user_username, from_user_country_code, from_user_verified, from_user_support, from_user_is_bot, from_user_bot_info_version, from_user_premium_until, from_user_emoji_status_document_id, from_user_emoji_status_until, from_user_last_seen_at FROM around_forward
+  SELECT box_id, private_message_id, owner_user_id, peer_type, peer_id, from_user_id, message_date, ttl_period, expires_at, edit_date, hide_edited, outgoing, body, entities_json, silent, noforwards, reply_to_msg_id, reply_to_peer_type, reply_to_peer_id, reply_to_top_id, reply_to_story_id, quote_text, quote_entities_json, quote_offset, fwd_from_peer_type, fwd_from_peer_id, fwd_from_name, fwd_date, fwd_saved_from_peer_type, fwd_saved_from_peer_id, fwd_saved_from_msg_id, saved_peer_type, saved_peer_id, pts, media_json, media_unread, reaction_unread, pinned, via_bot_id, grouped_id, effect, paid_message_stars, reply_markup_json, rich_message_json, peer_user_id, peer_access_hash, peer_phone, peer_first_name, peer_last_name, peer_username, peer_country_code, peer_verified, peer_support, peer_is_bot, peer_bot_info_version, peer_premium_until, peer_emoji_status_document_id, peer_emoji_status_until, peer_last_seen_at, from_user_user_id, from_user_access_hash, from_user_phone, from_user_first_name, from_user_last_name, from_user_username, from_user_country_code, from_user_verified, from_user_support, from_user_is_bot, from_user_bot_info_version, from_user_premium_until, from_user_emoji_status_document_id, from_user_emoji_status_until, from_user_last_seen_at FROM around_forward
   UNION ALL
-  SELECT box_id, private_message_id, owner_user_id, peer_type, peer_id, from_user_id, message_date, ttl_period, expires_at, edit_date, hide_edited, outgoing, body, entities_json, silent, noforwards, reply_to_msg_id, reply_to_peer_type, reply_to_peer_id, reply_to_top_id, reply_to_story_id, quote_text, quote_entities_json, quote_offset, fwd_from_peer_type, fwd_from_peer_id, fwd_from_name, fwd_date, fwd_saved_from_peer_type, fwd_saved_from_peer_id, fwd_saved_from_msg_id, saved_peer_type, saved_peer_id, pts, media_json, media_unread, reaction_unread, pinned, via_bot_id, grouped_id, effect, reply_markup_json, rich_message_json, peer_user_id, peer_access_hash, peer_phone, peer_first_name, peer_last_name, peer_username, peer_country_code, peer_verified, peer_support, peer_is_bot, peer_bot_info_version, peer_premium_until, peer_emoji_status_document_id, peer_emoji_status_until, peer_last_seen_at, from_user_user_id, from_user_access_hash, from_user_phone, from_user_first_name, from_user_last_name, from_user_username, from_user_country_code, from_user_verified, from_user_support, from_user_is_bot, from_user_bot_info_version, from_user_premium_until, from_user_emoji_status_document_id, from_user_emoji_status_until, from_user_last_seen_at FROM around_backward
+  SELECT box_id, private_message_id, owner_user_id, peer_type, peer_id, from_user_id, message_date, ttl_period, expires_at, edit_date, hide_edited, outgoing, body, entities_json, silent, noforwards, reply_to_msg_id, reply_to_peer_type, reply_to_peer_id, reply_to_top_id, reply_to_story_id, quote_text, quote_entities_json, quote_offset, fwd_from_peer_type, fwd_from_peer_id, fwd_from_name, fwd_date, fwd_saved_from_peer_type, fwd_saved_from_peer_id, fwd_saved_from_msg_id, saved_peer_type, saved_peer_id, pts, media_json, media_unread, reaction_unread, pinned, via_bot_id, grouped_id, effect, paid_message_stars, reply_markup_json, rich_message_json, peer_user_id, peer_access_hash, peer_phone, peer_first_name, peer_last_name, peer_username, peer_country_code, peer_verified, peer_support, peer_is_bot, peer_bot_info_version, peer_premium_until, peer_emoji_status_document_id, peer_emoji_status_until, peer_last_seen_at, from_user_user_id, from_user_access_hash, from_user_phone, from_user_first_name, from_user_last_name, from_user_username, from_user_country_code, from_user_verified, from_user_support, from_user_is_bot, from_user_bot_info_version, from_user_premium_until, from_user_emoji_status_document_id, from_user_emoji_status_until, from_user_last_seen_at FROM around_backward
   UNION ALL
-  SELECT box_id, private_message_id, owner_user_id, peer_type, peer_id, from_user_id, message_date, ttl_period, expires_at, edit_date, hide_edited, outgoing, body, entities_json, silent, noforwards, reply_to_msg_id, reply_to_peer_type, reply_to_peer_id, reply_to_top_id, reply_to_story_id, quote_text, quote_entities_json, quote_offset, fwd_from_peer_type, fwd_from_peer_id, fwd_from_name, fwd_date, fwd_saved_from_peer_type, fwd_saved_from_peer_id, fwd_saved_from_msg_id, saved_peer_type, saved_peer_id, pts, media_json, media_unread, reaction_unread, pinned, via_bot_id, grouped_id, effect, reply_markup_json, rich_message_json, peer_user_id, peer_access_hash, peer_phone, peer_first_name, peer_last_name, peer_username, peer_country_code, peer_verified, peer_support, peer_is_bot, peer_bot_info_version, peer_premium_until, peer_emoji_status_document_id, peer_emoji_status_until, peer_last_seen_at, from_user_user_id, from_user_access_hash, from_user_phone, from_user_first_name, from_user_last_name, from_user_username, from_user_country_code, from_user_verified, from_user_support, from_user_is_bot, from_user_bot_info_version, from_user_premium_until, from_user_emoji_status_document_id, from_user_emoji_status_until, from_user_last_seen_at FROM forward
+  SELECT box_id, private_message_id, owner_user_id, peer_type, peer_id, from_user_id, message_date, ttl_period, expires_at, edit_date, hide_edited, outgoing, body, entities_json, silent, noforwards, reply_to_msg_id, reply_to_peer_type, reply_to_peer_id, reply_to_top_id, reply_to_story_id, quote_text, quote_entities_json, quote_offset, fwd_from_peer_type, fwd_from_peer_id, fwd_from_name, fwd_date, fwd_saved_from_peer_type, fwd_saved_from_peer_id, fwd_saved_from_msg_id, saved_peer_type, saved_peer_id, pts, media_json, media_unread, reaction_unread, pinned, via_bot_id, grouped_id, effect, paid_message_stars, reply_markup_json, rich_message_json, peer_user_id, peer_access_hash, peer_phone, peer_first_name, peer_last_name, peer_username, peer_country_code, peer_verified, peer_support, peer_is_bot, peer_bot_info_version, peer_premium_until, peer_emoji_status_document_id, peer_emoji_status_until, peer_last_seen_at, from_user_user_id, from_user_access_hash, from_user_phone, from_user_first_name, from_user_last_name, from_user_username, from_user_country_code, from_user_verified, from_user_support, from_user_is_bot, from_user_bot_info_version, from_user_premium_until, from_user_emoji_status_document_id, from_user_emoji_status_until, from_user_last_seen_at FROM forward
 )
 SELECT
   box_id,
@@ -2829,6 +2853,7 @@ SELECT
   via_bot_id,
   grouped_id,
   effect,
+  paid_message_stars,
   reply_markup_json,
   rich_message_json,
   peer_user_id,
@@ -2933,6 +2958,7 @@ type ListMessagesByUserRow struct {
 	ViaBotID                      int64
 	GroupedID                     int64
 	Effect                        int64
+	PaidMessageStars              int64
 	ReplyMarkupJson               string
 	RichMessageJson               string
 	PeerUserID                    int64
@@ -3041,6 +3067,7 @@ func (q *Queries) ListMessagesByUser(ctx context.Context, arg ListMessagesByUser
 			&i.ViaBotID,
 			&i.GroupedID,
 			&i.Effect,
+			&i.PaidMessageStars,
 			&i.ReplyMarkupJson,
 			&i.RichMessageJson,
 			&i.PeerUserID,
@@ -3128,6 +3155,7 @@ SELECT
   via_bot_id,
   grouped_id,
   effect,
+  paid_message_stars,
   reply_markup::text AS reply_markup_json,
   rich_message::text AS rich_message_json
 FROM message_boxes
@@ -3189,6 +3217,7 @@ type ListUnreadReactionMessageBoxesRow struct {
 	ViaBotID             int64
 	GroupedID            int64
 	Effect               int64
+	PaidMessageStars     int64
 	ReplyMarkupJson      string
 	RichMessageJson      string
 }
@@ -3249,6 +3278,7 @@ func (q *Queries) ListUnreadReactionMessageBoxes(ctx context.Context, arg ListUn
 			&i.ViaBotID,
 			&i.GroupedID,
 			&i.Effect,
+			&i.PaidMessageStars,
 			&i.ReplyMarkupJson,
 			&i.RichMessageJson,
 		); err != nil {
@@ -3306,6 +3336,7 @@ SELECT
   via_bot_id,
   grouped_id,
   effect,
+  paid_message_stars,
   reply_markup::text AS reply_markup_json,
   rich_message::text AS rich_message_json
 FROM message_boxes
@@ -3366,6 +3397,7 @@ type ListVisibleMessageBoxesByPrivateMessageRow struct {
 	ViaBotID             int64
 	GroupedID            int64
 	Effect               int64
+	PaidMessageStars     int64
 	ReplyMarkupJson      string
 	RichMessageJson      string
 }
@@ -3422,6 +3454,7 @@ func (q *Queries) ListVisibleMessageBoxesByPrivateMessage(ctx context.Context, a
 			&i.ViaBotID,
 			&i.GroupedID,
 			&i.Effect,
+			&i.PaidMessageStars,
 			&i.ReplyMarkupJson,
 			&i.RichMessageJson,
 		); err != nil {
@@ -3749,6 +3782,7 @@ RETURNING
   via_bot_id,
   grouped_id,
   effect,
+  paid_message_stars,
   reply_markup::text AS reply_markup_json,
   rich_message::text AS rich_message_json
 `
@@ -3810,6 +3844,7 @@ type UpdateMessageBoxEditRow struct {
 	ViaBotID             int64
 	GroupedID            int64
 	Effect               int64
+	PaidMessageStars     int64
 	ReplyMarkupJson      string
 	RichMessageJson      string
 }
@@ -3872,6 +3907,7 @@ func (q *Queries) UpdateMessageBoxEdit(ctx context.Context, arg UpdateMessageBox
 		&i.ViaBotID,
 		&i.GroupedID,
 		&i.Effect,
+		&i.PaidMessageStars,
 		&i.ReplyMarkupJson,
 		&i.RichMessageJson,
 	)

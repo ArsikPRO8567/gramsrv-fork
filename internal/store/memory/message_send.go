@@ -62,6 +62,20 @@ func (s *MessageStore) SendPrivateText(_ context.Context, req domain.SendPrivate
 	}); err != nil || found {
 		return replay, err
 	}
+	// Раунд 37: платные сообщения в личных чатах — списание отправителю и
+	// зачисление получателю до записи боксов; повторы отсечены выше по
+	// random_id+фингерпринту. Само-сообщение и заблокировавший получатель не
+	// оплачиваются. Недостаточный баланс отменяет отправку целиком.
+	paidMessageStars := int64(0)
+	if req.PaidMessageStars > 0 && req.SenderUserID != req.RecipientUserID && !req.RecipientBlocked {
+		paidMessageStars = req.PaidMessageStars
+		balance := s.starsBalances[req.SenderUserID]
+		if balance < paidMessageStars {
+			return domain.SendPrivateTextResult{}, domain.ErrStarsInsufficient
+		}
+		s.starsBalances[req.SenderUserID] = balance - paidMessageStars
+		s.starsBalances[req.RecipientUserID] += paidMessageStars
+	}
 	if req.Date == 0 {
 		req.Date = int(time.Now().Unix())
 	}
@@ -72,27 +86,28 @@ func (s *MessageStore) SendPrivateText(_ context.Context, req domain.SendPrivate
 	uid := s.nextUID
 	s.nextUID++
 	sender := domain.Message{
-		ID:          s.nextBoxIDLocked(req.SenderUserID),
-		UID:         uid,
-		RandomID:    req.RandomID,
-		OwnerUserID: req.SenderUserID,
-		Peer:        domain.Peer{Type: domain.PeerTypeUser, ID: req.RecipientUserID},
-		From:        domain.Peer{Type: domain.PeerTypeUser, ID: req.SenderUserID},
-		Date:        req.Date,
-		Out:         true,
-		Silent:      req.Silent,
-		NoForwards:  req.NoForwards,
-		Body:        req.Message,
-		Entities:    append([]domain.MessageEntity(nil), req.Entities...),
-		Media:       cloneRequestedPeerMedia(req.Media),
-		ViaBotID:    req.ViaBotID,
-		GroupedID:   req.GroupedID,
-		Effect:      req.Effect,
-		ReplyMarkup: cloneReplyMarkup(req.ReplyMarkup),
-		RichMessage: cloneRichMessage(req.RichMessage),
-		ReplyTo:     cloneMessageReply(senderReply),
-		Forward:     cloneMessageForward(req.Forward),
-		Pts:         s.nextPtsLocked(req.SenderUserID),
+		ID:               s.nextBoxIDLocked(req.SenderUserID),
+		UID:              uid,
+		RandomID:         req.RandomID,
+		OwnerUserID:      req.SenderUserID,
+		Peer:             domain.Peer{Type: domain.PeerTypeUser, ID: req.RecipientUserID},
+		From:             domain.Peer{Type: domain.PeerTypeUser, ID: req.SenderUserID},
+		Date:             req.Date,
+		Out:              true,
+		Silent:           req.Silent,
+		NoForwards:       req.NoForwards,
+		Body:             req.Message,
+		Entities:         append([]domain.MessageEntity(nil), req.Entities...),
+		Media:            cloneRequestedPeerMedia(req.Media),
+		ViaBotID:         req.ViaBotID,
+		GroupedID:        req.GroupedID,
+		Effect:           req.Effect,
+		PaidMessageStars: paidMessageStars,
+		ReplyMarkup:      cloneReplyMarkup(req.ReplyMarkup),
+		RichMessage:      cloneRichMessage(req.RichMessage),
+		ReplyTo:          cloneMessageReply(senderReply),
+		Forward:          cloneMessageForward(req.Forward),
+		Pts:              s.nextPtsLocked(req.SenderUserID),
 		// voice/round 在发送者副本上同样保持"未听"，由对端内容已读清除。
 		MediaUnread: req.Media.HasUnreadPayload() && req.SenderUserID != req.RecipientUserID,
 	}

@@ -1293,9 +1293,13 @@ var (
 	ErrStarGiftAlreadyUpgraded        = errors.New("stargift: already upgraded")
 	ErrStarGiftCollectibleSoldOut     = errors.New("stargift: collectible supply exhausted")
 	ErrStarGiftCollectibleInvalid     = errors.New("stargift: invalid collectible definition")
-	ErrStarGiftCollectionNotFound     = errors.New("stargift: collection not found")
-	ErrStarGiftCollectionsFull        = errors.New("stargift: collections full")
-	ErrStarGiftUnavailable            = errors.New("stargift: unavailable")
+	// ErrStarGiftCollectibleAttributeInUse — попытка снять строку атрибута
+	// опубликованной ревизии, на которую ссылаются выпущенные уникальные
+	// подарки (unique_star_gifts.model/pattern/backdrop_attribute_id).
+	ErrStarGiftCollectibleAttributeInUse = errors.New("stargift: collectible attribute is referenced by issued gifts")
+	ErrStarGiftCollectionNotFound        = errors.New("stargift: collection not found")
+	ErrStarGiftCollectionsFull           = errors.New("stargift: collections full")
+	ErrStarGiftUnavailable               = errors.New("stargift: unavailable")
 	// ErrStarGiftUserLimit — исчерпан лимит starGift.limited_per_user:
 	// покупатель уже отправил per_user_total таких подарков. Отдаётся
 	// клиентам как STARGIFT_USER_USAGE_LIMITED (400), см. документацию

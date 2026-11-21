@@ -143,13 +143,18 @@ func (r *Router) onMessagesForwardMessages(ctx context.Context, req *tg.Messages
 	if err != nil {
 		return nil, err
 	}
+	// Раунд 37: платные сообщения при пересылке — цена получателя за КАЖДОЕ
+	// пересылаемое сообщение; само списание делает store в транзакции отправки.
+	var forwardPaidStars int64
 	if toPeer.Type == domain.PeerTypeUser {
 		if req.AllowPaidFloodskip {
 			return nil, paymentUnsupportedErr()
 		}
-		if err := r.ensurePrivateContactAllowed(ctx, userID, toPeer.ID, req.AllowPaidStars, len(absentIndexes)); err != nil {
-			return nil, err
+		paidStars, gateErr := r.privateContactPaidStarsFor(ctx, userID, toPeer.ID, req.AllowPaidStars, len(absentIndexes))
+		if gateErr != nil {
+			return nil, gateErr
 		}
+		forwardPaidStars = paidStars
 	}
 	absentIDs := make([]int, len(absentIndexes))
 	absentRandomIDs := make([]int64, len(absentIndexes))
@@ -321,6 +326,7 @@ func (r *Router) onMessagesForwardMessages(ctx context.Context, req *tg.Messages
 				RecipientBlocked:       recipientBlocked,
 				IdempotencyFingerprint: idempotencyFingerprints[i],
 				IdempotencyPreflighted: replays[i].checked,
+				PaidMessageStars:       forwardPaidStars,
 			})
 			if err != nil {
 				return nil, messageForwardErr(err)

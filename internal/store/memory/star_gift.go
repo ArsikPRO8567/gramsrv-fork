@@ -2,6 +2,7 @@ package memory
 
 import (
 	"context"
+	"fmt"
 	"math/rand/v2"
 	"sort"
 	"strconv"
@@ -310,6 +311,125 @@ func (s *StarGiftStore) ActiveCollectibleRevision(_ context.Context, giftID int6
 	defer s.mu.Unlock()
 	revision, ok := s.collectibles[giftID]
 	return cloneCollectibleRevision(revision), ok, nil
+}
+
+// SyncActiveCollectibleRevision (раунд 37) правит активную ревизию «на месте»:
+// строки с ID обновляются (id сохраняются), без ID — добавляются,
+// отсутствующие в форме — снимаются (задействованные выпущенными подарками —
+// отказ). Зеркало postgres-адаптера для памяти.
+func (s *StarGiftStore) SyncActiveCollectibleRevision(_ context.Context, write domain.StarGiftCollectibleWrite) (domain.StarGiftCollectibleRevision, error) {
+	write.SlugPrefix = strings.ToLower(strings.TrimSpace(write.SlugPrefix))
+	for i := range write.Models {
+		if write.Models[i].ID > 0 && write.Models[i].Document != nil && write.Models[i].Blob == nil {
+			write.Models[i].ReuseDocument = true
+		}
+	}
+	for i := range write.Patterns {
+		if write.Patterns[i].ID > 0 && write.Patterns[i].Document != nil && write.Patterns[i].Blob == nil {
+			write.Patterns[i].ReuseDocument = true
+		}
+	}
+	if err := domain.ValidateStarGiftCollectibleWrite(write); err != nil {
+		return domain.StarGiftCollectibleRevision{}, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	active, ok := s.collectibles[write.GiftID]
+	if !ok {
+		return domain.StarGiftCollectibleRevision{}, domain.ErrStarGiftCollectibleInvalid
+	}
+	issuedByKind := map[string]map[int64]int{
+		string(domain.StarGiftCollectibleModel):    {},
+		string(domain.StarGiftCollectiblePattern):  {},
+		string(domain.StarGiftCollectibleBackdrop): {},
+	}
+	for _, unique := range s.uniqueByID {
+		if unique.CollectibleRevisionID != active.ID {
+			continue
+		}
+		issuedByKind[string(domain.StarGiftCollectibleModel)][unique.Model.ID]++
+		issuedByKind[string(domain.StarGiftCollectiblePattern)][unique.Pattern.ID]++
+		issuedByKind[string(domain.StarGiftCollectibleBackdrop)][unique.Backdrop.ID]++
+	}
+	sync := func(kind domain.StarGiftCollectibleAttributeKind, current []domain.StarGiftCollectibleAttribute, incoming []domain.StarGiftCollectibleAttribute) ([]domain.StarGiftCollectibleAttribute, error) {
+		kept := make(map[int64]struct{}, len(incoming))
+		out := make([]domain.StarGiftCollectibleAttribute, 0, len(incoming))
+		byID := make(map[int64]domain.StarGiftCollectibleAttribute, len(current))
+		for _, attribute := range current {
+			byID[attribute.ID] = attribute
+		}
+		for _, attribute := range incoming {
+			if attribute.ID > 0 {
+				existing, ok := byID[attribute.ID]
+				if !ok {
+					return nil, fmt.Errorf("%w: %s attribute %d does not belong to revision %d",
+						domain.ErrStarGiftCollectibleInvalid, kind, attribute.ID, active.ID)
+				}
+				kept[attribute.ID] = struct{}{}
+				if attribute.Name == "" {
+					attribute.Name = existing.Name
+				}
+				attribute.CollectibleRevisionID = active.ID
+				out = append(out, cloneCollectibleAttribute(attribute))
+				continue
+			}
+			clone := cloneCollectibleAttribute(attribute)
+			clone.ID = 0
+			clone.CollectibleRevisionID = 0
+			out = append(out, clone)
+		}
+		for _, attribute := range current {
+			if _, keep := kept[attribute.ID]; keep {
+				continue
+			}
+			if issuedByKind[string(kind)][attribute.ID] > 0 {
+				return nil, fmt.Errorf("%w: %s attribute %d is referenced by issued gifts",
+					domain.ErrStarGiftCollectibleAttributeInUse, kind, attribute.ID)
+			}
+		}
+		// Перенумерация: обновлённые строки сохраняют id, новые получают их
+		// в порядке добавления (после обновлённых).
+		result := make([]domain.StarGiftCollectibleAttribute, 0, len(out))
+		for _, attribute := range out {
+			if attribute.ID > 0 {
+				result = append(result, attribute)
+			}
+		}
+		for _, attribute := range out {
+			if attribute.ID == 0 {
+				s.nextAttributeID++
+				attribute.ID = s.nextAttributeID
+				attribute.CollectibleRevisionID = active.ID
+				result = append(result, attribute)
+			}
+		}
+		return result, nil
+	}
+	models, err := sync(domain.StarGiftCollectibleModel, active.Models, write.Models)
+	if err != nil {
+		return domain.StarGiftCollectibleRevision{}, err
+	}
+	patterns, err := sync(domain.StarGiftCollectiblePattern, active.Patterns, write.Patterns)
+	if err != nil {
+		return domain.StarGiftCollectibleRevision{}, err
+	}
+	backdrops, err := sync(domain.StarGiftCollectibleBackdrop, active.Backdrops, write.Backdrops)
+	if err != nil {
+		return domain.StarGiftCollectibleRevision{}, err
+	}
+	updated := active
+	updated.UpgradeStars = write.UpgradeStars
+	updated.SupplyTotal = write.SupplyTotal
+	updated.SlugPrefix = write.SlugPrefix
+	updated.CreatedBy = write.Actor
+	updated.Models, updated.Patterns, updated.Backdrops = models, patterns, backdrops
+	s.collectibles[write.GiftID] = updated
+	gift := s.catalog[write.GiftID]
+	gift.UpgradeStars = updated.UpgradeStars
+	gift.UpgradeTotal = updated.SupplyTotal
+	gift.UpgradeIssued = updated.Issued
+	s.catalog[write.GiftID] = gift
+	return cloneCollectibleRevision(updated), nil
 }
 
 // CollectibleRevisionFull (раунд 32) ищет ревизию по id среди всех подарков —

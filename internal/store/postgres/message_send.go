@@ -81,47 +81,47 @@ func ensureOfficialSystemUserWithDB(ctx context.Context, db sqlcgen.DBTX, msg do
 	}
 	if _, err := db.Exec(ctx, `
 WITH desired (
-	id, access_hash, phone, first_name, last_name, username,
-	country_code, verified, support, about, is_bot, bot_info_version
+        id, access_hash, phone, first_name, last_name, username,
+        country_code, verified, support, about, is_bot, bot_info_version
 ) AS (
-	VALUES ($1::bigint, $2::bigint, $3::text, $4::text, $5::text, $6::text,
-		$7::text, $8::boolean, $9::boolean, $10::text, $11::boolean, $12::integer)
+        VALUES ($1::bigint, $2::bigint, $3::text, $4::text, $5::text, $6::text,
+                $7::text, $8::boolean, $9::boolean, $10::text, $11::boolean, $12::integer)
 ), upserted AS (
-	INSERT INTO users (id, access_hash, phone, first_name, last_name, username, country_code, verified, support, about, is_bot, bot_info_version)
-	SELECT id, access_hash, phone, first_name, last_name, username, country_code, verified, support, about, is_bot, bot_info_version
-	FROM desired
-	ON CONFLICT (id) DO UPDATE SET
-		access_hash = EXCLUDED.access_hash,
-		phone = EXCLUDED.phone,
-		first_name = EXCLUDED.first_name,
-		last_name = EXCLUDED.last_name,
-		username = EXCLUDED.username,
-		country_code = EXCLUDED.country_code,
-		verified = EXCLUDED.verified,
-		support = EXCLUDED.support,
-		about = EXCLUDED.about,
-		is_bot = EXCLUDED.is_bot,
-		bot_info_version = EXCLUDED.bot_info_version,
-		updated_at = now()
-	WHERE (
-		users.access_hash, users.phone, users.first_name, users.last_name,
-		users.username, users.country_code, users.verified, users.support,
-		users.about, users.is_bot, users.bot_info_version
-	) IS DISTINCT FROM (
-		EXCLUDED.access_hash, EXCLUDED.phone, EXCLUDED.first_name, EXCLUDED.last_name,
-		EXCLUDED.username, EXCLUDED.country_code, EXCLUDED.verified, EXCLUDED.support,
-		EXCLUDED.about, EXCLUDED.is_bot, EXCLUDED.bot_info_version
-	)
+        INSERT INTO users (id, access_hash, phone, first_name, last_name, username, country_code, verified, support, about, is_bot, bot_info_version)
+        SELECT id, access_hash, phone, first_name, last_name, username, country_code, verified, support, about, is_bot, bot_info_version
+        FROM desired
+        ON CONFLICT (id) DO UPDATE SET
+                access_hash = EXCLUDED.access_hash,
+                phone = EXCLUDED.phone,
+                first_name = EXCLUDED.first_name,
+                last_name = EXCLUDED.last_name,
+                username = EXCLUDED.username,
+                country_code = EXCLUDED.country_code,
+                verified = EXCLUDED.verified,
+                support = EXCLUDED.support,
+                about = EXCLUDED.about,
+                is_bot = EXCLUDED.is_bot,
+                bot_info_version = EXCLUDED.bot_info_version,
+                updated_at = now()
+        WHERE (
+                users.access_hash, users.phone, users.first_name, users.last_name,
+                users.username, users.country_code, users.verified, users.support,
+                users.about, users.is_bot, users.bot_info_version
+        ) IS DISTINCT FROM (
+                EXCLUDED.access_hash, EXCLUDED.phone, EXCLUDED.first_name, EXCLUDED.last_name,
+                EXCLUDED.username, EXCLUDED.country_code, EXCLUDED.verified, EXCLUDED.support,
+                EXCLUDED.about, EXCLUDED.is_bot, EXCLUDED.bot_info_version
+        )
 )
 INSERT INTO peer_usernames (username_lower, username, peer_type, peer_id, active, editable, sort_order)
 SELECT lower(username), username, 'user', id, true, true, 0
 FROM desired
 ON CONFLICT (peer_type, peer_id) WHERE editable DO UPDATE SET
-	username_lower = EXCLUDED.username_lower,
-	username = EXCLUDED.username,
-	updated_at = now()
+        username_lower = EXCLUDED.username_lower,
+        username = EXCLUDED.username,
+        updated_at = now()
 WHERE (peer_usernames.username_lower, peer_usernames.username)
-	IS DISTINCT FROM (EXCLUDED.username_lower, EXCLUDED.username)
+        IS DISTINCT FROM (EXCLUDED.username_lower, EXCLUDED.username)
 `, u.ID, u.AccessHash, u.Phone, u.FirstName, u.LastName, u.Username, u.CountryCode, u.Verified, u.Support, u.About, u.Bot, u.BotInfoVersion); err != nil {
 		return fmt.Errorf("ensure official system user: %w", err)
 	}
@@ -260,6 +260,19 @@ func (s *MessageStore) sendPrivateTextOnce(ctx context.Context, req domain.SendP
 			return domain.SendPrivateTextResult{}, err
 		}
 	}
+	// Раунд 37: платные сообщения в личных чатах. RPC-гейт проверил, что
+	// allow_paid_stars покрывает цену получателя; здесь — сама оплата:
+	// атомарно с INSERT'ом сообщения, в одной транзакции с двойным боксом.
+	// Само-сообщение и недоставленное (заблокировавший получатель) сообщение
+	// оплате не подлежат — списывать нечего. Ошибка баланса откатывает всю
+	// транзакцию: сообщение не появится без оплаты.
+	paidMessageStars := int64(0)
+	if req.PaidMessageStars > 0 && !selfMessage && deliverRecipient {
+		paidMessageStars = req.PaidMessageStars
+		if err := chargePrivatePaidMessageTx(ctx, tx, req.SenderUserID, req.RecipientUserID, paidMessageStars, req.Date); err != nil {
+			return domain.SendPrivateTextResult{}, err
+		}
+	}
 	media := privateSendMediaProjection{Shared: req.Media, Sender: req.Media, Recipient: req.Media}
 	if hooks.projectMedia != nil {
 		media, err = hooks.projectMedia(ctx, tx, &req)
@@ -308,6 +321,7 @@ func (s *MessageStore) sendPrivateTextOnce(ctx context.Context, req domain.SendP
 		ViaBotID:           req.ViaBotID,
 		GroupedID:          req.GroupedID,
 		Effect:             req.Effect,
+		PaidMessageStars:   paidMessageStars,
 	}
 	applyCreatePrivateMessageMetadata(&privateArg, senderMeta)
 	pm, err := qtx.CreatePrivateMessage(ctx, privateArg)
@@ -406,6 +420,7 @@ WHERE sender_user_id=$1 AND id=$2`, req.SenderUserID, pm.ID, sharedMediaJSON)
 		ViaBotID:         req.ViaBotID,
 		GroupedID:        req.GroupedID,
 		Effect:           req.Effect,
+		PaidMessageStars: paidMessageStars,
 		// voice/round 在发送者自己的副本上也保持"未听"，直到对端
 		// readMessageContents 触发 sender 侧清除；发给自己无人可听，恒已读。
 		MediaUnread:    media.Sender.HasUnreadPayload() && !selfMessage,
@@ -479,6 +494,7 @@ WHERE sender_user_id=$1 AND id=$2`, req.SenderUserID, pm.ID, sharedMediaJSON)
 			ViaBotID:         req.ViaBotID,
 			GroupedID:        req.GroupedID,
 			Effect:           req.Effect,
+			PaidMessageStars: paidMessageStars,
 			MediaUnread:      media.Recipient.HasUnreadPayload(),
 			ReactionUnread:   false,
 		}

@@ -30,6 +30,30 @@ type MessageStore struct {
 	// one-shot response fact.
 	privateNoForwards         map[privateNoForwardsPair]domain.PrivateNoForwardsState
 	privateNoForwardsRequests map[int64]memoryNoForwardsRequest
+	// starsBalances 是内存私聊付费消息（paid messages）的最小账本：发送方扣款、
+	// 收件人等额入账。生产路径的完整 Stars 流水在 postgres StarsStore；内存
+	// 实现只维护余额供 rpc 测试断言。nil map 视作 DefaultStarsStartingGrant。
+	starsBalances map[int64]int64
+}
+
+// SetStarsBalance 预置内存 Stars 余额（付费消息测试用）。
+func (s *MessageStore) SetStarsBalance(userID, balance int64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.starsBalances == nil {
+		s.starsBalances = make(map[int64]int64)
+	}
+	s.starsBalances[userID] = balance
+}
+
+// StarsBalance 读取内存 Stars 余额（未预置时返回起始授予额）。
+func (s *MessageStore) StarsBalance(userID int64) int64 {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if balance, ok := s.starsBalances[userID]; ok {
+		return balance
+	}
+	return domain.DefaultStarsStartingGrant
 }
 
 // AttachPollStore 注入共享 poll 权威（与 ChannelStore 共用同一实例）。
@@ -64,5 +88,6 @@ func NewMessageStore(dialogs ...*DialogStore) *MessageStore {
 	if len(dialogs) > 0 {
 		s.dialogs = dialogs[0]
 	}
+	s.starsBalances = make(map[int64]int64)
 	return s
 }

@@ -17,7 +17,7 @@ import (
 	"telesrv/internal/store/memory"
 )
 
-func newPrivateRequirementRouter(t *testing.T, senderPremium bool) (*Router, *appaccount.Service, *appprivacy.Service, *memory.ContactStore, domain.User, domain.User) {
+func newPrivateRequirementRouter(t *testing.T, senderPremium bool) (*Router, *appaccount.Service, *appprivacy.Service, *memory.ContactStore, domain.User, domain.User, *captureMessages) {
 	t.Helper()
 	ctx := context.Background()
 	usersStore := memory.NewUserStore()
@@ -38,18 +38,19 @@ func newPrivateRequirementRouter(t *testing.T, senderPremium bool) (*Router, *ap
 	privacy := appprivacy.NewService(memory.NewPrivacyStore(), contacts).ConfigureReadModels(users, nil)
 	settingsStore := memory.NewPasswordStore()
 	account := appaccount.NewService(settingsStore, appaccount.WithAccountSettings(settingsStore))
+	messages := &captureMessages{}
 	router := New(Config{}, Deps{
 		Account:  account,
 		Privacy:  privacy,
 		Users:    users,
-		Messages: &captureMessages{},
+		Messages: messages,
 	}, zaptest.NewLogger(t), clock.System)
-	return router, account, privacy, contacts, alice, bob
+	return router, account, privacy, contacts, alice, bob, messages
 }
 
 func TestPrivateContactRequirementUsesNoPaidMessagesReadModel(t *testing.T) {
 	ctx := context.Background()
-	r, account, privacy, contacts, alice, bob := newPrivateRequirementRouter(t, false)
+	r, account, privacy, contacts, alice, bob, messages := newPrivateRequirementRouter(t, false)
 	if _, err := account.SetGlobalPrivacy(ctx, bob.ID, domain.GlobalPrivacy{NoncontactPeersPaidStars: 7}); err != nil {
 		t.Fatalf("set Bob paid requirement: %v", err)
 	}
@@ -95,8 +96,14 @@ func TestPrivateContactRequirementUsesNoPaidMessagesReadModel(t *testing.T) {
 	if err := send(81001, 0); err == nil || !strings.Contains(err.Error(), "ALLOW_PAYMENT_REQUIRED") || !strings.Contains(err.Error(), "(7)") {
 		t.Fatalf("non-exempt send err = %v, want ALLOW_PAYMENT_REQUIRED 7", err)
 	}
-	if err := send(81002, 7); err == nil || !strings.Contains(err.Error(), "PAYMENT_UNSUPPORTED") {
-		t.Fatalf("authorized paid send err = %v, want explicit unsupported ledger", err)
+	// Раунд 37: авторизованная платная отправка БОЛЬШЕ НЕ ОТКАЗЫВАЕТ
+	// PAYMENT_UNSUPPORTED — гейт передаёт цену в store, списание выполняется
+	// в транзакции отправки (см. TestMessagesSendMessagePaidMessageChargesSender).
+	if err := send(81002, 7); err != nil {
+		t.Fatalf("authorized paid send err = %v, want success with store charge", err)
+	}
+	if messages.sendReq.PaidMessageStars != 7 {
+		t.Fatalf("authorized paid send store price = %d, want 7", messages.sendReq.PaidMessageStars)
 	}
 
 	if _, err := privacy.SetRules(ctx, bob.ID, domain.PrivacyKeyNoPaidMessages, []domain.PrivacyRule{{
@@ -145,7 +152,7 @@ func TestPrivateContactRequirementPremiumGateUsesViewerFactsReadModel(t *testing
 		{name: "premium allowed", senderPremium: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			r, account, _, _, alice, bob := newPrivateRequirementRouter(t, tc.senderPremium)
+			r, account, _, _, alice, bob, _ := newPrivateRequirementRouter(t, tc.senderPremium)
 			if _, err := account.SetGlobalPrivacy(ctx, bob.ID, domain.GlobalPrivacy{NewNoncontactPeersRequirePremium: true}); err != nil {
 				t.Fatalf("set premium requirement: %v", err)
 			}

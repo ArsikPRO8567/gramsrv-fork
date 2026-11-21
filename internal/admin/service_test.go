@@ -1915,6 +1915,12 @@ func (f *fakeGiftsService) CreateCollectibleRevision(_ context.Context, write do
 	f.lastCollectible = &copied
 	return domain.StarGiftCollectibleRevision{ID: 33, GiftID: write.GiftID, Revision: 2, Published: true}, nil
 }
+
+// ActiveCollectibleRevision (раунд 37) — фейк без активной ревизии: путь
+// PublishStarGiftCollectibles всегда уходит в CreateCollectibleRevision.
+func (*fakeGiftsService) ActiveCollectibleRevision(context.Context, int64) (domain.StarGiftCollectibleRevision, bool, error) {
+	return domain.StarGiftCollectibleRevision{}, false, nil
+}
 func (*fakeGiftsService) CollectiblePreview(context.Context, int64) (domain.StarGiftUpgradePreview, bool, error) {
 	return domain.StarGiftUpgradePreview{}, false, nil
 }
