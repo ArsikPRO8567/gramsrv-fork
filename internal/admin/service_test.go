@@ -1939,16 +1939,16 @@ func (f *fakeGiftsService) SetCollectibleSupplyTotal(_ context.Context, write do
 	return revision, nil
 }
 
-func (f *fakeGiftsService) CollectibleRevisionSummaries(_ context.Context, giftID int64, slug string) ([]domain.StarGiftCollectibleRevisionSummary, error) {
-	// Раунд 35: slug-режим отбирает ревизии по slug_prefix коллекции.
+func (f *fakeGiftsService) CollectibleRevisionSummaries(_ context.Context, giftID int64, slug string) ([]domain.StarGiftCollectibleRevisionSummary, string, error) {
+	// Раунд 35/36: slug-режим отбирает ревизии по slug_prefix ИЛИ gift_id.
 	if slug != "" {
-		if f.sourceRevision == nil || f.sourceRevision.SlugPrefix != slug {
-			return nil, nil
+		if f.sourceRevision == nil || (f.sourceRevision.SlugPrefix != slug && f.sourceRevision.GiftID != giftID) {
+			return nil, "all", nil
 		}
 		giftID = f.sourceRevision.GiftID
 	}
 	if f.sourceRevision == nil || f.sourceRevision.GiftID != giftID {
-		return nil, nil
+		return nil, "all", nil
 	}
 	revision := *f.sourceRevision
 	return []domain.StarGiftCollectibleRevisionSummary{{
@@ -1957,7 +1957,7 @@ func (f *fakeGiftsService) CollectibleRevisionSummaries(_ context.Context, giftI
 		Status:     "published", UpgradeStars: revision.UpgradeStars, SupplyTotal: revision.SupplyTotal,
 		Issued: revision.Issued, ModelCount: len(revision.Models), PatternCount: len(revision.Patterns),
 		BackdropCount: len(revision.Backdrops), CreatedBy: revision.CreatedBy,
-	}}, nil
+	}}, "slug", nil
 }
 func (*fakeGiftsService) CollectibleAnimationJSON(context.Context, int64, domain.StarGiftCollectibleAttributeKind, int64) ([]byte, bool, error) {
 	return []byte(`{"v":"5.7"}`), true, nil

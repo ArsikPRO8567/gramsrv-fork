@@ -2468,7 +2468,11 @@ type setStarGiftAuctionSettingsAPIRequest struct {
 	StartDate          *flexUnix  `json:"start_date,omitempty"`
 	EndDate            *flexUnix  `json:"end_date,omitempty"`
 	// Раунд 35: количество раундов аукциона (total_rounds); nil = не менять.
+	// Раунд 36: остаток подарков (gifts_left) и последний выпущенный номер
+	// (last_gift_num) — для перезапуска аукциона.
 	TotalRounds *int   `json:"total_rounds,omitempty"`
+	GiftsLeft   *int   `json:"gifts_left,omitempty"`
+	LastGiftNum *int   `json:"last_gift_num,omitempty"`
 	Status      string `json:"status,omitempty"`
 }
 
@@ -2534,7 +2538,8 @@ func (s *server) handleSetStarGiftAuctionSettingsAPI(w http.ResponseWriter, r *h
 		CommandMeta: s.commandMetaFromAPI(r, body.CommandID, body.Reason, body.Confirm, "set-gift-auction-settings"),
 		GiftID:      body.GiftID, RoundDuration: body.RoundDuration, RoundDurationsJSON: body.RoundDurationsJSON,
 		RaiseMinBid: body.RaiseMinBid, RoundExtendsJSON: body.RoundExtendsJSON, MinBidAmount: minBid,
-		StartDate: startDate, EndDate: endDate, TotalRounds: body.TotalRounds, Status: body.Status,
+		StartDate: startDate, EndDate: endDate, TotalRounds: body.TotalRounds,
+		GiftsLeft: body.GiftsLeft, LastGiftNum: body.LastGiftNum, Status: body.Status,
 	}
 	result, err := s.callAdminAPI(r.Context(), "/v1/gifts/set-auction-settings", req)
 	writeCommandResultAPI(w, result, err)

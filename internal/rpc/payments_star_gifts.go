@@ -2238,8 +2238,19 @@ func tgSavedStarGiftGift(g domain.SavedStarGift, viewerUserID int64, catalog map
 		// (dispatchStarGiftAuctionAwards кладёт item.amount в блок StarGift).
 		// Обычные покупки/подарки/переносы платный цену не пишут (0) и
 		// продолжают показывать цену ревизии, по которой подарок получен.
+		//
+		// Раунд 36 (исправление «сумма всегда на 1 больше»): клиент считает
+		// стоимость карточки как gift.stars + savedStarGift.upgrade_stars
+		// (StarGiftSheet: Gift2Value). Wrapper бесплатной ревизии пишет во
+		// wrapper upgrade_stars=1 (кнопка «Улучшить бесплатно») — база обязана
+		// уменьшаться на ту же долю, чтобы сумма была ровно выигрышной ставкой.
 		if g.PaidStars > 0 {
-			out.Stars = g.PaidStars
+			stars := g.PaidStars
+			if current, ok := availability[g.GiftID]; ok && current.UpgradeStars == 0 &&
+				g.PrepaidUpgradeStars <= 0 && stars > 1 {
+				stars--
+			}
+			out.Stars = stars
 		}
 		if gift.Limited {
 			out.SetAvailabilityRemains(gift.AvailabilityRemains)

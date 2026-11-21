@@ -801,8 +801,8 @@ func (fakeService) StarGiftCollectibleRevision(context.Context, int64) (domain.S
 	return domain.StarGiftCollectibleRevision{}, domain.ErrStarGiftCollectibleInvalid
 }
 
-func (fakeService) StarGiftCollectibleRevisionSummaries(context.Context, int64, string) ([]domain.StarGiftCollectibleRevisionSummary, error) {
-	return nil, nil
+func (fakeService) StarGiftCollectibleRevisionSummaries(context.Context, int64, string) ([]domain.StarGiftCollectibleRevisionSummary, string, error) {
+	return nil, "", nil
 }
 
 func (fakeService) SetStarGiftCollectibleSupply(context.Context, admin.SetStarGiftCollectibleSupplyRequest) (admin.CommandResult, error) {

@@ -609,13 +609,13 @@ func (s *Service) SetCollectibleSupplyTotal(ctx context.Context, write domain.St
 	return s.store.SetCollectibleSupplyTotal(ctx, write)
 }
 
-// CollectibleRevisionSummaries (раунд 34/35) перечисляет ревизии коллекции
+// CollectibleRevisionSummaries (раунд 34/36) перечисляет ревизии коллекции
 // для выбора источника копирования атрибутов в админке. Непустой slug ищет
-// ревизии по slug_prefix коллекции (один slug может публиковаться разными
-// подарками), пустой — по gift_id.
-func (s *Service) CollectibleRevisionSummaries(ctx context.Context, giftID int64, slug string) ([]domain.StarGiftCollectibleRevisionSummary, error) {
+// ревизии по slug_prefix И gift_id; если обе выборки пусты — последние
+// ревизии всех коллекций (scope "all").
+func (s *Service) CollectibleRevisionSummaries(ctx context.Context, giftID int64, slug string) ([]domain.StarGiftCollectibleRevisionSummary, string, error) {
 	if s == nil || s.store == nil {
-		return nil, fmt.Errorf("star gift service is not configured")
+		return nil, "", fmt.Errorf("star gift service is not configured")
 	}
 	return s.store.CollectibleRevisionSummaries(ctx, giftID, slug)
 }

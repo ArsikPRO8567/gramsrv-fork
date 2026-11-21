@@ -96,10 +96,10 @@ type Service interface {
 	GifCatalogDocumentPreview(ctx context.Context, documentID int64) ([]byte, string, bool, error)
 	StarGiftCollectibles(ctx context.Context, giftID int64) (domain.StarGiftUpgradePreview, bool, error)
 	StarGiftCollectibleRevision(ctx context.Context, revisionID int64) (domain.StarGiftCollectibleRevision, error)
-	// Раунд 34/35: список ревизий коллекции (выбор источника копирования;
-	// slug — отбор по slug_prefix коллекции) и лимит возможных улучшенных
-	// подарков опубликованной ревизии.
-	StarGiftCollectibleRevisionSummaries(ctx context.Context, giftID int64, slug string) ([]domain.StarGiftCollectibleRevisionSummary, error)
+	// Раунд 34/36: список ревизий коллекции (выбор источника копирования;
+	// slug + gift_id, пустые выборки — все ревизии) и лимит возможных
+	// улучшенных подарков опубликованной ревизии.
+	StarGiftCollectibleRevisionSummaries(ctx context.Context, giftID int64, slug string) ([]domain.StarGiftCollectibleRevisionSummary, string, error)
 	SetStarGiftCollectibleSupply(ctx context.Context, req admin.SetStarGiftCollectibleSupplyRequest) (admin.CommandResult, error)
 	StarGiftCollectibleAnimation(ctx context.Context, giftID int64, kind domain.StarGiftCollectibleAttributeKind, attributeID int64) ([]byte, bool, error)
 	ModerationCases(ctx context.Context, filter domain.ModerationCaseFilter) ([]domain.ModerationCase, error)
@@ -1335,7 +1335,7 @@ func (s *Server) handleStarGiftCollectibleRevisionSummaries(w http.ResponseWrite
 		writeError(w, http.StatusBadRequest, "invalid gift id")
 		return
 	}
-	summaries, err := s.svc.StarGiftCollectibleRevisionSummaries(r.Context(), giftID, r.URL.Query().Get("slug"))
+	summaries, scope, err := s.svc.StarGiftCollectibleRevisionSummaries(r.Context(), giftID, r.URL.Query().Get("slug"))
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -1358,7 +1358,7 @@ func (s *Server) handleStarGiftCollectibleRevisionSummaries(w http.ResponseWrite
 			"created_at":     summary.CreatedAt.UTC().Format(time.RFC3339),
 		})
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"gift_id": strconv.FormatInt(giftID, 10), "revisions": rows})
+	writeJSON(w, http.StatusOK, map[string]any{"gift_id": strconv.FormatInt(giftID, 10), "scope": scope, "revisions": rows})
 }
 
 // handleSetStarGiftCollectibleSupply (раунд 34) — правит лимит возможных

@@ -1173,11 +1173,32 @@ WHERE gift_id=$1 AND saved_gift_id IS NULL ORDER BY id LIMIT 100`, giftID)
 				// покрытая выигрышной ставкой; при нулевой цене в каталоге —
 				// минимальная положительная, чтобы клиент не уходил в платный
 				// сценарий с платёжной формой.
+				//
+				// Раунд 36 (исправление «сумма всегда на 1 больше»): официальный
+				// клиент показывает СТОИМОСТЬ подарка как gift.stars + upgrade_stars
+				// (Android StarGiftSheet: Gift2Value и starsBid в tdesktop
+				// history_item.cpp). Форсированный upgrade_stars=1 при ПОЛНОЙ
+				// ставке в stars давал «ставка + 1». Ставка делится на доли:
+				// база = ставка − доля улучшения, upgrade_stars = доля — сумма
+				// ровно равна выигрышной ставке и в шторке сообщения, и на
+				// карточке профиля.
 				if freeUpgrade {
 					action.CanUpgrade = true
-					action.UpgradeStars = gift.UpgradeStars
-					if action.UpgradeStars <= 0 {
-						action.UpgradeStars = 1
+					portion := gift.UpgradeStars
+					if portion <= 0 {
+						portion = 1
+					}
+					if item.amount > portion {
+						action.Stars = item.amount - portion
+						action.UpgradeStars = portion
+						// Блок подарка тоже несёт долю улучшения — tdesktop
+						// считает starsBid как gift.stars + gift.upgrade_stars.
+						action.UpgradePriceStars = portion
+					} else {
+						// Ставка не покрывает даже минимальную долю: кнопки
+						// улучшения нет, стоимость остаётся равной ставке.
+						action.UpgradeStars = 0
+						action.UpgradePriceStars = 0
 					}
 				}
 				sent, err := s.messages.SendPrivateText(ctx, domain.SendPrivateTextRequest{SenderUserID: item.bidder,
@@ -1496,7 +1517,9 @@ func (s *StarGiftLifecycleStore) SetStarGiftAuctionSettings(ctx context.Context,
 		write.MinBidAmount != nil && *write.MinBidAmount <= 0 ||
 		write.StartDate != nil && *write.StartDate <= 0 ||
 		write.EndDate != nil && *write.EndDate <= 0 ||
-		write.TotalRounds != nil && *write.TotalRounds <= 0 {
+		write.TotalRounds != nil && *write.TotalRounds <= 0 ||
+		write.GiftsLeft != nil && *write.GiftsLeft < 0 ||
+		write.LastGiftNum != nil && *write.LastGiftNum < 0 {
 		return domain.StarGiftAuction{}, domain.ErrStarGiftInvalid
 	}
 	status := strings.ToLower(strings.TrimSpace(write.Status))
@@ -1575,6 +1598,15 @@ func (s *StarGiftLifecycleStore) SetStarGiftAuctionSettings(ctx context.Context,
 		// уже идущего раунда отклоняется с чистой ошибкой вместо SQLSTATE.
 		if write.TotalRounds != nil {
 			sets = append(sets, "total_rounds="+appendArg(*write.TotalRounds))
+		}
+		// Раунд 36: остаток подарков и последний выпущенный номер — коррекция
+		// рабочего состояния при перезапуске аукциона (shape_check 0095
+		// требует gifts_left>=0 и last_gift_num>=0 — проверены выше).
+		if write.GiftsLeft != nil {
+			sets = append(sets, "gifts_left="+appendArg(*write.GiftsLeft))
+		}
+		if write.LastGiftNum != nil {
+			sets = append(sets, "last_gift_num="+appendArg(*write.LastGiftNum))
 		}
 		if status != "" {
 			sets = append(sets, "status="+appendArg(status))

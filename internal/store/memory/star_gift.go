@@ -353,19 +353,20 @@ func (s *StarGiftStore) SetCollectibleSupplyTotal(_ context.Context, write domai
 	return cloneCollectibleRevision(revision), nil
 }
 
-// CollectibleRevisionSummaries (раунд 34) перечисляет ревизии коллекции
-// в лёгкой проекции. В памяти хранится только одна (активная) ревизия на
-// подарок; раунд 35: непустой slug отбирает ревизии по slug_prefix (все
-// подарки коллекции), пустой — по gift_id.
-func (s *StarGiftStore) CollectibleRevisionSummaries(_ context.Context, giftID int64, slug string) ([]domain.StarGiftCollectibleRevisionSummary, error) {
+// CollectibleRevisionSummaries (раунд 34/36) перечисляет ревизии коллекции
+// в лёгкой проекции. В памяти хранится одна (активная) ревизия на подарок;
+// непустой slug отбирает ревизии по slug_prefix И gift_id; если обе выборки
+// пусты — ревизии всех подарков (scope "all"), как в postgres-адаптере.
+func (s *StarGiftStore) CollectibleRevisionSummaries(_ context.Context, giftID int64, slug string) ([]domain.StarGiftCollectibleRevisionSummary, string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	out := make([]domain.StarGiftCollectibleRevisionSummary, 0, 1)
 	trimmed := strings.ToLower(strings.TrimSpace(slug))
 	if trimmed != "" {
-		// Slug-режим: одна коллекция может быть опубликована разными подарками.
+		// Slug-режим: одна коллекция может быть опубликована разными подарками;
+		// ревизии самого подарка включаются даже при сменившемся slug.
 		for _, revision := range s.collectibles {
-			if revision.SlugPrefix != trimmed {
+			if revision.SlugPrefix != trimmed && revision.GiftID != giftID {
 				continue
 			}
 			out = append(out, collectibleRevisionSummary(revision))
@@ -376,14 +377,27 @@ func (s *StarGiftStore) CollectibleRevisionSummaries(_ context.Context, giftID i
 			}
 			return out[i].RevisionID > out[j].RevisionID
 		})
-		return out, nil
+		if len(out) > 0 {
+			return out, "slug", nil
+		}
+	} else {
+		revision, ok := s.collectibles[giftID]
+		if ok {
+			out = append(out, collectibleRevisionSummary(revision))
+			return out, "gift", nil
+		}
 	}
-	revision, ok := s.collectibles[giftID]
-	if !ok {
-		return out, nil
+	// Fallback: последние ревизии всех подарков (scope "all").
+	for _, revision := range s.collectibles {
+		out = append(out, collectibleRevisionSummary(revision))
 	}
-	out = append(out, collectibleRevisionSummary(revision))
-	return out, nil
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Revision != out[j].Revision {
+			return out[i].Revision > out[j].Revision
+		}
+		return out[i].RevisionID > out[j].RevisionID
+	})
+	return out, "all", nil
 }
 
 func collectibleRevisionSummary(revision domain.StarGiftCollectibleRevision) domain.StarGiftCollectibleRevisionSummary {

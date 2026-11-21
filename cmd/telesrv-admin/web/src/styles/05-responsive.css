@@ -75,4 +75,19 @@
   .selected-entity {
     grid-template-columns: 1fr;
   }
+
+  /* Раунд 36: строки атрибутов коллекций на узких экранах перетекают в
+     несколько рядов сетки (по 3 колонки) вместо наложения элементов. */
+  .collectible-row.animated,
+  .collectible-row.backdrop {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .collectible-row .collectible-file {
+    grid-column: span 2;
+  }
+
+  .collectible-file-error {
+    grid-column: 1 / -1;
+  }
 }

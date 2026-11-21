@@ -235,9 +235,12 @@ func TestStarGiftCollectibleSupplyUpdatePostgres(t *testing.T) {
 	}
 
 	// Список ревизий (раунд 34) — источник для копирования блоками.
-	summaries, err := gifts.CollectibleRevisionSummaries(ctx, giftID, "")
+	summaries, scope, err := gifts.CollectibleRevisionSummaries(ctx, giftID, "")
 	if err != nil {
 		t.Fatalf("revision summaries: %v", err)
+	}
+	if scope != "gift" {
+		t.Fatalf("scope = %q, want gift", scope)
 	}
 	if len(summaries) != 1 {
 		t.Fatalf("revision summaries = %d entries, want 1", len(summaries))
@@ -246,21 +249,26 @@ func TestStarGiftCollectibleSupplyUpdatePostgres(t *testing.T) {
 		summaries[0].ModelCount != 2 || summaries[0].PatternCount != 2 || summaries[0].BackdropCount != 2 {
 		t.Fatalf("summary = %+v", summaries[0])
 	}
-	// Раунд 35: тот же список по slug коллекции — ревизия находится даже у
-	// подарка с другим gift_id (slug-режим), а чужой slug даёт пустой список.
-	bySlug, err := gifts.CollectibleRevisionSummaries(ctx, giftID+1000, slugPrefix)
+	// Раунд 35/36: список по slug коллекции — ревизия находится даже у
+	// подарка с другим gift_id (slug-режим, объединён с gift_id).
+	bySlug, scope, err := gifts.CollectibleRevisionSummaries(ctx, giftID+1000, slugPrefix)
 	if err != nil {
 		t.Fatalf("revision summaries by slug: %v", err)
+	}
+	if scope != "slug" {
+		t.Fatalf("scope by slug = %q, want slug", scope)
 	}
 	if len(bySlug) != 1 || bySlug[0].RevisionID != active.ID || bySlug[0].SlugPrefix != slugPrefix || bySlug[0].GiftID != giftID {
 		t.Fatalf("summaries by slug = %+v", bySlug)
 	}
-	foreign, err := gifts.CollectibleRevisionSummaries(ctx, giftID, "foreign-slug")
+	// Раунд 36: несуществующие slug И gift_id дают fallback — последние
+	// ревизии всех коллекций (scope "all"), выбор не остаётся пустым.
+	fallback, scope, err := gifts.CollectibleRevisionSummaries(ctx, giftID+1000, "foreign-slug-"+suffix)
 	if err != nil {
-		t.Fatalf("revision summaries foreign slug: %v", err)
+		t.Fatalf("revision summaries fallback: %v", err)
 	}
-	if len(foreign) != 0 {
-		t.Fatalf("foreign slug summaries = %d entries, want 0", len(foreign))
+	if scope != "all" || len(fallback) == 0 {
+		t.Fatalf("fallback = scope %q, %d entries, want all/non-empty", scope, len(fallback))
 	}
 }
 
@@ -376,5 +384,64 @@ WHERE c.gift_id=$1`, giftID).Scan(&activeJSON); err != nil {
 	}
 	if blobCount != 1 {
 		t.Fatalf("replacement blob rows = %d, want 1", blobCount)
+	}
+}
+
+// Раунд 36: настройка остатка подарков (gifts_left) и последнего выпущенного
+// номера (last_gift_num) — коррекция рабочего состояния для перезапуска
+// аукциона. Отрицательные значения отклоняются, запись поднимает version.
+func TestStarGiftAuctionRuntimeCountersPostgres(t *testing.T) {
+	pool := testPool(t)
+	ctx := context.Background()
+	suffix := randomSuffix(t)
+	now := int(time.Now().Unix())
+
+	gifts := NewStarGiftStore(pool)
+	baseDocumentID := (time.Now().UnixNano() & 0x7ffffffffffff000) + 370
+	entry, err := gifts.CreateCatalogRevision(ctx, domain.StarGiftCatalogWrite{
+		Title: "Counters " + suffix, Stars: 100, Enabled: true, Limited: true, Auction: true,
+		AvailabilityTotal: 5, AvailabilityRemains: 5, GiftsPerRound: 1, AuctionStartDate: now - 5,
+		AuctionSlug: "counters-" + suffix,
+		Document:    collectibleTestDocument(baseDocumentID, "counters.tgs"),
+		Blob:        collectibleTestBlob(baseDocumentID, "counters"), Animation: collectibleTestAnimation("counters.tgs"),
+		Actor: "integration", CommandID: "counters-catalog-" + suffix,
+	})
+	if err != nil {
+		t.Fatalf("create auction catalog: %v", err)
+	}
+	lifecycle := NewStarGiftLifecycleStore(pool, NewMessageStore(pool), 0)
+	if _, err := lifecycle.StarGiftAuctionState(ctx, entry.Gift.ID, entry.Gift.ID, "", now); err != nil {
+		t.Fatalf("materialize auction row: %v", err)
+	}
+
+	var versionBefore int
+	if err := pool.QueryRow(ctx, `SELECT version FROM star_gift_auctions WHERE gift_id=$1`, entry.Gift.ID).Scan(&versionBefore); err != nil {
+		t.Fatalf("load version: %v", err)
+	}
+
+	giftsLeft, lastGiftNum := 3, 2
+	state, err := lifecycle.SetStarGiftAuctionSettings(ctx, domain.StarGiftAuctionRuntimeWrite{
+		GiftID: entry.Gift.ID, GiftsLeft: &giftsLeft, LastGiftNum: &lastGiftNum,
+	})
+	if err != nil {
+		t.Fatalf("set counters: %v", err)
+	}
+	if state.GiftsLeft != 3 || state.LastGiftNum != 2 {
+		t.Fatalf("counters = %d/%d, want 3/2", state.GiftsLeft, state.LastGiftNum)
+	}
+	var versionAfter int
+	if err := pool.QueryRow(ctx, `SELECT version FROM star_gift_auctions WHERE gift_id=$1`, entry.Gift.ID).Scan(&versionAfter); err != nil {
+		t.Fatalf("reload version: %v", err)
+	}
+	if versionAfter != versionBefore+1 {
+		t.Fatalf("version = %d, want %d", versionAfter, versionBefore+1)
+	}
+
+	// Отрицательный остаток отклоняется чистой ошибкой (shape_check 0095).
+	negative := -1
+	if _, err := lifecycle.SetStarGiftAuctionSettings(ctx, domain.StarGiftAuctionRuntimeWrite{
+		GiftID: entry.Gift.ID, GiftsLeft: &negative,
+	}); !errors.Is(err, domain.ErrStarGiftInvalid) {
+		t.Fatalf("negative gifts left: err=%v, want ErrStarGiftInvalid", err)
 	}
 }

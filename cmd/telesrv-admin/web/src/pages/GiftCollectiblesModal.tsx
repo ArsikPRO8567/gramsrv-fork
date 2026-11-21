@@ -150,6 +150,7 @@ export function GiftCollectiblesModal({ gift, onClose, onPublished }: { gift: St
   // разными подарками — новый подарок ещё не имеет собственных ревизий);
   // ошибки загрузки больше не глотаются молча.
   const [revisions, setRevisions] = useState<StarGiftCollectibleRevisionSummary[]>([]);
+  const [revisionsScope, setRevisionsScope] = useState<"slug" | "gift" | "all">("gift");
   const [revisionsError, setRevisionsError] = useState("");
   const [revisionsBusy, setRevisionsBusy] = useState(false);
   const [copyRevisionID, setCopyRevisionID] = useState("");
@@ -194,8 +195,10 @@ export function GiftCollectiblesModal({ gift, onClose, onPublished }: { gift: St
     setRevisionsBusy(true); setRevisionsError("");
     api.giftCollectibleRevisions(gift.GiftID, slug).then((value) => {
       setRevisions(value.revisions ?? []);
+      setRevisionsScope(value.scope === "all" || value.scope === "slug" ? value.scope : "gift");
     }).catch((err) => {
       setRevisions([]);
+      setRevisionsScope("gift");
       setRevisionsError(errorMessage(err) || t("collectibles.copyLoadFailed"));
     }).finally(() => setRevisionsBusy(false));
   };
@@ -403,14 +406,21 @@ export function GiftCollectiblesModal({ gift, onClose, onPublished }: { gift: St
   // одна коллекция (slug) может публиковаться разными подарками.
   const revisionOptions = revisions.map((revision) => (
     <option key={revision.revision_id} value={revision.revision_id}>
-      r{revision.revision} · #{revision.gift_id} · {t(`collectibles.status.${revision.status === "published" ? "published" : "draft"}`)} · {revision.model_count}/{revision.pattern_count}/{revision.backdrop_count}
+      r{revision.revision} · #{revision.gift_id} · {revision.slug_prefix} · {t(`collectibles.status.${revision.status === "published" ? "published" : "draft"}`)} · {revision.model_count}/{revision.pattern_count}/{revision.backdrop_count}
     </option>
   ));
 
-  // Раунд 35: подсказка/ошибка списка ревизий под выбором источника.
+  // Раунд 35/36: подсказка/ошибка списка ревизий под выбором источника.
+  // Раунд 36: сервер пишет scope выборки — "slug"|"gift"|"all" (fallback
+  // «все ревизии» срабатывает, когда ни slug, ни gift_id не дали результата).
   const revisionListStatus = <>
     {revisionsError && <Alert>{revisionsError}</Alert>}
     {!revisionsError && !revisionsBusy && revisions.length === 0 && <span className="collectible-copy-empty">{t("collectibles.copyEmpty")}</span>}
+    {!revisionsError && !revisionsBusy && revisions.length > 0 && <span className="collectible-copy-empty">
+      {revisionsScope === "all"
+        ? t("collectibles.scopeAll", { count: revisions.length })
+        : t("collectibles.scopeMatch", { count: revisions.length })}
+    </span>}
   </>;
 
   // Раунд 34: инструменты копирования в шапке блока — выбор ревизии + кнопка.

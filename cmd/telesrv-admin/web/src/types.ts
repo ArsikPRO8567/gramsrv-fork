@@ -282,6 +282,8 @@ export type StarGiftRow = {
   AuctionRoundExtendsJSON: string;
   AuctionMinBidAmount: string;
   AuctionStateTotalRounds: number;
+  AuctionStateGiftsLeft: number;
+  AuctionStateLastGiftNum: number;
   AuctionStateStart: number;
   AuctionStateEnd: number;
   AuctionStateStatus: string;
@@ -474,6 +476,9 @@ export type StarGiftCollectibleRevisionSummary = {
 
 export type StarGiftCollectibleRevisionList = {
   gift_id: string;
+  // Раунд 36: источник выборки — "slug" (по slug ИЛИ gift_id), "gift" (по
+  // gift_id) или "all" (fallback: последние ревизии всех коллекций).
+  scope: "slug" | "gift" | "all";
   revisions: StarGiftCollectibleRevisionSummary[];
 };
 

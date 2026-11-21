@@ -1150,6 +1150,11 @@ type StarGiftAuctionRuntimeWrite struct {
 	// значение, выведенное из supply/gifts_per_round при ленивом создании.
 	// nil = не менять.
 	TotalRounds *int
+	// GiftsLeft / LastGiftNum (раунд 36) — «остаток подарков на аукционе» и
+	// «последний выпущенный номер»: корректировка рабочего состояния при
+	// перезапуске аукциона. nil = не менять.
+	GiftsLeft   *int
+	LastGiftNum *int
 	Status      string
 	Actor       string
 	CommandID   string

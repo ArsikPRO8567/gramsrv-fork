@@ -232,12 +232,16 @@ UPDATE star_gift_collectible_revisions SET supply_total=$2 WHERE id=$1`,
 // CollectibleRevisionSummaries (раунд 34) перечисляет ревизии коллекции
 // (новые первыми) в лёгкой проекции — для выбора источника копирования
 // атрибутов в админке без загрузки полных метаданных всех ревизий.
-// Раунд 35: источники ищутся по slug коллекции (slug_prefix) — одна коллекция
-// может публиковаться разными подарками, а список для нового подарка должен
-// показывать ревизии всей коллекции; пустой slug оставляет старое поведение
-// (все ревизии gift_id).
-func (s *StarGiftStore) CollectibleRevisionSummaries(ctx context.Context, giftID int64, slug string) ([]domain.StarGiftCollectibleRevisionSummary, error) {
-	query := `
+// Раунд 35: непустой slug ищет ревизии по slug_prefix коллекции (одна
+// коллекция может публиковаться разными подарками). Раунд 36 (обратная
+// связь «ревизий в выборке просто нет»): запрос объединяет ОБА источника —
+// slug И gift_id (slug мог смениться между публикациями, а у нового подарка
+// своих ревизий ещё нет), и если оба пусты — возвращаются последние ревизии
+// всех коллекций (scope "all"), чтобы выбор источника оставался доступным.
+func (s *StarGiftStore) CollectibleRevisionSummaries(ctx context.Context, giftID int64, slug string) ([]domain.StarGiftCollectibleRevisionSummary, string, error) {
+	const listLimit = 100
+	trimmed := strings.ToLower(strings.TrimSpace(slug))
+	base := `
 SELECT r.id, r.gift_id, r.revision, r.slug_prefix, r.status, r.upgrade_stars, r.supply_total, r.issued,
        (SELECT COUNT(*) FROM star_gift_collectible_models m WHERE m.collectible_revision_id = r.id),
        (SELECT COUNT(*) FROM star_gift_collectible_patterns p WHERE p.collectible_revision_id = r.id),
@@ -245,37 +249,54 @@ SELECT r.id, r.gift_id, r.revision, r.slug_prefix, r.status, r.upgrade_stars, r.
        r.created_by, r.created_at
 FROM star_gift_collectible_revisions r
 `
-	var args []any
-	if trimmed := strings.ToLower(strings.TrimSpace(slug)); trimmed != "" {
-		query += `WHERE r.slug_prefix=$1
-`
-		args = append(args, trimmed)
-	} else {
-		query += `WHERE r.gift_id=$1
-`
-		args = append(args, giftID)
-	}
-	query += `ORDER BY r.revision DESC, r.id DESC`
-	rows, err := s.db.Query(ctx, query, args...)
-	if err != nil {
-		return nil, fmt.Errorf("list collectible revision summaries: %w", err)
-	}
-	defer rows.Close()
-	out := make([]domain.StarGiftCollectibleRevisionSummary, 0, 8)
-	for rows.Next() {
-		var summary domain.StarGiftCollectibleRevisionSummary
-		if err := rows.Scan(&summary.RevisionID, &summary.GiftID, &summary.Revision, &summary.SlugPrefix, &summary.Status,
-			&summary.UpgradeStars, &summary.SupplyTotal, &summary.Issued,
-			&summary.ModelCount, &summary.PatternCount, &summary.BackdropCount,
-			&summary.CreatedBy, &summary.CreatedAt); err != nil {
-			return nil, fmt.Errorf("scan collectible revision summary: %w", err)
+	scan := func(rows pgx.Rows) ([]domain.StarGiftCollectibleRevisionSummary, error) {
+		defer rows.Close()
+		out := make([]domain.StarGiftCollectibleRevisionSummary, 0, 8)
+		for rows.Next() {
+			var summary domain.StarGiftCollectibleRevisionSummary
+			if err := rows.Scan(&summary.RevisionID, &summary.GiftID, &summary.Revision, &summary.SlugPrefix, &summary.Status,
+				&summary.UpgradeStars, &summary.SupplyTotal, &summary.Issued,
+				&summary.ModelCount, &summary.PatternCount, &summary.BackdropCount,
+				&summary.CreatedBy, &summary.CreatedAt); err != nil {
+				return nil, fmt.Errorf("scan collectible revision summary: %w", err)
+			}
+			out = append(out, summary)
 		}
-		out = append(out, summary)
+		if err := rows.Err(); err != nil {
+			return nil, fmt.Errorf("iterate collectible revision summaries: %w", err)
+		}
+		return out, nil
 	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate collectible revision summaries: %w", err)
+	if trimmed != "" {
+		rows, err := s.db.Query(ctx, base+`WHERE r.slug_prefix=$1 OR r.gift_id=$2
+ORDER BY r.revision DESC, r.id DESC LIMIT $3`, trimmed, giftID, listLimit)
+		if err != nil {
+			return nil, "", fmt.Errorf("list collectible revision summaries: %w", err)
+		}
+		out, err := scan(rows)
+		if err != nil || len(out) > 0 {
+			return out, "slug", err
+		}
+	} else {
+		rows, err := s.db.Query(ctx, base+`WHERE r.gift_id=$1
+ORDER BY r.revision DESC, r.id DESC LIMIT $2`, giftID, listLimit)
+		if err != nil {
+			return nil, "", fmt.Errorf("list collectible revision summaries: %w", err)
+		}
+		out, err := scan(rows)
+		if err != nil || len(out) > 0 {
+			return out, "gift", err
+		}
 	}
-	return out, nil
+	// Fallback (раунд 36): ни slug, ни gift_id не дали ревизий — показываем
+	// последние ревизии всех коллекций, чтобы источник копирования всегда
+	// был доступен (админ видит slug/gift в подписи и выбирает нужную).
+	rows, err := s.db.Query(ctx, base+`ORDER BY r.revision DESC, r.id DESC LIMIT $1`, 50)
+	if err != nil {
+		return nil, "", fmt.Errorf("list all collectible revision summaries: %w", err)
+	}
+	out, err := scan(rows)
+	return out, "all", err
 }
 
 func (s *StarGiftStore) ActiveCollectibleProjection(ctx context.Context, giftID int64, samplePerKind int) (domain.StarGiftCollectibleRevision, bool, error) {

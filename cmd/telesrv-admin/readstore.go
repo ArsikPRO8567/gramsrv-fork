@@ -482,6 +482,8 @@ type StarGiftRow struct {
 	// Раунд 35: количество раундов аукциона (total_rounds) — предзаполняет
 	// одноимённую настройку в редакторе; 0 = рабочей строки ещё нет.
 	AuctionStateTotalRounds int
+	AuctionStateGiftsLeft   int
+	AuctionStateLastGiftNum int
 	AuctionStateStart       int
 	AuctionStateEnd         int
 	AuctionStateStatus      string
@@ -509,7 +511,8 @@ SELECT c.gift_id, r.id, r.revision, r.title, r.stars, r.convert_stars,
        a.gift_id IS NOT NULL, COALESCE(a.round_duration, 0),
        COALESCE(a.round_durations::text, ''), COALESCE(a.raise_min_bid, false),
        COALESCE(a.round_extends::text, ''), COALESCE(a.min_bid_amount, 0),
-       COALESCE(a.total_rounds, 0), COALESCE(a.start_date, 0), COALESCE(a.end_date, 0), COALESCE(a.status, '')
+       COALESCE(a.total_rounds, 0), COALESCE(a.gifts_left, 0), COALESCE(a.last_gift_num, 0),
+       COALESCE(a.start_date, 0), COALESCE(a.end_date, 0), COALESCE(a.status, '')
 FROM star_gift_catalog c
 JOIN star_gift_catalog_revisions r ON r.id = c.active_revision_id
 JOIN documents d ON d.id = r.document_id
@@ -542,7 +545,8 @@ LIMIT $1`, domain.MaxStarGiftCatalogSize)
 			&row.AuctionRowExists, &row.AuctionRoundDuration,
 			&row.AuctionRoundDurationsJSON, &row.AuctionRaiseMinBid,
 			&row.AuctionRoundExtendsJSON, &row.AuctionMinBidAmount,
-			&row.AuctionStateTotalRounds, &row.AuctionStateStart, &row.AuctionStateEnd, &row.AuctionStateStatus,
+			&row.AuctionStateTotalRounds, &row.AuctionStateGiftsLeft, &row.AuctionStateLastGiftNum,
+			&row.AuctionStateStart, &row.AuctionStateEnd, &row.AuctionStateStatus,
 		); err != nil {
 			return nil, err
 		}

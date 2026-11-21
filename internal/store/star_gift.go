@@ -34,11 +34,11 @@ type StarGiftStore interface {
 	// подарков опубликованной ревизии коллекции: supply_total можно повысить
 	// (supply каталога увеличен), но не ниже уже выпущенного количества.
 	SetCollectibleSupplyTotal(ctx context.Context, write domain.StarGiftCollectibleSupplyWrite) (domain.StarGiftCollectibleRevision, error)
-	// CollectibleRevisionSummaries (раунд 34) перечисляет ревизии коллекции
-	// для выбора источника копирования атрибутов в админке. Раунд 35:
-	// непустой slug ищет ревизии по slug_prefix коллекции (новый подарок ещё
-	// не имеет своих ревизий), пустой — все ревизии gift_id.
-	CollectibleRevisionSummaries(ctx context.Context, giftID int64, slug string) ([]domain.StarGiftCollectibleRevisionSummary, error)
+	// CollectibleRevisionSummaries (раунд 34/36) перечисляет ревизии коллекции
+	// для выбора источника копирования атрибутов в админке: непустой slug —
+	// ревизии по slug_prefix И gift_id; если обе выборки пусты — последние
+	// ревизии всех коллекций. Scope: "slug"|"gift"|"all".
+	CollectibleRevisionSummaries(ctx context.Context, giftID int64, slug string) ([]domain.StarGiftCollectibleRevisionSummary, string, error)
 	// ActiveCollectibleProjection omits heavyweight animation bodies from read-only client/admin
 	// projections. samplePerKind=0 returns the complete attribute metadata; a positive value
 	// returns at most that many randomly selected ordinary-upgrade attributes per kind.

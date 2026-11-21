@@ -676,8 +676,14 @@
 .collectible-rows { display: grid; gap: 7px; }
 .collectible-row { position: relative; display: grid; align-items: end; gap: 7px; padding: 9px 9px 9px 36px; background: var(--panel-subtle); border: 1px solid var(--line); border-radius: var(--radius-sm); }
 .collectible-row:hover { background: var(--panel); border-color: var(--line-strong); box-shadow: var(--shadow-sm); }
-.collectible-row.animated { grid-template-columns: minmax(120px, 1.2fr) 90px 78px minmax(160px, 1.4fr) 48px 30px; }
-.collectible-row.backdrop { grid-template-columns: minmax(110px, 1.2fr) 70px 80px 70px repeat(4, 52px) 48px 30px; }
+/* Раунд 36: в строке animated СЕМЬ полей (раунд 33 добавил выбор типа
+   редкости) — прежние 6 колонок выталкивали кнопку удаления на неявный
+   второй ряд и элементы наслаивались друг на друга. */
+.collectible-row.animated { grid-template-columns: minmax(104px, 1.1fr) 92px 78px 68px minmax(132px, 1.25fr) 42px 28px; }
+/* Раунд 36: уплотнённые фиксированные колонки — строка фонов помещается в
+   ширину модального окна без наложения (было ~880px минимум при ~700px
+   доступных). */
+.collectible-row.backdrop { grid-template-columns: minmax(96px, 1fr) 58px 66px 58px repeat(4, 42px) 40px 28px; }
 .collectible-row-index { position: absolute; top: 0; bottom: 0; left: 0; display: grid; width: 27px; place-items: center; color: var(--purple-text); background: var(--purple-tint); border-right: 1px solid var(--purple-border); border-radius: var(--radius-xs) 0 0 var(--radius-xs); font-size: 10px; font-weight: 800; }
 .collectible-row label { display: grid; min-width: 0; gap: 4px; }
 .collectible-row label > span { color: var(--muted); font-size: 9px; font-weight: 800; text-transform: uppercase; letter-spacing: .025em; }

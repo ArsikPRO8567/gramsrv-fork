@@ -141,7 +141,11 @@ export function GiftsPage() {
   // редактирования существующего подарка; пустые поля = «не менять».
   const [auctionRoundDuration, setAuctionRoundDuration] = useState("");
   // Раунд 35: количество раундов аукциона (total_rounds) — пустое = не менять.
+  // Раунд 36: остаток подарков (gifts_left) и последний выпущенный номер
+  // (last_gift_num) — коррекция состояния при перезапуске аукциона.
   const [auctionTotalRounds, setAuctionTotalRounds] = useState("");
+  const [auctionGiftsLeft, setAuctionGiftsLeft] = useState("");
+  const [auctionLastGiftNum, setAuctionLastGiftNum] = useState("");
   const [auctionRoundDurations, setAuctionRoundDurations] = useState("");
   const [auctionRaiseMinBid, setAuctionRaiseMinBid] = useState(false);
   const [auctionRoundExtends, setAuctionRoundExtends] = useState("");
@@ -285,7 +289,8 @@ export function GiftsPage() {
     setWhitelistNumbered(false); setWhitelistDisallowUpgrades(false);
     setWhitelistDisallowResell(false); setWhitelistApply(true);
     setAuctionEnabled(false); setAuctionSlug(""); setAuctionGiftsPerRound("0"); setAuctionStartDate("");
-    setAuctionRoundDuration(""); setAuctionTotalRounds(""); setAuctionRoundDurations(""); setAuctionRaiseMinBid(false);
+    setAuctionRoundDuration(""); setAuctionTotalRounds(""); setAuctionGiftsLeft(""); setAuctionLastGiftNum("");
+    setAuctionRoundDurations(""); setAuctionRaiseMinBid(false);
     setAuctionRoundExtends(""); setAuctionMinBidAmount(""); setAuctionEndDate(""); setAuctionStatus("");
   }
 
@@ -393,10 +398,12 @@ export function GiftsPage() {
   // созданному подарку сразу после импорта.
   function auctionRuntimeDirty() {
     if (!editGift) {
-      return Boolean(auctionRoundDuration.trim() || auctionTotalRounds.trim() || auctionRoundDurations.trim() || auctionRoundExtends.trim() ||
+      return Boolean(auctionRoundDuration.trim() || auctionTotalRounds.trim() || auctionGiftsLeft.trim() || auctionLastGiftNum.trim() ||
+        auctionRoundDurations.trim() || auctionRoundExtends.trim() ||
         auctionMinBidAmount.trim() || auctionEndDate.trim() || auctionStatus.trim() || auctionRaiseMinBid);
     }
-    return Boolean(auctionRoundDuration.trim() || auctionTotalRounds.trim() || auctionRoundDurations.trim() || auctionRoundExtends.trim() ||
+    return Boolean(auctionRoundDuration.trim() || auctionTotalRounds.trim() || auctionGiftsLeft.trim() || auctionLastGiftNum.trim() ||
+      auctionRoundDurations.trim() || auctionRoundExtends.trim() ||
       auctionMinBidAmount.trim() || auctionEndDate.trim() || auctionStatus.trim() ||
       auctionRaiseMinBid !== editGift.AuctionRaiseMinBid);
   }
@@ -411,6 +418,8 @@ export function GiftsPage() {
     };
     if (auctionRoundDuration.trim()) payload.round_duration = Math.max(1, Math.floor(Number(auctionRoundDuration) || 1));
     if (auctionTotalRounds.trim()) payload.total_rounds = Math.max(1, Math.floor(Number(auctionTotalRounds) || 1));
+    if (auctionGiftsLeft.trim()) payload.gifts_left = Math.max(0, Math.floor(Number(auctionGiftsLeft) || 0));
+    if (auctionLastGiftNum.trim()) payload.last_gift_num = Math.max(0, Math.floor(Number(auctionLastGiftNum) || 0));
     if (auctionRoundDurations.trim()) payload.round_durations = auctionRoundDurations.trim();
     if (auctionRoundExtends.trim()) payload.round_extends = auctionRoundExtends.trim();
     if (auctionMinBidAmount.trim()) payload.min_bid_amount = String(BigInt(auctionMinBidAmount.trim()));
@@ -517,6 +526,8 @@ export function GiftsPage() {
     setAuctionStartDate(localInputValue(gift.AuctionStartDate, true));
     setAuctionRoundDuration(gift.AuctionRoundDuration > 0 ? String(gift.AuctionRoundDuration) : "");
     setAuctionTotalRounds(gift.AuctionStateTotalRounds > 0 ? String(gift.AuctionStateTotalRounds) : "");
+    setAuctionGiftsLeft(gift.AuctionRowExists ? String(gift.AuctionStateGiftsLeft) : "");
+    setAuctionLastGiftNum(gift.AuctionRowExists ? String(gift.AuctionStateLastGiftNum) : "");
     setAuctionRoundDurations(gift.AuctionRoundDurationsJSON || "");
     setAuctionRaiseMinBid(gift.AuctionRaiseMinBid);
     setAuctionRoundExtends(gift.AuctionRoundExtendsJSON || "");
@@ -740,6 +751,8 @@ export function GiftsPage() {
                   <div className="gift-fields-grid gift-fields-grid-wide">
                     <label><span>{t("gifts.auctionRoundDuration")}</span><input type="number" min="1" placeholder={t("gifts.keepUnchanged")} value={auctionRoundDuration} onChange={(e) => { setAuctionRoundDuration(e.target.value); setPreview(null); }} /></label>
                     <label><span>{t("gifts.auctionTotalRounds")}</span><input type="number" min="1" placeholder={t("gifts.keepUnchanged")} value={auctionTotalRounds} onChange={(e) => { setAuctionTotalRounds(e.target.value); setPreview(null); }} /></label>
+                    <label><span>{t("gifts.auctionGiftsLeft")}</span><input type="number" min="0" placeholder={t("gifts.keepUnchanged")} value={auctionGiftsLeft} onChange={(e) => { setAuctionGiftsLeft(e.target.value); setPreview(null); }} /></label>
+                    <label><span>{t("gifts.auctionLastGiftNum")}</span><input type="number" min="0" placeholder={t("gifts.keepUnchanged")} value={auctionLastGiftNum} onChange={(e) => { setAuctionLastGiftNum(e.target.value); setPreview(null); }} /></label>
                     <label><span>{t("gifts.auctionMinBid")}</span><input type="number" min="1" placeholder={t("gifts.keepUnchanged")} value={auctionMinBidAmount} onChange={(e) => { setAuctionMinBidAmount(e.target.value); setPreview(null); }} /></label>
                     <label><span>{t("gifts.auctionEndDate")}</span><input type="datetime-local" value={auctionEndDate} onChange={(e) => { setAuctionEndDate(e.target.value); setPreview(null); }} /></label>
                     <label><span>{t("gifts.auctionStatus")}</span>
