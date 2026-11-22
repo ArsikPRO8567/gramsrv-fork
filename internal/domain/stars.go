@@ -1,12 +1,12 @@
 package domain
 
 import (
-	"crypto/rand"
-	"encoding/base64"
-	"errors"
-	"fmt"
-	"math/big"
-	"strconv"
+        "crypto/rand"
+        "encoding/base64"
+        "errors"
+        "fmt"
+        "math/big"
+        "strconv"
 )
 
 // Stars 本地账本领域模型（无 TL 类型，镜像 boost.go 风格）。本实现是本地账本、
@@ -14,9 +14,9 @@ import (
 
 // StarsBalance 是一个账号的当前可用 Stars 余额。
 type StarsBalance struct {
-	UserID  int64
-	Balance int64 // 当前可花费 Stars，恒 >= 0
-	Granted bool  // 起始授予是否已应用（惰性首读授予的幂等守卫）
+        UserID  int64
+        Balance int64 // 当前可花费 Stars，恒 >= 0
+        Granted bool  // 起始授予是否已应用（惰性首读授予的幂等守卫）
 }
 
 // StarsPurchaseKind identifies the balance owner affected by a fiat Stars
@@ -25,133 +25,132 @@ type StarsBalance struct {
 type StarsPurchaseKind string
 
 const (
-	StarsPurchaseTopup    StarsPurchaseKind = "topup"
-	StarsPurchaseGift     StarsPurchaseKind = "gift"
-	StarsPurchaseGiveaway StarsPurchaseKind = "giveaway"
+        StarsPurchaseTopup    StarsPurchaseKind = "topup"
+        StarsPurchaseGift     StarsPurchaseKind = "gift"
+        StarsPurchaseGiveaway StarsPurchaseKind = "giveaway"
 )
 
 func (k StarsPurchaseKind) Valid() bool {
-	return k == StarsPurchaseTopup || k == StarsPurchaseGift || k == StarsPurchaseGiveaway
+        return k == StarsPurchaseTopup || k == StarsPurchaseGift || k == StarsPurchaseGiveaway
 }
 
 // StarsGiveawayPurchase is the complete immutable purpose behind one direct
 // fiat Stars giveaway checkout. The launch purchase persists this shape; the
 // eventual winner draw is a separate lifecycle transition.
 type StarsGiveawayPurchase struct {
-	BoostPeer          Peer     `json:"boost_peer"`
-	AdditionalPeers    []Peer   `json:"additional_peers,omitempty"`
-	CountriesISO2      []string `json:"countries_iso2,omitempty"`
-	PrizeDescription   string   `json:"prize_description,omitempty"`
-	RandomID           int64    `json:"random_id"`
-	UntilDate          int      `json:"until_date"`
-	Users              int      `json:"users"`
-	PerUserStars       int64    `json:"per_user_stars"`
-	YearlyBoosts       int      `json:"yearly_boosts"`
-	OnlyNewSubscribers bool     `json:"only_new_subscribers,omitempty"`
-	WinnersAreVisible  bool     `json:"winners_are_visible,omitempty"`
+        BoostPeer          Peer     `json:"boost_peer"`
+        AdditionalPeers    []Peer   `json:"additional_peers,omitempty"`
+        CountriesISO2      []string `json:"countries_iso2,omitempty"`
+        PrizeDescription   string   `json:"prize_description,omitempty"`
+        RandomID           int64    `json:"random_id"`
+        UntilDate          int      `json:"until_date"`
+        Users              int      `json:"users"`
+        PerUserStars       int64    `json:"per_user_stars"`
+        YearlyBoosts       int      `json:"yearly_boosts"`
+        OnlyNewSubscribers bool     `json:"only_new_subscribers,omitempty"`
+        WinnersAreVisible  bool     `json:"winners_are_visible,omitempty"`
 }
 
 // StarsPurchaseForm binds one short-lived fiat Stars checkout to its
 // authenticated buyer, purpose and exact server-advertised package. Recipient
 // is zero for a self top-up and mandatory for a friend gift.
 type StarsPurchaseForm struct {
-	FormID           int64
-	Kind             StarsPurchaseKind
-	BuyerUserID      int64
-	RecipientUserID  int64
-	SpendPurposePeer Peer
-	Giveaway         *StarsGiveawayPurchase
-	Stars            int64
-	Currency         string
-	Amount           int64
-	IssuedAt         int
-	ExpiresAt        int
-	// Acquisition (раунд 31) — канал приобретения пополнения, выбирается по
-	// платформе сессии покупателя и персистится в purpose_json формы: settlement
-	// записывает транзакцию начисления с reason выбранного канала.
-	Acquisition StarsTopupAcquisition
+        FormID           int64
+        Kind             StarsPurchaseKind
+        BuyerUserID      int64
+        RecipientUserID  int64
+        SpendPurposePeer Peer
+        Giveaway         *StarsGiveawayPurchase
+        Stars            int64
+        Currency         string
+        Amount           int64
+        IssuedAt         int
+        ExpiresAt        int
 }
 
 // StarsPurchaseRequest is the immutable settlement command carried by
 // inputInvoiceStars. Android and TDesktop sendPaymentForm both resolve to this
 // command after the ordinary fiat checkout has produced provider credentials.
 type StarsPurchaseRequest struct {
-	StarsPurchaseForm
-	Date            int
-	OriginAuthKeyID [8]byte
-	OriginSessionID int64
+        StarsPurchaseForm
+        Date            int
+        OriginAuthKeyID [8]byte
+        OriginSessionID int64
 }
 
 // StarsPurchaseResult is the atomically committed credit and, for a friend
 // gift, bilateral service-message receipt. Duplicate means an exact form replay.
 type StarsPurchaseResult struct {
-	Balance       StarsBalance
-	Send          SendPrivateTextResult
-	ChannelSend   SendChannelMessageResult
-	TransactionID string
-	Duplicate     bool
+        Balance       StarsBalance
+        Send          SendPrivateTextResult
+        ChannelSend   SendChannelMessageResult
+        TransactionID string
+        Duplicate     bool
 }
 
 // StarsGiveawayInfo is the viewer-specific state of one durable launch card.
 // Winner selection/results are intentionally outside the purchase aggregate.
 type StarsGiveawayInfo struct {
-	StartDate             int
-	Participating         bool
-	PreparingResults      bool
-	JoinedTooEarlyDate    int
-	AdminDisallowedChatID int64
-	DisallowedCountry     string
+        StartDate             int
+        Participating         bool
+        PreparingResults      bool
+        JoinedTooEarlyDate    int
+        AdminDisallowedChatID int64
+        DisallowedCountry     string
 }
 
 // StarsTransactionReason 标记一条流水的语义（投影到 tg.StarsTransaction 的标志位/标题）。
 type StarsTransactionReason string
 
 const (
-	StarsReasonGrant    StarsTransactionReason = "grant"    // 起始余额自动授予
-	StarsReasonTopup    StarsTransactionReason = "topup"    // 充值（本地铸造）
-	StarsReasonReaction StarsTransactionReason = "reaction" // 付费 reaction 花费
-	StarsReasonGift     StarsTransactionReason = "gift"     // 星礼花费/收取
-	// StarsReasonGiftConvert 是礼物转星（兑换回 Stars）的专用原因：官方客户端
-	// 对「出售礼物」不画 gift 标志的「来自用户的礼物」签名，只按 stargift
-	// 渲染礼物本体。
-	StarsReasonGiftConvert   StarsTransactionReason = "gift_convert" // 礼物转星（出售）
-	StarsReasonGiftUpgrade   StarsTransactionReason = "gift_upgrade" // 普通礼物升级为唯一礼物
-	StarsReasonGiftTransfer  StarsTransactionReason = "gift_transfer"
-	StarsReasonGiftResale    StarsTransactionReason = "gift_resale"
-	StarsReasonGiftOffer     StarsTransactionReason = "gift_offer"
-	StarsReasonGiftAuction   StarsTransactionReason = "gift_auction"
-	StarsReasonGiftPrepaid   StarsTransactionReason = "gift_prepaid_upgrade"
-	StarsReasonGiftDrop      StarsTransactionReason = "gift_drop_original_details"
-	StarsReasonPaidMedia     StarsTransactionReason = "paid_media"   // 付费媒体解锁
-	StarsReasonPaidMessage   StarsTransactionReason = "paid_message" // 频道 Direct Message 花费
-	StarsReasonSuggestedPost StarsTransactionReason = "suggested_post"
-	StarsReasonPremium       StarsTransactionReason = "premium"
-	StarsReasonAdjust        StarsTransactionReason = "adjust" // 兜底/人工调整
-	// Раунд 31: каналы приобретения пополнения — официальный клиент
-	// локализует начисление по типу peer в starsTransaction (Fragment /
-	// App Store / Google Play / PremiumBot).
-	StarsReasonTopupAppStore   StarsTransactionReason = "topup_appstore"
-	StarsReasonTopupPlayMarket StarsTransactionReason = "topup_playmarket"
-	StarsReasonTopupBot        StarsTransactionReason = "topup_bot"
+        StarsReasonGrant    StarsTransactionReason = "grant"    // 起始余额自动授予
+        StarsReasonTopup    StarsTransactionReason = "topup"    // 充值（本地铸造）
+        StarsReasonReaction StarsTransactionReason = "reaction" // 付费 reaction 花费
+        StarsReasonGift     StarsTransactionReason = "gift"     // 星礼花费/收取
+        // StarsReasonGiftConvert 是礼物转星（兑换回 Stars）的专用原因：官方客户端
+        // 对「出售礼物」不画 gift 标志的「来自用户的礼物」签名，只按 stargift
+        // 渲染礼物本体。
+        StarsReasonGiftConvert   StarsTransactionReason = "gift_convert" // 礼物转星（出售）
+        StarsReasonGiftUpgrade   StarsTransactionReason = "gift_upgrade" // 普通礼物升级为唯一礼物
+        StarsReasonGiftTransfer  StarsTransactionReason = "gift_transfer"
+        StarsReasonGiftResale    StarsTransactionReason = "gift_resale"
+        StarsReasonGiftOffer     StarsTransactionReason = "gift_offer"
+        StarsReasonGiftAuction   StarsTransactionReason = "gift_auction"
+        StarsReasonGiftPrepaid   StarsTransactionReason = "gift_prepaid_upgrade"
+        StarsReasonGiftDrop      StarsTransactionReason = "gift_drop_original_details"
+        StarsReasonPaidMedia     StarsTransactionReason = "paid_media"   // 付费媒体解锁
+        StarsReasonPaidMessage   StarsTransactionReason = "paid_message" // 频道 Direct Message 花费
+        StarsReasonSuggestedPost StarsTransactionReason = "suggested_post"
+        StarsReasonPremium       StarsTransactionReason = "premium"
+        StarsReasonAdjust        StarsTransactionReason = "adjust" // 兜底/人工调整
 )
 
 // StarsTransaction 是一条账本流水。amount 带符号：贷记 > 0（含收取），借记 < 0。
 type StarsTransaction struct {
-	ID              int64  // 单调递增账本 id（keyset 游标）
-	TransactionID   string // 公开交易 ID（stars_…/ton_…；旧行为账本 id 十进制串）
-	UserID          int64  // 账本归属
-	Peer            Peer   // 对手方（grant/topup 等无对手时为零 Peer）
-	Amount          int64  // 带符号金额
-	Date            int    // Unix 秒
-	Reason          StarsTransactionReason
-	Title           string // 可选，投影到 tg.StarsTransaction.Title
-	Description     string // 可选，投影到 tg.StarsTransaction.Description
-	PaymentID       int64
-	RecipientUserID int64
-	PremiumMonths   int
-	Refunded        bool  // starsTransaction.refund：资金已退回（与方向无关）
-	GiftID          int64 // 关联礼物（目录礼物 id 或唯一礼物 id）
-	GiftIsUnique    bool  // GiftID 是否为 unique_star_gifts.id
+        ID              int64  // 单调递增账本 id（keyset 游标）
+        TransactionID   string // 公开交易 ID（stars_…/ton_…；旧行为账本 id 十进制串）
+        UserID          int64  // 账本归属
+        Peer            Peer   // 对手方（grant/topup 等无对手时为零 Peer）
+        Amount          int64  // 带符号金额
+        Date            int    // Unix 秒
+        Reason          StarsTransactionReason
+        Title           string // 可选，投影到 tg.StarsTransaction.Title
+        Description     string // 可选，投影到 tg.StarsTransaction.Description
+        PaymentID       int64
+        RecipientUserID int64
+        PremiumMonths   int
+        Refunded        bool  // starsTransaction.refund：资金已退回（与方向无关）
+        GiftID          int64 // 关联礼物（目录礼物 id 或唯一礼物 id）
+        GiftIsUnique    bool  // GiftID 是否为 unique_star_gifts.id
+}
+
+// PaidMessagesRefund — результат account.toggleNoPaidMessagesException
+// (refund_charged=true): непогашенные проводки платных сообщений помечаются
+// refunded, балансы обеих сторон корректируются в одной транзакции.
+type PaidMessagesRefund struct {
+        Refunded    int64 // возвращено плательщику (брутто — столько он заплатил)
+        ClawedBack  int64 // списано с получателя (фактически удержано; клампится к остатку)
+        Charges     int   // число погашенных платежей
 }
 
 // IsCredit 报告该流水是否为入账（贷记）。
@@ -160,91 +159,40 @@ func (t StarsTransaction) IsCredit() bool { return t.Amount > 0 }
 // PublicID 返回客户端可见的交易 ID：优先生成的公开 ID，旧行/内存行回退为
 // 账本 id 十进制串（历史服务端行为，保持客户端兼容）。
 func (t StarsTransaction) PublicID() string {
-	if t.TransactionID != "" {
-		return t.TransactionID
-	}
-	return strconv.FormatInt(t.ID, 10)
+        if t.TransactionID != "" {
+                return t.TransactionID
+        }
+        return strconv.FormatInt(t.ID, 10)
 }
 
 // StarsLedgerFlags 携带写入流水时的可选官方投影属性（礼物载荷与退款标志）。
 // 独立于 amount 符号：退款既可能是入账（撤销发放）也可能是出账（撤销扣款）。
 type StarsLedgerFlags struct {
-	GiftID       int64 // 关联礼物；0 = 无礼物载荷
-	GiftIsUnique bool  // GiftID 指向 unique_star_gifts.id（否则为目录礼物）
-	Refunded     bool  // starsTransaction.refund
-	// TransactionID — явно заданный публичный идентификатор транзакции
-	// (проблема C): парный перевод «аккаунт -> аккаунт» пишет дебет и кредит
-	// с ОДНИМ id, чтобы клиент показывал обе стороны как одну операцию.
-	// Пусто — идентификатор генерируется при записи.
-	TransactionID string
-}
-
-// StarsPeerTransferRequest описывает атомарный парный перевод Stars между
-// аккаунтами (платные сообщения, компенсации): списание у отправителя и
-// зачисление получателю в одной транзакции, обе строки с одним публичным
-// transaction_id.
-type StarsPeerTransferRequest struct {
-	SenderUserID    int64
-	RecipientUserID int64
-	Amount          int64 // > 0; знак строк леджера проставляет store
-	Reason          StarsTransactionReason
-	Date            int // Unix секунды
-}
-
-// StarsPeerTransferResult возвращает публичный transaction_id, общий для
-// обеих строк леджера перевода (или его компенсации).
-type StarsPeerTransferResult struct {
-	TransactionID string
-}
-
-// StarsTopupAcquisition — канал приобретения звёзд (раунд 31): официальный
-// клиент рисует counterparts StarsTransactionPeerFragment (Fragment),
-// StarsTransactionPeerAppStore / PlayMarket (магазин приложения) и
-// StarsTransactionPeerPremiumBot («бот для покупки звёзд») по типу peer.
-type StarsTopupAcquisition string
-
-const (
-	StarsTopupFragment   StarsTopupAcquisition = "fragment"
-	StarsTopupAppStore   StarsTopupAcquisition = "appstore"
-	StarsTopupPlayMarket StarsTopupAcquisition = "playmarket"
-	StarsTopupBot        StarsTopupAcquisition = "bot"
-)
-
-// StarsTopupReason — reason транзакции начисления для канала приобретения;
-// неизвестные значения откатываются к Fragment-начислению (topup).
-func (a StarsTopupAcquisition) StarsTopupReason() StarsTransactionReason {
-	switch a {
-	case StarsTopupAppStore:
-		return StarsReasonTopupAppStore
-	case StarsTopupPlayMarket:
-		return StarsReasonTopupPlayMarket
-	case StarsTopupBot:
-		return StarsReasonTopupBot
-	default:
-		return StarsReasonTopup
-	}
+        GiftID       int64 // 关联礼物；0 = 无礼物载荷
+        GiftIsUnique bool  // GiftID 指向 unique_star_gifts.id（否则为目录礼物）
+        Refunded     bool  // starsTransaction.refund
 }
 
 // NewStarsTransactionID 生成官方形状的公开交易 ID：前缀 + 60 位 [A-Za-z0-9]
 // 随机串（如 stars_ab12…/ton_ab12…）。加密随机源保证不可预测；唯一性由
 // transaction_id 上的部分唯一索引兜底，62^60 空间下冲突实际不可能。
 func NewStarsTransactionID(ton bool) string {
-	prefix := "stars_"
-	if ton {
-		prefix = "ton_"
-	}
-	const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
-	out := make([]byte, 60)
-	for i := range out {
-		n, err := rand.Int(rand.Reader, big.NewInt(int64(len(alphabet))))
-		if err != nil {
-			// crypto/rand 失败属于系统级故障；退化为主进程熵源的确定性
-			// 兜底没有意义，直接让写路径失败更安全。
-			panic(fmt.Sprintf("generate stars transaction id: %v", err))
-		}
-		out[i] = alphabet[n.Int64()]
-	}
-	return prefix + string(out)
+        prefix := "stars_"
+        if ton {
+                prefix = "ton_"
+        }
+        const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
+        out := make([]byte, 60)
+        for i := range out {
+                n, err := rand.Int(rand.Reader, big.NewInt(int64(len(alphabet))))
+                if err != nil {
+                        // crypto/rand 失败属于系统级故障；退化为主进程熵源的确定性
+                        // 兜底没有意义，直接让写路径失败更安全。
+                        panic(fmt.Sprintf("generate stars transaction id: %v", err))
+                }
+                out[i] = alphabet[n.Int64()]
+        }
+        return prefix + string(out)
 }
 
 // StarsTransactionDirection scopes one payments.getStarsTransactions view.
@@ -252,148 +200,148 @@ func NewStarsTransactionID(ton bool) string {
 type StarsTransactionDirection uint8
 
 const (
-	StarsTransactionDirectionAll StarsTransactionDirection = iota
-	StarsTransactionDirectionIncoming
-	StarsTransactionDirectionOutgoing
+        StarsTransactionDirectionAll StarsTransactionDirection = iota
+        StarsTransactionDirectionIncoming
+        StarsTransactionDirectionOutgoing
 )
 
 func (d StarsTransactionDirection) Valid() bool {
-	return d <= StarsTransactionDirectionOutgoing
+        return d <= StarsTransactionDirectionOutgoing
 }
 
 func (d StarsTransactionDirection) IncludesAmount(amount int64) bool {
-	switch d {
-	case StarsTransactionDirectionAll:
-		return true
-	case StarsTransactionDirectionIncoming:
-		return amount > 0
-	case StarsTransactionDirectionOutgoing:
-		return amount < 0
-	default:
-		return false
-	}
+        switch d {
+        case StarsTransactionDirectionAll:
+                return true
+        case StarsTransactionDirectionIncoming:
+                return amount > 0
+        case StarsTransactionDirectionOutgoing:
+                return amount < 0
+        default:
+                return false
+        }
 }
 
 // StarsTransactionQuery keeps direction, ordering and the opaque keyset cursor
 // together so filtering is applied before LIMIT in every ledger backend.
 type StarsTransactionQuery struct {
-	Offset    string
-	Limit     int
-	Direction StarsTransactionDirection
-	Ascending bool
+        Offset    string
+        Limit     int
+        Direction StarsTransactionDirection
+        Ascending bool
 }
 
 // NormalizeStarsTransactionQuery preserves the existing bounded limit/offset
 // behavior while rejecting impossible internal direction values.
 func NormalizeStarsTransactionQuery(query StarsTransactionQuery) (StarsTransactionQuery, error) {
-	if !query.Direction.Valid() {
-		return StarsTransactionQuery{}, ErrStarsTransactionQueryInvalid
-	}
-	if len(query.Offset) > MaxStarsTransactionsOffsetBytes {
-		query.Offset = ""
-	}
-	if query.Limit <= 0 || query.Limit > MaxStarsTransactionsLimit {
-		query.Limit = MaxStarsTransactionsLimit
-	}
-	return query, nil
+        if !query.Direction.Valid() {
+                return StarsTransactionQuery{}, ErrStarsTransactionQueryInvalid
+        }
+        if len(query.Offset) > MaxStarsTransactionsOffsetBytes {
+                query.Offset = ""
+        }
+        if query.Limit <= 0 || query.Limit > MaxStarsTransactionsLimit {
+                query.Limit = MaxStarsTransactionsLimit
+        }
+        return query, nil
 }
 
 // StarsTransactionPage 是一页账本流水 + 当前余额 + 分页游标 + 对手方用户富化集合。
 type StarsTransactionPage struct {
-	Balance      int64
-	Transactions []StarsTransaction
-	NextOffset   string // 空表示无更多页（DrKLO 据此停止翻页，勿在末页给非空值）
-	Users        []User // History 中提到的对手方用户，供 tg Users 富化
+        Balance      int64
+        Transactions []StarsTransaction
+        NextOffset   string // 空表示无更多页（DrKLO 据此停止翻页，勿在末页给非空值）
+        Users        []User // History 中提到的对手方用户，供 tg Users 富化
 }
 
 // TonTransaction is an entry in telesrv's internal nanoton ledger. It models
 // the Telegram TON-denominated gift UI without contacting a wallet, Fragment,
 // a TON node, or any blockchain service.
 type TonTransaction struct {
-	ID            int64
-	TransactionID string // 公开交易 ID（ton_…；旧行为账本 id 十进制串）
-	UserID        int64
-	Peer          Peer
-	GiftID        int64
-	GiftIsUnique  bool
-	Amount        int64 // signed nanoton amount
-	Date          int
-	Reason        StarsTransactionReason
-	Title         string
-	Description   string
-	Refunded      bool // starsTransaction.refund：资金已退回
+        ID            int64
+        TransactionID string // 公开交易 ID（ton_…；旧行为账本 id 十进制串）
+        UserID        int64
+        Peer          Peer
+        GiftID        int64
+        GiftIsUnique  bool
+        Amount        int64 // signed nanoton amount
+        Date          int
+        Reason        StarsTransactionReason
+        Title         string
+        Description   string
+        Refunded      bool // starsTransaction.refund：资金已退回
 }
 
 // PublicID 返回客户端可见的交易 ID（与 StarsTransaction.PublicID 同规则）。
 func (t TonTransaction) PublicID() string {
-	if t.TransactionID != "" {
-		return t.TransactionID
-	}
-	return strconv.FormatInt(t.ID, 10)
+        if t.TransactionID != "" {
+                return t.TransactionID
+        }
+        return strconv.FormatInt(t.ID, 10)
 }
 
 type TonTransactionPage struct {
-	Balance      int64
-	Transactions []TonTransaction
-	NextOffset   string
-	Users        []User
+        Balance      int64
+        Transactions []TonTransaction
+        NextOffset   string
+        Users        []User
 }
 
 // Stars 账本边界常量。
 const (
-	// DefaultStarsStartingGrant 是惰性首读授予的起始 Stars 余额（本地测试用）。
-	DefaultStarsStartingGrant = 1000
-	// MaxStarsTransactionsLimit 是 getStarsTransactions 单页上限。
-	MaxStarsTransactionsLimit = 100
-	// MaxStarsTransactionsOffsetBytes 是 keyset 游标字符串长度上限。
-	MaxStarsTransactionsOffsetBytes = 64
+        // DefaultStarsStartingGrant 是惰性首读授予的起始 Stars 余额（本地测试用）。
+        DefaultStarsStartingGrant = 1000
+        // MaxStarsTransactionsLimit 是 getStarsTransactions 单页上限。
+        MaxStarsTransactionsLimit = 100
+        // MaxStarsTransactionsOffsetBytes 是 keyset 游标字符串长度上限。
+        MaxStarsTransactionsOffsetBytes = 64
 )
 
 // Stars 账本哨兵错误（rpc 层 errors.Is 匹配后映射为 tgerr，仿 ErrPremiumRequired）。
 var (
-	// ErrStarsInsufficient 表示余额不足以完成借记（映射 BALANCE_TOO_LOW）。
-	ErrStarsInsufficient = errors.New("stars: insufficient balance")
-	// ErrStarsInvalidAmount 表示金额非法（<=0）。
-	ErrStarsInvalidAmount = errors.New("stars: invalid amount")
-	// ErrStarsTransactionQueryInvalid 表示内部构造了不可能的流水方向。
-	ErrStarsTransactionQueryInvalid = errors.New("stars: invalid transaction query")
-	// ErrStarsPurchaseFormInvalid covers a missing/cross-account/mutated form.
-	ErrStarsPurchaseFormInvalid = errors.New("stars: purchase form invalid")
-	// ErrStarsPurchaseFormExpired is returned before any settlement write.
-	ErrStarsPurchaseFormExpired = errors.New("stars: purchase form expired")
-	// ErrStarsGiftUnavailable covers a recipient that cannot receive the gift.
-	ErrStarsGiftUnavailable = errors.New("stars: gift unavailable")
+        // ErrStarsInsufficient 表示余额不足以完成借记（映射 BALANCE_TOO_LOW）。
+        ErrStarsInsufficient = errors.New("stars: insufficient balance")
+        // ErrStarsInvalidAmount 表示金额非法（<=0）。
+        ErrStarsInvalidAmount = errors.New("stars: invalid amount")
+        // ErrStarsTransactionQueryInvalid 表示内部构造了不可能的流水方向。
+        ErrStarsTransactionQueryInvalid = errors.New("stars: invalid transaction query")
+        // ErrStarsPurchaseFormInvalid covers a missing/cross-account/mutated form.
+        ErrStarsPurchaseFormInvalid = errors.New("stars: purchase form invalid")
+        // ErrStarsPurchaseFormExpired is returned before any settlement write.
+        ErrStarsPurchaseFormExpired = errors.New("stars: purchase form expired")
+        // ErrStarsGiftUnavailable covers a recipient that cannot receive the gift.
+        ErrStarsGiftUnavailable = errors.New("stars: gift unavailable")
 )
 
 // StarsPaymentRequiredError reports the minimum paid-message authorization the
 // sender must include in allow_paid_stars. The authorization is a ceiling; the
 // ledger debits only the channel's current configured price.
 type StarsPaymentRequiredError struct {
-	Stars int64
+        Stars int64
 }
 
 func (e *StarsPaymentRequiredError) Error() string {
-	return fmt.Sprintf("stars: allow payment required: %d", e.Stars)
+        return fmt.Sprintf("stars: allow payment required: %d", e.Stars)
 }
 
 // EncodeStarsCursor 把 keyset 游标（最后一条流水 id）编码为客户端不透明字符串。
 func EncodeStarsCursor(id int64) string {
-	return base64.RawURLEncoding.EncodeToString([]byte(strconv.FormatInt(id, 10)))
+        return base64.RawURLEncoding.EncodeToString([]byte(strconv.FormatInt(id, 10)))
 }
 
 // DecodeStarsCursor 反解 EncodeStarsCursor；无法解析（含空串）时返回 ok=false，
 // 调用方应据此从首页开始（客户端只会回传我们给过的游标，畸形仅作兜底）。
 func DecodeStarsCursor(s string) (int64, bool) {
-	if s == "" {
-		return 0, false
-	}
-	raw, err := base64.RawURLEncoding.DecodeString(s)
-	if err != nil {
-		return 0, false
-	}
-	id, err := strconv.ParseInt(string(raw), 10, 64)
-	if err != nil || id <= 0 {
-		return 0, false
-	}
-	return id, true
+        if s == "" {
+                return 0, false
+        }
+        raw, err := base64.RawURLEncoding.DecodeString(s)
+        if err != nil {
+                return 0, false
+        }
+        id, err := strconv.ParseInt(string(raw), 10, 64)
+        if err != nil || id <= 0 {
+                return 0, false
+        }
+        return id, true
 }

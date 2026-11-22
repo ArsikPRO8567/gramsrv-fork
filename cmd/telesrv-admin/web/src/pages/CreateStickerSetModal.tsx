@@ -94,7 +94,7 @@ export function CreateStickerSetModal({
           <label className={`gift-file-picker ${file ? "has-file" : ""}`}>
             <input
               type="file"
-              accept=".tgs,.json,.webp,application/json,application/x-tgsticker,image/webp"
+              accept=".tgs,.json,.webp,.webm,.png,application/json,application/x-tgsticker,image/webp,image/png,video/webm"
               onChange={(event) => setFile(event.target.files?.[0] ?? null)}
             />
             <span className="gift-file-copy">

@@ -1134,8 +1134,8 @@ WHERE channel_id=$1 AND event_type='send_message' AND message::text LIKE '%star_
 		t.Fatalf("channel stars balance projection = %d err %v", balance, err)
 	}
 	starsPage, err := lifecycle.ChannelStarsTransactions(ctx, created.Channel.ID, domain.StarsTransactionQuery{Limit: 20})
-	// Раунд 30: конвертация — «продажа» (reason='gift_convert'), а не
-	// «получение подарка» (gift), в том числе для канальных владельцев.
+	// Раунд 30: конвертация — «продажа» подарка, поэтому reason у транзакции
+	// channel_stars_transactions — gift_convert, а не gift (см. 0187 миграцию).
 	if err != nil || starsPage.Balance != 20 || len(starsPage.Transactions) != 1 ||
 		starsPage.Transactions[0].Amount != 20 || starsPage.Transactions[0].Reason != domain.StarsReasonGiftConvert {
 		t.Fatalf("channel stars transaction projection = %+v err %v", starsPage, err)

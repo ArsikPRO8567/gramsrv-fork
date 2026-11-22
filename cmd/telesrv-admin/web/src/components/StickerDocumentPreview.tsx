@@ -3,7 +3,9 @@ import { useEffect, useRef, useState } from "react";
 import { api, errorMessage } from "../api";
 
 // One preview cell for a sticker/emoji document. TGS documents are exposed by
-// the BFF as decompressed Lottie JSON; static stickers come back as image bytes.
+// the BFF as decompressed Lottie JSON; static stickers come back as image bytes;
+// video stickers (webm) come back as video bytes and render in a looping muted
+// <video> element.
 export function StickerDocumentPreview({
   documentID,
   className = "",
@@ -16,13 +18,15 @@ export function StickerDocumentPreview({
   const host = useRef<HTMLDivElement>(null);
   const animation = useRef<ReturnType<typeof lottie.loadAnimation> | null>(null);
   const [error, setError] = useState("");
-  const [imageURL, setImageURL] = useState<string | null>(null);
+  const [mediaURL, setMediaURL] = useState<string | null>(null);
+  const [isVideo, setIsVideo] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
     let objectURL: string | null = null;
     setError("");
-    setImageURL(null);
+    setMediaURL(null);
+    setIsVideo(false);
 
     fetch(api.stickerDocumentAnimationURL(documentID), { credentials: "same-origin" })
       .then(async (response) => {
@@ -47,7 +51,8 @@ export function StickerDocumentPreview({
         const blob = await response.blob();
         if (cancelled) return;
         objectURL = URL.createObjectURL(blob);
-        setImageURL(objectURL);
+        setIsVideo(contentType.startsWith("video/"));
+        setMediaURL(objectURL);
       })
       .catch((err) => {
         if (!cancelled) setError(errorMessage(err));
@@ -63,8 +68,10 @@ export function StickerDocumentPreview({
 
   return (
     <div className={`sticker-doc-cell ${className}`.trim()}>
-      {imageURL ? (
-        <img className="sticker-doc-image" src={imageURL} alt="" />
+      {mediaURL && isVideo ? (
+        <video className="sticker-doc-image" src={mediaURL} autoPlay loop muted playsInline />
+      ) : mediaURL ? (
+        <img className="sticker-doc-image" src={mediaURL} alt="" />
       ) : (
         <div className="sticker-doc-canvas" ref={host} />
       )}

@@ -893,13 +893,7 @@ func tgStarsTransactionPeer(t domain.StarsTransaction) tg.StarsTransactionPeerCl
 	switch t.Reason {
 	case domain.StarsReasonGrant, domain.StarsReasonTopup:
 		return &tg.StarsTransactionPeerFragment{}
-	// Раунд 31: каналы приобретения пополнения — официальный клиент локализует
-	// начисление по типу peer (магазин приложения / бот / Fragment).
-	case domain.StarsReasonTopupAppStore:
-		return &tg.StarsTransactionPeerAppStore{}
-	case domain.StarsReasonTopupPlayMarket:
-		return &tg.StarsTransactionPeerPlayMarket{}
-	case domain.StarsReasonTopupBot, domain.StarsReasonPremium:
+	case domain.StarsReasonPremium:
 		return &tg.StarsTransactionPeerPremiumBot{}
 	}
 	if t.Peer.Type != "" && t.Peer.ID != 0 {

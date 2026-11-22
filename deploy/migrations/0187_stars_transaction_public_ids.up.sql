@@ -67,10 +67,10 @@ WHERE NOT refunded AND amount_nanoton > 0 AND (
 -- Конвертация подарка в звёзды — продажа, а не получение подарка: клиенты по
 -- reason='gift' с зачислением рисуют подпись «подарок от пользователя», для
 -- конвертации выделен отдельный reason 'gift_convert' (stargift без флага
--- gift). Исторические строки конвертации переименовываются по их маркеру
--- (title); исторически конвертация зачислялась только в stars_transactions
--- (у ton_transactions колонки title нет и TON-конвертаций не было), поэтому
--- переименование касается только этой таблицы.
+-- gift). Исторические строки конвертации переименовываются по их маркеру.
+-- ВАЖНО: переименование касается только stars_transactions — у ton_transactions
+-- НЕТ колонки title (исторические конвертации шли только в Stars), UPDATE по
+-- title там падает с SQLSTATE 42703 и ломает всю миграцию на свежей базе.
 UPDATE public.stars_transactions SET reason = 'gift_convert'
 WHERE reason = 'gift' AND title = 'Star gift conversion';
 

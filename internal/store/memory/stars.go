@@ -200,3 +200,96 @@ func (s *StarsStore) appendTxnFlags(st *starsState, userID, amount int64, reason
 	txn.TransactionID = domain.NewStarsTransactionID(false)
 	st.txns = append(st.txns, txn)
 }
+
+// RefundPaidMessages гасит непогашенные проводки платных сообщений payer'а в
+// пользу owner'а (memory-зеркало postgres-семантики): брутто возвращается
+// плательщику, полученная выручка удерживается с клампом к остатку, исходные
+// проводки помечаются refunded=true (защита от повторного возврата).
+func (s *StarsStore) RefundPaidMessages(_ context.Context, ownerUserID, payerUserID int64, date int) (domain.PaidMessagesRefund, error) {
+	if ownerUserID == 0 || payerUserID == 0 || ownerUserID == payerUserID {
+		return domain.PaidMessagesRefund{}, domain.ErrStarsInvalidAmount
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	payer := s.states[payerUserID]
+	var gross int64
+	var charges int
+	if payer != nil {
+		for _, t := range payer.txns {
+			if t.Reason == domain.StarsReasonPaidMessage && t.Amount < 0 &&
+				t.Peer.Type == domain.PeerTypeUser && t.Peer.ID == ownerUserID && !t.Refunded {
+				gross += -t.Amount
+				charges++
+			}
+		}
+	}
+	if gross <= 0 {
+		return domain.PaidMessagesRefund{}, nil
+	}
+	var received int64
+	if owner := s.states[ownerUserID]; owner != nil {
+		for _, t := range owner.txns {
+			if t.Reason == domain.StarsReasonPaidMessage && t.Amount > 0 &&
+				t.Peer.Type == domain.PeerTypeUser && t.Peer.ID == payerUserID && !t.Refunded {
+				received += t.Amount
+			}
+		}
+	}
+	for i := range payer.txns {
+		t := &payer.txns[i]
+		if t.Reason == domain.StarsReasonPaidMessage && t.Amount < 0 &&
+			t.Peer.Type == domain.PeerTypeUser && t.Peer.ID == ownerUserID && !t.Refunded {
+			t.Refunded = true
+		}
+	}
+	if payer != nil {
+		payer.balance += gross
+		s.appendTxnFlags(payer, payerUserID, gross, domain.StarsReasonPaidMessage,
+			domain.Peer{Type: domain.PeerTypeUser, ID: ownerUserID}, date, "", "",
+			domain.StarsLedgerFlags{Refunded: true})
+	}
+	claw := int64(0)
+	if received > 0 {
+		for i := range s.states[ownerUserID].txns {
+			t := &s.states[ownerUserID].txns[i]
+			if t.Reason == domain.StarsReasonPaidMessage && t.Amount > 0 &&
+				t.Peer.Type == domain.PeerTypeUser && t.Peer.ID == payerUserID && !t.Refunded {
+				t.Refunded = true
+			}
+		}
+		owner := s.states[ownerUserID]
+		claw = received
+		if owner != nil && owner.balance < claw {
+			claw = owner.balance
+		}
+		if owner != nil && claw > 0 {
+			owner.balance -= claw
+			s.appendTxnFlags(owner, ownerUserID, -claw, domain.StarsReasonPaidMessage,
+				domain.Peer{Type: domain.PeerTypeUser, ID: payerUserID}, date, "", "",
+				domain.StarsLedgerFlags{Refunded: true})
+		}
+	}
+	return domain.PaidMessagesRefund{Refunded: gross, ClawedBack: claw, Charges: charges}, nil
+}
+
+// PaidMessagesRevenue возвращает непогашенную сумму платежей payer'а за
+// сообщения в адрес peer'а (memory-зеркало postgres-семантики).
+func (s *StarsStore) PaidMessagesRevenue(_ context.Context, payerUserID int64, peer domain.Peer) (int64, error) {
+	if payerUserID == 0 || peer.ID == 0 {
+		return 0, nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	st := s.states[payerUserID]
+	if st == nil {
+		return 0, nil
+	}
+	var total int64
+	for _, t := range st.txns {
+		if t.Reason == domain.StarsReasonPaidMessage && t.Amount < 0 &&
+			t.Peer.Type == peer.Type && t.Peer.ID == peer.ID && !t.Refunded {
+			total += -t.Amount
+		}
+	}
+	return total, nil
+}

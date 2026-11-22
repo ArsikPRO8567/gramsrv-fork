@@ -192,24 +192,17 @@ RETURNING balance,granted`, req.BuyerUserID, req.Stars).Scan(&result.Balance.Bal
 		}
 		// Раунд 30: без английского текста — клиент рисует Fragment-начисление
 		// по starsTransactionPeerFragment (peer выбирается в rpc-проекции).
-		// Раунд 31: reason канала приобретения — App Store / Google Play /
-		// бот / Fragment (по платформе сессии покупателя).
-		if err := insertStarsTxn(ctx, tx, req.BuyerUserID, req.Stars, req.Acquisition.StarsTopupReason(),
+		if err := insertStarsTxn(ctx, tx, req.BuyerUserID, req.Stars, domain.StarsReasonTopup,
 			req.SpendPurposePeer, req.Date, "", ""); err != nil {
 			return err
 		}
-		commandPurpose, err := starsPurchasePurposeJSON(domain.StarsPurchaseForm{
-			Kind: req.Kind, Acquisition: req.Acquisition})
-		if err != nil {
-			return err
-		}
-		_, err = tx.Exec(ctx, `
+		_, err := tx.Exec(ctx, `
 INSERT INTO stars_purchase_commands
         (buyer_user_id,form_id,kind,request_fingerprint,recipient_user_id,spend_peer_type,spend_peer_id,purpose_json,stars,currency,amount,
          balance_after,transaction_id,created_at)
-VALUES($1,$2,$3,$4,NULL,$5,$6,$7::jsonb,$8,$9,$10,$11,$12,$13)`, req.BuyerUserID, req.FormID, string(req.Kind), fingerprint[:],
+VALUES($1,$2,$3,$4,NULL,$5,$6,'{}'::jsonb,$7,$8,$9,$10,$11,$12)`, req.BuyerUserID, req.FormID, string(req.Kind), fingerprint[:],
 			starsPurchasePeerTypeValue(req.SpendPurposePeer), starsPurchasePeerIDValue(req.SpendPurposePeer),
-			commandPurpose, req.Stars, req.Currency, req.Amount, result.Balance.Balance, transactionID, req.Date)
+			req.Stars, req.Currency, req.Amount, result.Balance.Balance, transactionID, req.Date)
 		if err != nil {
 			return fmt.Errorf("insert stars topup command: %w", err)
 		}
@@ -498,13 +491,7 @@ func validStarsGiveawayPurchase(g *domain.StarsGiveawayPurchase, stars int64) bo
 
 func starsPurchasePurposeJSON(form domain.StarsPurchaseForm) ([]byte, error) {
 	if form.Kind != domain.StarsPurchaseGiveaway {
-		// Раунд 31: канал приобретения пополнения персистится в purpose_json,
-		// чтобы settlement записал начисление с reason выбранного канала.
-		// Fragment (и пустое значение) — историческая форма `{}`.
-		if form.Acquisition == "" || form.Acquisition == domain.StarsTopupFragment {
-			return []byte(`{}`), nil
-		}
-		return json.Marshal(map[string]string{"acquisition": string(form.Acquisition)})
+		return []byte(`{}`), nil
 	}
 	if form.Giveaway == nil {
 		return nil, domain.ErrStarsPurchaseFormInvalid
@@ -518,20 +505,8 @@ func sameStarsPurchasePurpose(stored []byte, form domain.StarsPurchaseForm) bool
 		return false
 	}
 	if form.Kind != domain.StarsPurchaseGiveaway {
-		// Раунд 31: сравниваем персистированный канал приобретения с ожидаемым
-		// (jsonb нормализует порядок ключей — сравниваем семантически).
-		var storedMap map[string]any
-		if json.Unmarshal(stored, &storedMap) != nil {
-			return false
-		}
-		if form.Acquisition == "" || form.Acquisition == domain.StarsTopupFragment {
-			return len(storedMap) == 0
-		}
-		if len(storedMap) != 1 {
-			return false
-		}
-		value, ok := storedMap["acquisition"].(string)
-		return ok && value == string(form.Acquisition)
+		var value map[string]any
+		return json.Unmarshal(stored, &value) == nil && len(value) == 0
 	}
 	var decoded domain.StarsGiveawayPurchase
 	if err := json.Unmarshal(stored, &decoded); err != nil {

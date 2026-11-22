@@ -1219,23 +1219,19 @@ func (s *StarGiftLifecycleStore) PurchaseResaleStarGift(ctx context.Context, req
 			// require_premium на коллекционных подарках — только маркетинговый
 			// признак (наследуется от исходного для отображения на рынке),
 			// покупка разрешена независимо от наличия подписки.
-			// Проблема C: дебет покупателя и кредит продавца делят один
-			// публичный transaction_id — клиент показывает одну операцию.
-			pairedTransactionID := domain.NewStarsTransactionID(false)
 			balance, err := s.debitLifecycleAmount(ctx, tx, req.BuyerUserID, req.Amount, domain.StarsReasonGiftResale,
 				saved.Owner, req.Date, "",
-				starsLedgerExtra{giftID: uniqueID, giftIsUnique: true, transactionID: pairedTransactionID})
+				starsLedgerExtra{giftID: uniqueID, giftIsUnique: true})
 			if err != nil {
 				return err
 			}
-			// Раунд 31: продавец получает валюту покупателя — звёздный
-			// листинг, оплаченный серверным TON-эквивалентом, начисляет
-			// продавцу TON, и наоборот; комиссия маркета считается от
-			// фактической оплаты внутри creditPeerLifecycleAmount.
-			proceeds := req.Amount
+			// Продавец получает цену листинга в валюте листинга (как на
+			// официальном сервере): оплату покупателя в TON по звёздному
+			// листингу конвертирует сервер по своему курсу.
+			proceeds := domain.StarGiftAmount{Currency: domain.StarGiftCurrency(listingCurrency), Amount: listingAmount}
 			if _, commission, err := s.creditPeerLifecycleAmount(ctx, tx, seller, req.BuyerUserID, proceeds,
 				domain.StarsReasonGiftResale, domain.Peer{Type: domain.PeerTypeUser, ID: req.BuyerUserID},
-				gift.ID, req.Date, "", starsLedgerExtra{giftIsUnique: true, transactionID: pairedTransactionID}); err != nil {
+				gift.ID, req.Date, "", starsLedgerExtra{giftIsUnique: true}); err != nil {
 				return err
 			} else {
 				commissionAmount = commission
@@ -1412,21 +1408,17 @@ WHERE actor_user_id=$1 AND command_key=$2`, req.BuyerUserID, strings.TrimSpace(r
 		}
 		// require_premium на коллекционных подарках — маркетинговый признак,
 		// покупка в канал разрешена независимо от подписки (как в user-ветке).
-		// Проблема C: общий публичный transaction_id у дебета покупателя и
-		// кредита продавца (см. PurchaseResaleStarGift).
-		pairedTransactionID := domain.NewStarsTransactionID(false)
 		balance, err := s.debitLifecycleAmount(ctx, tx, req.BuyerUserID, req.Amount, domain.StarsReasonGiftResale,
 			saved.Owner, req.Date, "",
-			starsLedgerExtra{giftID: uniqueID, giftIsUnique: true, transactionID: pairedTransactionID})
+			starsLedgerExtra{giftID: uniqueID, giftIsUnique: true})
 		if err != nil {
 			return err
 		}
 		var commissionAmount int64
-		// Раунд 31: продавец получает валюту покупателя (см. PurchaseResaleStarGift).
-		proceeds := req.Amount
+		proceeds := domain.StarGiftAmount{Currency: domain.StarGiftCurrency(listingCurrency), Amount: listingAmount}
 		if _, commission, err := s.creditPeerLifecycleAmount(ctx, tx, seller, req.BuyerUserID, proceeds,
 			domain.StarsReasonGiftResale, domain.Peer{Type: domain.PeerTypeUser, ID: req.BuyerUserID},
-			gift.ID, req.Date, "", starsLedgerExtra{giftIsUnique: true, transactionID: pairedTransactionID}); err != nil {
+			gift.ID, req.Date, "", starsLedgerExtra{giftIsUnique: true}); err != nil {
 			return err
 		} else {
 			commissionAmount = commission
@@ -1516,7 +1508,7 @@ WHERE actor_user_id=$1 AND command_key=$2`, req.BuyerUserID, strings.TrimSpace(r
 
 func lockSavedStarGiftByUniqueID(ctx context.Context, tx pgx.Tx, uniqueID int64) (domain.SavedStarGift, bool, error) {
 	row := tx.QueryRow(ctx, `SELECT p.id,p.owner_peer_type,p.owner_peer_id,p.from_user_id,p.gift_id,p.catalog_revision_id,
-         p.msg_id,p.saved_id,p.gift_date,p.name_hidden,p.unsaved,p.converted,p.convert_stars,p.prepaid_upgrade_stars,p.prepaid_upgrade_hash,p.gift_num,COALESCE(p.paid_stars, 0),
+         p.msg_id,p.saved_id,p.gift_date,p.name_hidden,p.unsaved,p.converted,p.convert_stars,p.prepaid_upgrade_stars,p.prepaid_upgrade_hash,p.gift_num,
          p.lifecycle_status,p.transfer_stars,p.can_export_at,p.can_transfer_at,p.can_resell_at,p.drop_original_details_stars,p.can_craft_at,
          p.message,COALESCE(p.message_entities,'[]'::jsonb)::text,COALESCE(p.unique_gift_id,0),p.upgrade_msg_id,p.pinned_order,
          COALESCE((SELECT array_agg(i.collection_id ORDER BY c.sort_order,i.collection_id) FROM star_gift_collection_items i
@@ -2198,9 +2190,6 @@ type starsLedgerExtra struct {
 	giftID       int64
 	giftIsUnique bool
 	refunded     bool
-	// transactionID — явный публичный идентификатор для парных переводов
-	// «аккаунт -> аккаунт» (проблема C): дебет и кредит делят один ID.
-	transactionID string
 }
 
 func (s *StarGiftLifecycleStore) debitLifecycleAmount(ctx context.Context, tx pgx.Tx, userID int64, amount domain.StarGiftAmount,
@@ -2208,7 +2197,6 @@ func (s *StarGiftLifecycleStore) debitLifecycleAmount(ctx context.Context, tx pg
 	flags := domain.StarsLedgerFlags{}
 	if len(extra) > 0 {
 		flags.GiftID, flags.GiftIsUnique, flags.Refunded = extra[0].giftID, extra[0].giftIsUnique, extra[0].refunded
-		flags.TransactionID = extra[0].transactionID
 	}
 	if amount.Amount == 0 {
 		var balance domain.StarsBalance
@@ -2261,7 +2249,6 @@ func (s *StarGiftLifecycleStore) creditLifecycleAmount(ctx context.Context, tx p
 	flags := domain.StarsLedgerFlags{}
 	if len(extra) > 0 {
 		flags.GiftID, flags.GiftIsUnique, flags.Refunded = extra[0].giftID, extra[0].giftIsUnique, extra[0].refunded
-		flags.TransactionID = extra[0].transactionID
 	}
 	if amount.Currency == domain.StarGiftCurrencyTON {
 		if _, err := tx.Exec(ctx, `INSERT INTO ton_balances(user_id,balance_nanoton,granted) VALUES($1,$2,false)
@@ -2284,14 +2271,10 @@ func insertTonTxnFull(ctx context.Context, tx pgx.Tx, userID, amount int64, reas
 	if flags.GiftID > 0 {
 		giftID = flags.GiftID
 	}
-	transactionID := flags.TransactionID
-	if transactionID == "" {
-		transactionID = domain.NewStarsTransactionID(true)
-	}
 	_, err := tx.Exec(ctx, `INSERT INTO ton_transactions(user_id,amount_nanoton,reason,peer_type,peer_id,date,
         transaction_id,refunded,gift_id,gift_is_unique)
         VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`, userID, amount, string(reason), nullableStarGiftPeerType(peer),
-		nullableStarGiftPeerID(peer), date, transactionID, flags.Refunded, giftID, flags.GiftIsUnique)
+		nullableStarGiftPeerID(peer), date, domain.NewStarsTransactionID(true), flags.Refunded, giftID, flags.GiftIsUnique)
 	return err
 }
 
@@ -2307,7 +2290,6 @@ func (s *StarGiftLifecycleStore) creditPeerLifecycleAmount(ctx context.Context, 
 	flags := domain.StarsLedgerFlags{GiftID: giftID}
 	if len(extra) > 0 {
 		flags.GiftIsUnique, flags.Refunded = extra[0].giftIsUnique, extra[0].refunded
-		flags.TransactionID = extra[0].transactionID
 	}
 	permille := s.market.StarsProceedsPermille
 	if amount.Currency == domain.StarGiftCurrencyTON {
@@ -2320,8 +2302,7 @@ func (s *StarGiftLifecycleStore) creditPeerLifecycleAmount(ctx context.Context, 
 	if owner.Type == domain.PeerTypeUser {
 		if proceeds > 0 {
 			if err := s.creditLifecycleAmount(ctx, tx, owner.ID, credited, reason, counterparty, date, title,
-				starsLedgerExtra{giftID: giftID, giftIsUnique: flags.GiftIsUnique, refunded: flags.Refunded,
-					transactionID: flags.TransactionID}); err != nil {
+				starsLedgerExtra{giftID: giftID, giftIsUnique: flags.GiftIsUnique, refunded: flags.Refunded}); err != nil {
 				return 0, 0, err
 			}
 		}
@@ -2347,14 +2328,10 @@ func (s *StarGiftLifecycleStore) creditPeerLifecycleAmount(ctx context.Context, 
                         RETURNING balance_nanoton`, owner.ID, proceeds).Scan(&balance); err != nil {
 			return 0, 0, err
 		}
-		channelTransactionID := flags.TransactionID
-		if channelTransactionID == "" {
-			channelTransactionID = domain.NewStarsTransactionID(true)
-		}
 		if _, err := tx.Exec(ctx, `INSERT INTO channel_ton_transactions
                         (channel_id,actor_user_id,amount_nanoton,reason,peer_type,peer_id,gift_id,date,transaction_id,refunded,gift_is_unique)
                         VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`, owner.ID, actorUserID, proceeds, string(reason),
-			string(counterparty.Type), counterparty.ID, giftID, date, channelTransactionID,
+			string(counterparty.Type), counterparty.ID, giftID, date, domain.NewStarsTransactionID(true),
 			flags.Refunded, flags.GiftIsUnique); err != nil {
 			return 0, 0, err
 		}
@@ -2369,14 +2346,10 @@ func (s *StarGiftLifecycleStore) creditPeerLifecycleAmount(ctx context.Context, 
                 RETURNING balance`, owner.ID, proceeds).Scan(&balance); err != nil {
 		return 0, 0, err
 	}
-	channelTransactionID := flags.TransactionID
-	if channelTransactionID == "" {
-		channelTransactionID = domain.NewStarsTransactionID(false)
-	}
 	if _, err := tx.Exec(ctx, `INSERT INTO channel_stars_transactions
                 (channel_id,actor_user_id,amount,reason,peer_type,peer_id,gift_id,date,transaction_id,refunded,gift_is_unique)
                 VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`, owner.ID, actorUserID, proceeds, string(reason),
-		string(counterparty.Type), counterparty.ID, giftID, date, channelTransactionID,
+		string(counterparty.Type), counterparty.ID, giftID, date, domain.NewStarsTransactionID(false),
 		flags.Refunded, flags.GiftIsUnique); err != nil {
 		return 0, 0, err
 	}
@@ -2404,7 +2377,7 @@ func (s *StarGiftLifecycleStore) loadTransferReplay(ctx context.Context, req dom
 
 func savedStarGiftByUniqueID(ctx context.Context, db sqlcgen.DBTX, uniqueID int64) (domain.SavedStarGift, bool, error) {
 	row := db.QueryRow(ctx, `SELECT p.id,p.owner_peer_type,p.owner_peer_id,p.from_user_id,p.gift_id,p.catalog_revision_id,
-         p.msg_id,p.saved_id,p.gift_date,p.name_hidden,p.unsaved,p.converted,p.convert_stars,p.prepaid_upgrade_stars,p.prepaid_upgrade_hash,p.gift_num,COALESCE(p.paid_stars, 0),
+         p.msg_id,p.saved_id,p.gift_date,p.name_hidden,p.unsaved,p.converted,p.convert_stars,p.prepaid_upgrade_stars,p.prepaid_upgrade_hash,p.gift_num,
          p.lifecycle_status,p.transfer_stars,p.can_export_at,p.can_transfer_at,p.can_resell_at,p.drop_original_details_stars,p.can_craft_at,
          p.message,COALESCE(p.message_entities,'[]'::jsonb)::text,COALESCE(p.unique_gift_id,0),p.upgrade_msg_id,p.pinned_order,
          COALESCE((SELECT array_agg(i.collection_id ORDER BY c.sort_order,i.collection_id) FROM star_gift_collection_items i
