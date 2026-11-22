@@ -760,16 +760,8 @@ func (fakeService) SetStarGiftSortOrder(_ context.Context, req admin.SetStarGift
 	return admin.CommandResult{CommandID: req.CommandID, Status: "completed", DryRun: req.DryRun}, nil
 }
 
-func (fakeService) UpdateStarGiftSettings(_ context.Context, req admin.UpdateStarGiftSettingsRequest) (admin.CommandResult, error) {
-	return admin.CommandResult{CommandID: req.CommandID, Status: "completed", DryRun: req.DryRun}, nil
-}
-
-func (fakeService) SetStarGiftAuctionSettings(_ context.Context, req admin.SetStarGiftAuctionSettingsRequest) (admin.CommandResult, error) {
-	return admin.CommandResult{CommandID: req.CommandID, Status: "completed", DryRun: req.DryRun}, nil
-}
-
-func (fakeService) StarGiftAnimation(context.Context, int64) ([]byte, bool, error) {
-	return []byte(`{"v":"5.7","w":512,"h":512}`), true, nil
+func (fakeService) StarGiftAnimation(context.Context, int64) ([]byte, string, bool, error) {
+	return []byte(`{"v":"5.7","w":512,"h":512}`), "application/json; charset=utf-8", true, nil
 }
 
 func (fakeService) EmojiAnimation(context.Context, int64) ([]byte, bool, error) {
@@ -795,18 +787,6 @@ func (fakeService) GifCatalogDocumentPreview(context.Context, int64) ([]byte, st
 
 func (fakeService) StarGiftCollectibles(context.Context, int64) (domain.StarGiftUpgradePreview, bool, error) {
 	return domain.StarGiftUpgradePreview{}, false, nil
-}
-
-func (fakeService) StarGiftCollectibleRevision(context.Context, int64) (domain.StarGiftCollectibleRevision, error) {
-	return domain.StarGiftCollectibleRevision{}, domain.ErrStarGiftCollectibleInvalid
-}
-
-func (fakeService) StarGiftCollectibleRevisionSummaries(context.Context, int64, string) ([]domain.StarGiftCollectibleRevisionSummary, string, error) {
-	return nil, "", nil
-}
-
-func (fakeService) SetStarGiftCollectibleSupply(context.Context, admin.SetStarGiftCollectibleSupplyRequest) (admin.CommandResult, error) {
-	return admin.CommandResult{Status: "completed", Message: "collectible supply updated"}, nil
 }
 
 func (fakeService) StarGiftCollectibleAnimation(context.Context, int64, domain.StarGiftCollectibleAttributeKind, int64) ([]byte, bool, error) {

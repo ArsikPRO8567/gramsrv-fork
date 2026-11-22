@@ -34,8 +34,6 @@ import type {
   OfficialStarGiftListResponse,
   PremiumPlansResponse,
   StarGiftCollectiblePreview,
-  StarGiftCollectibleRevision,
-  StarGiftCollectibleRevisionList,
   StarGiftListResponse,
   StickerSetListResponse,
   StorageStatsResponse,
@@ -130,23 +128,22 @@ async function request<T>(url: string, init: RequestInit = {}): Promise<T> {
     headers
   });
   const text = await response.text();
-  // Сервер обязан отвечать JSON. Не-JSON ответ (HTML-страница прокси, пустое
-  // тело с 5xx) раньше падал сырым SyntaxError «unexpected character…» —
-  // превращаем его в читаемую APIError со статусом.
-  let data: { error?: string; Error?: string; message?: string } | null = null;
-  if (text) {
-    try {
-      data = JSON.parse(text);
-    } catch {
-      const preview = text.trim().slice(0, 160) || response.statusText || "empty response";
-      throw new APIError(response.status, `invalid server response (HTTP ${response.status}): ${preview}`);
-    }
-  }
+  const data = text ? JSON.parse(text) : null;
   if (!response.ok) {
     const message = data?.error || data?.Error || data?.message || response.statusText;
     throw new APIError(response.status, message);
   }
-  return data as unknown as T;
+  return data as T;
+}
+
+// requestMedia fetches binary payloads — Round 37: .webp/.webm/.png gift
+// animations are served with their real content type instead of JSON.
+async function requestMedia(url: string): Promise<{ blob: Blob; mime: string }> {
+  const response = await fetch(url, { credentials: "same-origin", headers: plainHeaders(undefined) });
+  if (!response.ok) {
+    throw new APIError(response.status, response.statusText);
+  }
+  return { blob: await response.blob(), mime: response.headers.get("content-type") ?? "" };
 }
 
 export function errorMessage(error: unknown): string {
@@ -249,20 +246,11 @@ export const api = {
         officialGifts: () => request<OfficialStarGiftListResponse>("/api/official-gifts"),
         officialGiftAnimation: (id: string) => request<Record<string, unknown>>(`/api/official-gifts/${encodeURIComponent(id)}/animation`),
         giftAnimation: (id: string) => request<Record<string, unknown>>(`/api/gifts/${encodeURIComponent(id)}/animation`),
+        giftAnimationMedia: (id: string) => requestMedia(`/api/gifts/${encodeURIComponent(id)}/animation`),
         giftCollectibles: (id: string) => request<StarGiftCollectiblePreview>(`/api/gifts/${encodeURIComponent(id)}/collectibles`),
-        giftCollectibleRevision: (revisionID: string) => request<StarGiftCollectibleRevision>(`/api/gifts/collectibles/revisions/${encodeURIComponent(revisionID)}`),
-        // Раунд 35: список ревизий строится по slug коллекции (одна коллекция
-        // может публиковаться разными подарками); пустой slug — по gift_id.
-        giftCollectibleRevisions: (id: string, slug?: string) => request<StarGiftCollectibleRevisionList>(
-          `/api/gifts/${encodeURIComponent(id)}/collectibles/revisions${slug && slug.trim() ? `?slug=${encodeURIComponent(slug.trim())}` : ""}`
-        ),
-        setGiftCollectibleSupply: (payload: Record<string, unknown>) => request<CommandResult>("/api/actions/set-gift-collectible-supply", { method: "POST", body: JSON.stringify(payload) }),
         giftCollectibleAnimation: (giftID: string, kind: "model" | "pattern", attributeID: string) => request<Record<string, unknown>>(`/api/gifts/${encodeURIComponent(giftID)}/collectibles/${kind}/${encodeURIComponent(attributeID)}/animation`),
         importGift: (form: FormData) => request<CommandResult>("/api/actions/import-gift", { method: "POST", body: form }),
         importOfficialGift: (payload: Record<string, unknown>) => request<CommandResult>("/api/actions/import-official-gift", { method: "POST", body: JSON.stringify(payload) }),
-        updateGiftSettings: (payload: Record<string, unknown>) => request<CommandResult>("/api/actions/update-gift-settings", { method: "POST", body: JSON.stringify(payload) }),
-        updateGiftSettingsForm: (form: FormData) => request<CommandResult>("/api/actions/update-gift-settings", { method: "POST", body: form }),
-        setGiftAuctionSettings: (payload: Record<string, unknown>) => request<CommandResult>("/api/actions/set-gift-auction-settings", { method: "POST", body: JSON.stringify(payload) }),
         publishGiftCollectibles: (giftID: string, form: FormData) => request<CommandResult>(`/api/actions/publish-gift-collectibles?gift_id=${encodeURIComponent(giftID)}`, { method: "POST", body: form }),
         gifCatalog: () => request<GifCatalogListResponse>("/api/gif-catalog"),
         stickerSets: (kind: "stickers" | "emoji") => request<StickerSetListResponse>(`/api/stickers?kind=${encodeURIComponent(kind)}`),

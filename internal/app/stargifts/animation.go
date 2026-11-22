@@ -33,6 +33,11 @@ func prepareAnimation(fileName string, data []byte) (domain.StarGiftAnimation, e
 }
 
 func prepareAnimationWithPolicy(fileName string, data []byte, allowExpressions bool) (domain.StarGiftAnimation, error) {
+	// Раунд 37: .webp/.webm/.png идут в обход Lottie-конвейера — байты
+	// сохраняются как есть, размеры и длительность парсятся из заголовков.
+	if format, isMedia := sniffMediaAnimation(fileName, data); isMedia {
+		return prepareMediaAnimation(fileName, data, format)
+	}
 	fileName = strings.TrimSpace(filepath.Base(fileName))
 	ext := strings.ToLower(filepath.Ext(fileName))
 	format := domain.StarGiftAnimationLottie
@@ -49,7 +54,7 @@ func prepareAnimationWithPolicy(fileName string, data []byte, allowExpressions b
 		}
 	} else {
 		if ext != ".json" && ext != ".lottie" {
-			return domain.StarGiftAnimation{}, fmt.Errorf("%w: expected .tgs, .json or plain .lottie", domain.ErrStarGiftFileInvalid)
+			return domain.StarGiftAnimation{}, fmt.Errorf("%w: expected .tgs, .json, .lottie, .webp, .webm or .png", domain.ErrStarGiftFileInvalid)
 		}
 		if int64(len(data)) == 0 || int64(len(data)) > domain.MaxStarGiftLottieBytes {
 			return domain.StarGiftAnimation{}, domain.ErrStarGiftFileInvalid

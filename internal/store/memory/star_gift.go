@@ -2,10 +2,8 @@ package memory
 
 import (
 	"context"
-	"fmt"
 	"math/rand/v2"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 
@@ -28,7 +26,6 @@ type StarGiftStore struct {
 	uniqueByID       map[int64]domain.UniqueStarGift
 	uniqueBySlug     map[string]int64
 	collections      map[domain.Peer][]domain.StarGiftCollection
-	whitelists       map[int64]domain.GiftWhitelistWrite
 	nextAttributeID  int64
 	nextCollectionID int
 }
@@ -41,7 +38,6 @@ func NewStarGiftStore() *StarGiftStore {
 		collectibles: make(map[int64]domain.StarGiftCollectibleRevision),
 		uniqueByID:   make(map[int64]domain.UniqueStarGift), uniqueBySlug: make(map[string]int64),
 		collections: make(map[domain.Peer][]domain.StarGiftCollection),
-		whitelists:  make(map[int64]domain.GiftWhitelistWrite),
 	}
 }
 
@@ -132,62 +128,13 @@ func (s *StarGiftStore) createCatalogRevisionLocked(write domain.StarGiftCatalog
 	s.revisions[gift.RevisionID] = gift
 	s.enabled[giftID] = write.Enabled
 	s.sortOrder[giftID] = write.SortOrder
-	s.animations[giftID] = append([]byte(nil), write.Animation.JSON...)
-	// Раунд 31: настройки вайтлиста пишутся вместе с ревизией, как в postgres-
-	// адаптере (апсерт строки gift_whitelists в транзакции ревизии).
-	if write.Whitelist != nil {
-		s.whitelists[giftID] = cloneWhitelistWrite(write.Whitelist)
+	// Lottie хранит JSON для плеера админки; медиа-форматы (раунд 37) —
+	// исходные байты анимации.
+	animationPayload := write.Animation.JSON
+	if !write.Animation.SourceFormat.IsLottieFamily() {
+		animationPayload = write.Animation.TGS
 	}
-	return domain.StarGiftCatalogEntry{Gift: gift, Enabled: write.Enabled, SortOrder: write.SortOrder}, nil
-}
-
-func cloneWhitelistWrite(value *domain.GiftWhitelistWrite) domain.GiftWhitelistWrite {
-	cloned := *value
-	cloned.AllowedBuyers = append([]string(nil), value.AllowedBuyers...)
-	return cloned
-}
-
-// UpdateCatalogSettings создаёт новую ревизию без загрузки новой анимации
-// (раунд 32): анимационные поля копируются из текущего активного подарка, всё
-// остальное берётся из write. Совпадает с postgres-поведением по смыслу.
-func (s *StarGiftStore) UpdateCatalogSettings(_ context.Context, write domain.StarGiftCatalogSettingsWrite) (domain.StarGiftCatalogEntry, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	current, ok := s.catalog[write.GiftID]
-	if !ok {
-		return domain.StarGiftCatalogEntry{}, domain.ErrStarGiftNotFound
-	}
-	s.nextRevID++
-	gift := domain.StarGift{
-		ID: write.GiftID, RevisionID: s.nextRevID, Stars: write.Stars, ConvertStars: write.ConvertStars,
-		Title: write.Title, Sticker: current.Sticker,
-		Limited: write.Limited, SoldOut: write.SoldOut, Birthday: write.Birthday,
-		RequirePremium: write.RequirePremium, LimitedPerUser: write.LimitedPerUser,
-		PeerColorAvailable: write.PeerColorAvailable, Auction: write.Auction,
-		AvailabilityRemains: write.AvailabilityRemains, AvailabilityTotal: write.AvailabilityTotal,
-		AvailabilityResale: current.AvailabilityResale, FirstSaleDate: current.FirstSaleDate,
-		LastSaleDate: current.LastSaleDate, ResellMinStars: current.ResellMinStars,
-		ReleasedBy: write.ReleasedBy, PerUserTotal: write.PerUserTotal,
-		PerUserRemains: write.PerUserTotal, LockedUntilDate: write.LockedUntilDate,
-		AuctionSlug: write.AuctionSlug, GiftsPerRound: write.GiftsPerRound,
-		AuctionStartDate: write.AuctionStartDate, UpgradeVariants: write.UpgradeVariants,
-		Background: cloneStarGiftBackground(write.Background),
-	}
-	animationJSON := s.animations[write.GiftID]
-	// Раунд 34: опциональная замена анимации — тот же контракт, что и в
-	// postgres-адаптере (новый документ/blob/анимационные столбцы).
-	if write.Animation != nil && write.Document != nil {
-		animationJSON = append([]byte(nil), write.Animation.JSON...)
-		gift.Sticker = *write.Document
-	}
-	s.catalog[write.GiftID] = gift
-	s.revisions[gift.RevisionID] = gift
-	s.enabled[write.GiftID] = write.Enabled
-	s.sortOrder[write.GiftID] = write.SortOrder
-	s.animations[write.GiftID] = animationJSON
-	if write.Whitelist != nil {
-		s.whitelists[write.GiftID] = cloneWhitelistWrite(write.Whitelist)
-	}
+	s.animations[giftID] = append([]byte(nil), animationPayload...)
 	return domain.StarGiftCatalogEntry{Gift: gift, Enabled: write.Enabled, SortOrder: write.SortOrder}, nil
 }
 
@@ -259,6 +206,27 @@ func (s *StarGiftStore) AnimationJSON(_ context.Context, giftID int64) ([]byte, 
 	return append([]byte(nil), raw...), ok, nil
 }
 
+// AnimationPayload — memory-адаптер: Lottie возвращает JSON, медиа-форматы —
+// исходные байты (в памяти они хранятся там же, в s.animations).
+func (s *StarGiftStore) AnimationPayload(_ context.Context, giftID int64) ([]byte, domain.StarGiftAnimationFormat, string, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	gift, ok := s.catalog[giftID]
+	if !ok {
+		return nil, "", "", false, nil
+	}
+	format := domain.StarGiftAnimationLottie
+	if gift.Sticker.MimeType == domain.StarGiftAnimationWEBP.MimeType() {
+		format = domain.StarGiftAnimationWEBP
+	} else if gift.Sticker.MimeType == domain.StarGiftAnimationWEBM.MimeType() {
+		format = domain.StarGiftAnimationWEBM
+	} else if gift.Sticker.MimeType == domain.StarGiftAnimationPNG.MimeType() {
+		format = domain.StarGiftAnimationPNG
+	}
+	raw, _ := s.animations[giftID]
+	return append([]byte(nil), raw...), format, "", true, nil
+}
+
 func (s *StarGiftStore) PublishCollectibleRevision(_ context.Context, write domain.StarGiftCollectibleWrite) (domain.StarGiftCollectibleRevision, error) {
 	if err := domain.ValidateStarGiftCollectibleWrite(write); err != nil {
 		return domain.StarGiftCollectibleRevision{}, err
@@ -311,229 +279,6 @@ func (s *StarGiftStore) ActiveCollectibleRevision(_ context.Context, giftID int6
 	defer s.mu.Unlock()
 	revision, ok := s.collectibles[giftID]
 	return cloneCollectibleRevision(revision), ok, nil
-}
-
-// SyncActiveCollectibleRevision (раунд 37) правит активную ревизию «на месте»:
-// строки с ID обновляются (id сохраняются), без ID — добавляются,
-// отсутствующие в форме — снимаются (задействованные выпущенными подарками —
-// отказ). Зеркало postgres-адаптера для памяти.
-func (s *StarGiftStore) SyncActiveCollectibleRevision(_ context.Context, write domain.StarGiftCollectibleWrite) (domain.StarGiftCollectibleRevision, error) {
-	write.SlugPrefix = strings.ToLower(strings.TrimSpace(write.SlugPrefix))
-	for i := range write.Models {
-		if write.Models[i].ID > 0 && write.Models[i].Document != nil && write.Models[i].Blob == nil {
-			write.Models[i].ReuseDocument = true
-		}
-	}
-	for i := range write.Patterns {
-		if write.Patterns[i].ID > 0 && write.Patterns[i].Document != nil && write.Patterns[i].Blob == nil {
-			write.Patterns[i].ReuseDocument = true
-		}
-	}
-	if err := domain.ValidateStarGiftCollectibleWrite(write); err != nil {
-		return domain.StarGiftCollectibleRevision{}, err
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	active, ok := s.collectibles[write.GiftID]
-	if !ok {
-		return domain.StarGiftCollectibleRevision{}, domain.ErrStarGiftCollectibleInvalid
-	}
-	issuedByKind := map[string]map[int64]int{
-		string(domain.StarGiftCollectibleModel):    {},
-		string(domain.StarGiftCollectiblePattern):  {},
-		string(domain.StarGiftCollectibleBackdrop): {},
-	}
-	for _, unique := range s.uniqueByID {
-		if unique.CollectibleRevisionID != active.ID {
-			continue
-		}
-		issuedByKind[string(domain.StarGiftCollectibleModel)][unique.Model.ID]++
-		issuedByKind[string(domain.StarGiftCollectiblePattern)][unique.Pattern.ID]++
-		issuedByKind[string(domain.StarGiftCollectibleBackdrop)][unique.Backdrop.ID]++
-	}
-	sync := func(kind domain.StarGiftCollectibleAttributeKind, current []domain.StarGiftCollectibleAttribute, incoming []domain.StarGiftCollectibleAttribute) ([]domain.StarGiftCollectibleAttribute, error) {
-		kept := make(map[int64]struct{}, len(incoming))
-		out := make([]domain.StarGiftCollectibleAttribute, 0, len(incoming))
-		byID := make(map[int64]domain.StarGiftCollectibleAttribute, len(current))
-		for _, attribute := range current {
-			byID[attribute.ID] = attribute
-		}
-		for _, attribute := range incoming {
-			if attribute.ID > 0 {
-				existing, ok := byID[attribute.ID]
-				if !ok {
-					return nil, fmt.Errorf("%w: %s attribute %d does not belong to revision %d",
-						domain.ErrStarGiftCollectibleInvalid, kind, attribute.ID, active.ID)
-				}
-				kept[attribute.ID] = struct{}{}
-				if attribute.Name == "" {
-					attribute.Name = existing.Name
-				}
-				attribute.CollectibleRevisionID = active.ID
-				out = append(out, cloneCollectibleAttribute(attribute))
-				continue
-			}
-			clone := cloneCollectibleAttribute(attribute)
-			clone.ID = 0
-			clone.CollectibleRevisionID = 0
-			out = append(out, clone)
-		}
-		for _, attribute := range current {
-			if _, keep := kept[attribute.ID]; keep {
-				continue
-			}
-			if issuedByKind[string(kind)][attribute.ID] > 0 {
-				return nil, fmt.Errorf("%w: %s attribute %d is referenced by issued gifts",
-					domain.ErrStarGiftCollectibleAttributeInUse, kind, attribute.ID)
-			}
-		}
-		// Перенумерация: обновлённые строки сохраняют id, новые получают их
-		// в порядке добавления (после обновлённых).
-		result := make([]domain.StarGiftCollectibleAttribute, 0, len(out))
-		for _, attribute := range out {
-			if attribute.ID > 0 {
-				result = append(result, attribute)
-			}
-		}
-		for _, attribute := range out {
-			if attribute.ID == 0 {
-				s.nextAttributeID++
-				attribute.ID = s.nextAttributeID
-				attribute.CollectibleRevisionID = active.ID
-				result = append(result, attribute)
-			}
-		}
-		return result, nil
-	}
-	models, err := sync(domain.StarGiftCollectibleModel, active.Models, write.Models)
-	if err != nil {
-		return domain.StarGiftCollectibleRevision{}, err
-	}
-	patterns, err := sync(domain.StarGiftCollectiblePattern, active.Patterns, write.Patterns)
-	if err != nil {
-		return domain.StarGiftCollectibleRevision{}, err
-	}
-	backdrops, err := sync(domain.StarGiftCollectibleBackdrop, active.Backdrops, write.Backdrops)
-	if err != nil {
-		return domain.StarGiftCollectibleRevision{}, err
-	}
-	updated := active
-	updated.UpgradeStars = write.UpgradeStars
-	updated.SupplyTotal = write.SupplyTotal
-	updated.SlugPrefix = write.SlugPrefix
-	updated.CreatedBy = write.Actor
-	updated.Models, updated.Patterns, updated.Backdrops = models, patterns, backdrops
-	s.collectibles[write.GiftID] = updated
-	gift := s.catalog[write.GiftID]
-	gift.UpgradeStars = updated.UpgradeStars
-	gift.UpgradeTotal = updated.SupplyTotal
-	gift.UpgradeIssued = updated.Issued
-	s.catalog[write.GiftID] = gift
-	return cloneCollectibleRevision(updated), nil
-}
-
-// CollectibleRevisionFull (раунд 32) ищет ревизию по id среди всех подарков —
-// источник копирования атрибутов в памяти.
-func (s *StarGiftStore) CollectibleRevisionFull(_ context.Context, revisionID int64) (domain.StarGiftCollectibleRevision, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	for _, revision := range s.collectibles {
-		if revision.ID == revisionID {
-			return cloneCollectibleRevision(revision), nil
-		}
-	}
-	return domain.StarGiftCollectibleRevision{}, domain.ErrStarGiftCollectibleInvalid
-}
-
-// SetCollectibleSupplyTotal (раунд 34) правит лимит возможных улучшенных
-// подарков опубликованной ревизии: повышение разрешено, значение ниже уже
-// выпущенного количества отклоняется (зеркало postgres-адаптера и
-// star_gift_collectible_supply_check).
-func (s *StarGiftStore) SetCollectibleSupplyTotal(_ context.Context, write domain.StarGiftCollectibleSupplyWrite) (domain.StarGiftCollectibleRevision, error) {
-	if write.GiftID <= 0 || write.SupplyTotal <= 0 {
-		return domain.StarGiftCollectibleRevision{}, domain.ErrStarGiftCollectibleInvalid
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if _, ok := s.catalog[write.GiftID]; !ok {
-		return domain.StarGiftCollectibleRevision{}, domain.ErrStarGiftNotFound
-	}
-	revision, ok := s.collectibles[write.GiftID]
-	if !ok || !revision.Published {
-		return domain.StarGiftCollectibleRevision{}, domain.ErrStarGiftCollectibleInvalid
-	}
-	if write.SupplyTotal < revision.Issued || write.SupplyTotal < revision.SupplyTotal {
-		return domain.StarGiftCollectibleRevision{}, domain.ErrStarGiftCollectibleInvalid
-	}
-	revision.SupplyTotal = write.SupplyTotal
-	s.collectibles[write.GiftID] = revision
-	gift := s.catalog[write.GiftID]
-	gift.UpgradeTotal = revision.SupplyTotal
-	s.catalog[write.GiftID] = gift
-	return cloneCollectibleRevision(revision), nil
-}
-
-// CollectibleRevisionSummaries (раунд 34/36) перечисляет ревизии коллекции
-// в лёгкой проекции. В памяти хранится одна (активная) ревизия на подарок;
-// непустой slug отбирает ревизии по slug_prefix И gift_id; если обе выборки
-// пусты — ревизии всех подарков (scope "all"), как в postgres-адаптере.
-func (s *StarGiftStore) CollectibleRevisionSummaries(_ context.Context, giftID int64, slug string) ([]domain.StarGiftCollectibleRevisionSummary, string, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	out := make([]domain.StarGiftCollectibleRevisionSummary, 0, 1)
-	trimmed := strings.ToLower(strings.TrimSpace(slug))
-	if trimmed != "" {
-		// Slug-режим: одна коллекция может быть опубликована разными подарками;
-		// ревизии самого подарка включаются даже при сменившемся slug.
-		for _, revision := range s.collectibles {
-			if revision.SlugPrefix != trimmed && revision.GiftID != giftID {
-				continue
-			}
-			out = append(out, collectibleRevisionSummary(revision))
-		}
-		sort.Slice(out, func(i, j int) bool {
-			if out[i].Revision != out[j].Revision {
-				return out[i].Revision > out[j].Revision
-			}
-			return out[i].RevisionID > out[j].RevisionID
-		})
-		if len(out) > 0 {
-			return out, "slug", nil
-		}
-	} else {
-		revision, ok := s.collectibles[giftID]
-		if ok {
-			out = append(out, collectibleRevisionSummary(revision))
-			return out, "gift", nil
-		}
-	}
-	// Fallback: последние ревизии всех подарков (scope "all").
-	for _, revision := range s.collectibles {
-		out = append(out, collectibleRevisionSummary(revision))
-	}
-	sort.Slice(out, func(i, j int) bool {
-		if out[i].Revision != out[j].Revision {
-			return out[i].Revision > out[j].Revision
-		}
-		return out[i].RevisionID > out[j].RevisionID
-	})
-	return out, "all", nil
-}
-
-func collectibleRevisionSummary(revision domain.StarGiftCollectibleRevision) domain.StarGiftCollectibleRevisionSummary {
-	summary := domain.StarGiftCollectibleRevisionSummary{
-		RevisionID: revision.ID, GiftID: revision.GiftID, Revision: revision.Revision,
-		SlugPrefix:   revision.SlugPrefix,
-		UpgradeStars: revision.UpgradeStars, SupplyTotal: revision.SupplyTotal, Issued: revision.Issued,
-		ModelCount: len(revision.Models), PatternCount: len(revision.Patterns), BackdropCount: len(revision.Backdrops),
-		CreatedBy: revision.CreatedBy, CreatedAt: revision.CreatedAt,
-	}
-	if revision.Published {
-		summary.Status = "published"
-	} else {
-		summary.Status = "draft"
-	}
-	return summary
 }
 
 func (s *StarGiftStore) ActiveCollectibleProjection(_ context.Context, giftID int64, samplePerKind int) (domain.StarGiftCollectibleRevision, bool, error) {
@@ -1308,54 +1053,14 @@ func (s *StarGiftStore) savedStarGiftMatchesRef(g domain.SavedStarGift, ref doma
 
 // GetWhitelistInfo mirrors the postgres whitelist projection: gifts without a
 // whitelist record are allowed, not hidden and not numbered for everyone.
-// Раунд 31: записи, созданные вместе с ревизией из админки, проецируются так же,
-// как в postgres (allowed/hidden/disallow-флаги прогейтятся по apply_whitelist,
-// numbered действует независимо).
-func (s *StarGiftStore) GetWhitelistInfo(_ context.Context, giftID, userID int64) (domain.GiftWhitelistInfo, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.whitelistInfoLocked(giftID, userID), nil
+func (s *StarGiftStore) GetWhitelistInfo(_ context.Context, giftID, _ int64) (domain.GiftWhitelistInfo, error) {
+	return domain.NoWhitelist, nil
 }
 
-// GetWhitelistInfos — батч-вариант проекции вайтлистов для страницы подарков.
-func (s *StarGiftStore) GetWhitelistInfos(_ context.Context, giftIDs []int64, userID int64) (map[int64]domain.GiftWhitelistInfo, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	out := make(map[int64]domain.GiftWhitelistInfo, len(giftIDs))
-	for _, giftID := range giftIDs {
-		if _, ok := s.whitelists[giftID]; ok {
-			out[giftID] = s.whitelistInfoLocked(giftID, userID)
-		}
-	}
-	return out, nil
-}
-
-// whitelistInfoLocked вычисляет спроецированное состояние строки вайтлиста для
-// зрителя. Вызывается под s.mu; отсутствие строки — domain.NoWhitelist.
-func (s *StarGiftStore) whitelistInfoLocked(giftID, userID int64) domain.GiftWhitelistInfo {
-	row, ok := s.whitelists[giftID]
-	if !ok {
-		return domain.NoWhitelist
-	}
-	allowed := !row.Apply
-	if row.Apply {
-		id := strconv.FormatInt(userID, 10)
-		for _, buyer := range row.AllowedBuyers {
-			if buyer == id {
-				allowed = true
-				break
-			}
-		}
-	}
-	return domain.GiftWhitelistInfo{
-		Allowed:          allowed,
-		Hidden:           row.Apply && row.Hidden,
-		Numbered:         row.Numbered,
-		HasWhitelist:     true,
-		DisallowUpgrades: row.Apply && row.DisallowUpgrades,
-		DisallowResell:   row.Apply && row.DisallowResell,
-		ApplyWhitelist:   row.Apply,
-	}
+// GetWhitelistInfos — батч-вариант memory-адаптера: вайтлисты в памяти не
+// моделируются, все подарки трактуются как domain.NoWhitelist.
+func (s *StarGiftStore) GetWhitelistInfos(_ context.Context, _ []int64, _ int64) (map[int64]domain.GiftWhitelistInfo, error) {
+	return map[int64]domain.GiftWhitelistInfo{}, nil
 }
 
 // BurnAuctionGifts is a no-op in the in-memory adapter; auction supply is

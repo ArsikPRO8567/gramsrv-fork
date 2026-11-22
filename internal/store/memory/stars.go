@@ -197,6 +197,73 @@ func (s *StarsStore) appendTxnFlags(st *starsState, userID, amount int64, reason
 		GiftID:       flags.GiftID,
 		GiftIsUnique: flags.GiftIsUnique,
 	}
-	txn.TransactionID = domain.NewStarsTransactionID(false)
+	// 共享公开 ID（问题 C）：配对转账两侧行写入同一个 stars_… 标识。
+	if flags.TransactionID != "" {
+		txn.TransactionID = flags.TransactionID
+	} else {
+		txn.TransactionID = domain.NewStarsTransactionID(false)
+	}
 	st.txns = append(st.txns, txn)
+}
+
+// TransferToUser 在单个互斥锁段内执行账户对账户的 Stars 转账（与 postgres 版
+// 语义一致）：借记发送方、贷记接收方，两条流水共享同一个公开交易 ID。余额
+// 不足返回 domain.ErrStarsInsufficient。
+func (s *StarsStore) TransferToUser(_ context.Context, req domain.StarsPeerTransferRequest) (domain.StarsPeerTransferResult, error) {
+	if req.SenderUserID <= 0 || req.RecipientUserID <= 0 || req.Amount <= 0 || req.Reason == "" || req.Date <= 0 ||
+		req.SenderUserID == req.RecipientUserID {
+		return domain.StarsPeerTransferResult{}, domain.ErrStarsInvalidAmount
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	sender := s.states[req.SenderUserID]
+	if sender == nil || sender.balance < req.Amount {
+		return domain.StarsPeerTransferResult{}, domain.ErrStarsInsufficient
+	}
+	recipient := s.states[req.RecipientUserID]
+	if recipient == nil {
+		recipient = &starsState{}
+		s.states[req.RecipientUserID] = recipient
+	}
+	sender.balance -= req.Amount
+	recipient.balance += req.Amount
+	shared := domain.NewStarsTransactionID(false)
+	s.appendTxnFlags(sender, req.SenderUserID, -req.Amount, req.Reason,
+		domain.Peer{Type: domain.PeerTypeUser, ID: req.RecipientUserID}, req.Date, "", "",
+		domain.StarsLedgerFlags{TransactionID: shared})
+	s.appendTxnFlags(recipient, req.RecipientUserID, req.Amount, req.Reason,
+		domain.Peer{Type: domain.PeerTypeUser, ID: req.SenderUserID}, req.Date, "", "",
+		domain.StarsLedgerFlags{TransactionID: shared})
+	return domain.StarsPeerTransferResult{TransactionID: shared,
+		SenderBalance: sender.balance, RecipientBalance: recipient.balance}, nil
+}
+
+// RefundPeerTransfer 原路退回一笔账户对账户转账（两侧行携带 refund 标志，
+// 共享一个新的公开 ID）。语义与 postgres 版一致。
+func (s *StarsStore) RefundPeerTransfer(_ context.Context, req domain.StarsPeerTransferRequest) (domain.StarsPeerTransferResult, error) {
+	if req.SenderUserID <= 0 || req.RecipientUserID <= 0 || req.Amount <= 0 || req.Reason == "" || req.Date <= 0 ||
+		req.SenderUserID == req.RecipientUserID {
+		return domain.StarsPeerTransferResult{}, domain.ErrStarsInvalidAmount
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	recipient := s.states[req.RecipientUserID]
+	if recipient == nil || recipient.balance < req.Amount {
+		return domain.StarsPeerTransferResult{}, domain.ErrStarsInsufficient
+	}
+	sender := s.states[req.SenderUserID]
+	if sender == nil {
+		sender = &starsState{}
+		s.states[req.SenderUserID] = sender
+	}
+	recipient.balance -= req.Amount
+	sender.balance += req.Amount
+	shared := domain.NewStarsTransactionID(false)
+	flags := domain.StarsLedgerFlags{TransactionID: shared, Refunded: true}
+	s.appendTxnFlags(recipient, req.RecipientUserID, -req.Amount, req.Reason,
+		domain.Peer{Type: domain.PeerTypeUser, ID: req.SenderUserID}, req.Date, "", "", flags)
+	s.appendTxnFlags(sender, req.SenderUserID, req.Amount, req.Reason,
+		domain.Peer{Type: domain.PeerTypeUser, ID: req.RecipientUserID}, req.Date, "", "", flags)
+	return domain.StarsPeerTransferResult{TransactionID: shared,
+		SenderBalance: sender.balance, RecipientBalance: recipient.balance}, nil
 }

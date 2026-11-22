@@ -719,7 +719,7 @@ WHERE c.gift_id IN (SELECT DISTINCT gift_id FROM unique_star_gifts
 		return fmt.Errorf("refresh deleted account resale projection: %w", err)
 	}
 	if _, err := tx.Exec(ctx, `UPDATE unique_star_gifts
-SET burned = true, owner_name = '', resale_ton_only = false, updated_at = $2
+SET burned = true, owner_name = '', updated_at = $2
 WHERE owner_peer_type = 'user' AND owner_peer_id = $1`, userID, now); err != nil {
 		return fmt.Errorf("burn deleted account unique gifts: %w", err)
 	}

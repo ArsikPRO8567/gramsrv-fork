@@ -19,40 +19,20 @@ type StarGiftStore interface {
 	// CreateCatalogBundle atomically switches the catalog revision and optional complete
 	// collectible revision. It is the only write path used by official full imports.
 	CreateCatalogBundle(ctx context.Context, write domain.StarGiftCatalogBundleWrite) (domain.StarGiftCatalogBundleResult, error)
-	// UpdateCatalogSettings создаёт новую ревизию, копируя анимацию текущей
-	// активной, и обновляет все административные параметры (раунд 32):
-	// цену/название/сортировку, настройки выпуска, аукциона и вайтлист.
-	UpdateCatalogSettings(ctx context.Context, write domain.StarGiftCatalogSettingsWrite) (domain.StarGiftCatalogEntry, error)
 	SetCatalogEnabled(ctx context.Context, giftID int64, enabled bool) (bool, error)
 	SetCatalogSortOrder(ctx context.Context, giftID int64, sortOrder int) (bool, error)
 	// AnimationJSON 返回当前版本的规范化 Lottie JSON，供管理后台安全预览。
 	AnimationJSON(ctx context.Context, giftID int64) ([]byte, bool, error)
+	// AnimationPayload 返回动画 payload 与源格式：Lottie 为 JSON；媒体格式
+	// (.webp/.webm/.png) payload 为空、objectKey 指向原始字节块。
+	AnimationPayload(ctx context.Context, giftID int64) (payload []byte, format domain.StarGiftAnimationFormat, objectKey string, found bool, err error)
 	// PublishCollectibleRevision validates and atomically publishes a new immutable attribute pool.
 	PublishCollectibleRevision(ctx context.Context, write domain.StarGiftCollectibleWrite) (domain.StarGiftCollectibleRevision, error)
-	// SyncActiveCollectibleRevision (раунд 37) правит СУЩЕСТВУЮЩУЮ опубликованную
-	// ревизию того же подарка «на месте»: строки атрибутов с ID обновляются
-	// (id сохраняются — выпущенные подарки продолжают ссылаться на них), без
-	// ID — добавляются, отсутствующие в форме — снимаются (на задействованные
-	// выпущенными подарками — отказ). Основные поля ревизии обновляются в той
-	// же строке; новая ревизия не создаётся.
-	SyncActiveCollectibleRevision(ctx context.Context, write domain.StarGiftCollectibleWrite) (domain.StarGiftCollectibleRevision, error)
 	ActiveCollectibleRevision(ctx context.Context, giftID int64) (domain.StarGiftCollectibleRevision, bool, error)
-	// SetCollectibleSupplyTotal (раунд 34) правит лимит возможных улучшенных
-	// подарков опубликованной ревизии коллекции: supply_total можно повысить
-	// (supply каталога увеличен), но не ниже уже выпущенного количества.
-	SetCollectibleSupplyTotal(ctx context.Context, write domain.StarGiftCollectibleSupplyWrite) (domain.StarGiftCollectibleRevision, error)
-	// CollectibleRevisionSummaries (раунд 34/36) перечисляет ревизии коллекции
-	// для выбора источника копирования атрибутов в админке: непустой slug —
-	// ревизии по slug_prefix И gift_id; если обе выборки пусты — последние
-	// ревизии всех коллекций. Scope: "slug"|"gift"|"all".
-	CollectibleRevisionSummaries(ctx context.Context, giftID int64, slug string) ([]domain.StarGiftCollectibleRevisionSummary, string, error)
 	// ActiveCollectibleProjection omits heavyweight animation bodies from read-only client/admin
 	// projections. samplePerKind=0 returns the complete attribute metadata; a positive value
 	// returns at most that many randomly selected ordinary-upgrade attributes per kind.
 	ActiveCollectibleProjection(ctx context.Context, giftID int64, samplePerKind int) (domain.StarGiftCollectibleRevision, bool, error)
-	// CollectibleRevisionFull (раунд 32) читает любую ревизию коллекции по id
-	// с полными метаданными анимаций — источник копирования атрибутов.
-	CollectibleRevisionFull(ctx context.Context, revisionID int64) (domain.StarGiftCollectibleRevision, error)
 	CollectibleAvailability(ctx context.Context, giftIDs []int64) (map[int64]domain.StarGiftCollectibleAvailability, error)
 	CollectibleAnimationJSON(ctx context.Context, giftID int64, kind domain.StarGiftCollectibleAttributeKind, attributeID int64) ([]byte, bool, error)
 	UniqueBySlug(ctx context.Context, slug string) (domain.UniqueStarGift, bool, error)
@@ -161,9 +141,4 @@ type StarGiftLifecycleStore interface {
 	// SweepStarGiftLifecycle advances time-driven offer/auction aggregates and
 	// drains their durable notification/delivery outboxes in bounded batches.
 	SweepStarGiftLifecycle(ctx context.Context, now, limit int) error
-	// SetStarGiftAuctionSettings применяет административные настройки рабочей
-	// строки star_gift_auctions (раунд 32): длительности раундов, режим
-	// повышения ставки, продления, минимум, границы и статус. Отсутствующая
-	// строка создаётся из активной ревизии каталога.
-	SetStarGiftAuctionSettings(ctx context.Context, write domain.StarGiftAuctionRuntimeWrite) (domain.StarGiftAuction, error)
 }

@@ -131,13 +131,7 @@ type SavedStarGift struct {
 	PrepaidUpgradeStars int64  // 送礼人随礼物预付的唯一礼物升级额
 	PrepaidUpgradeHash  string // 第三方单独代付升级的一次性 entitlement
 	GiftNum             int    // auction-acquired release number for regular gifts
-	// PaidStars — фактически уплаченная цена экземпляра: выигрышная ставка
-	// аукциона (раунд 31). 0 — обычное приобретение; проекция профиля тогда
-	// показывает цену ревизии каталога. Для аукционных экземпляров карточка
-	// профиля показывает именно ставку (та же цена, что в сервисном
-	// сообщении победителя), а не фиксированную цену каталога.
-	PaidStars int64
-	Message   string // 附言（可选）
+	Message             string // 附言（可选）
 	// MessageEntities — entity-разметка附言 (премиум-эмодзи и стиль); хранится
 	// в peer_star_gifts.message_entities, отдаётся в savedStarGift.message.
 	MessageEntities          []MessageEntity
@@ -232,23 +226,23 @@ type StarGiftCollectibleAttribute struct {
 	SortOrder             int
 	Animation             *StarGiftAnimation
 	Blob                  *FileBlob
-	// ReuseDocument (раунд 32) — атрибут, скопированный из другой ревизии:
-	// документ и blob УЖЕ сохранены (контент не перезаливается), новая строка
-	// атрибута ссылается на существующий document_id. Animation несёт метаданные
-	// из исходной ревизии (JSON/SHA-256/габариты) без TGS-байтов.
-	ReuseDocument bool
 }
 
 // StarGiftCollectibleRevision 是某普通礼物的一份不可变、可发布属性池。
 type StarGiftCollectibleRevision struct {
-	ID                   int64
-	GiftID               int64
-	Revision             int
-	UpgradeStars         int64
-	SupplyTotal          int
-	Issued               int
-	SlugPrefix           string
-	Published            bool
+	ID           int64
+	GiftID       int64
+	Revision     int
+	UpgradeStars int64
+	SupplyTotal  int
+	Issued       int
+	SlugPrefix   string
+	Published    bool
+	// UpgradeVariants — комбинаторное произведение количеств атрибутов
+	// (модели × узоры × фоны). Записывается при публикации ревизии и
+	// зеркалируется в активную ревизию каталога: клиенты показывают его как
+	// количество возможных вариантов NFT (starGift.upgrade_variants).
+	UpgradeVariants      int
 	Models               []StarGiftCollectibleAttribute
 	Patterns             []StarGiftCollectibleAttribute
 	Backdrops            []StarGiftCollectibleAttribute
@@ -272,39 +266,6 @@ type StarGiftCollectibleWrite struct {
 	CommandID            string
 	OfficialGiftID       int64
 	SourceManifestSHA256 []byte
-}
-
-// StarGiftCollectibleSupplyWrite — административное изменение лимита
-// возможных улучшенных подарков опубликованной ревизии коллекции (раунд 34).
-// Нужен, когда supply каталога увеличен: published-ревизия хранит свой
-// supply_total, и апгрейд блокируется при issued >= supply_total. Лимит можно
-// только повышать (или не менять); ниже уже выпущенного количества — отказ.
-type StarGiftCollectibleSupplyWrite struct {
-	GiftID      int64
-	SupplyTotal int
-	Actor       string
-	CommandID   string
-}
-
-// StarGiftCollectibleRevisionSummary — лёгкая строка списка ревизий коллекции
-// (раунд 34): выбор источника копирования атрибутов в админке без загрузки
-// полных метаданных всех ревизий.
-type StarGiftCollectibleRevisionSummary struct {
-	RevisionID int64
-	GiftID     int64
-	Revision   int
-	// SlugPrefix — slug коллекции ревизии. Список источников копирования
-	// строится по slug (одна коллекция может публиковаться разными подарками).
-	SlugPrefix    string
-	Status        string
-	UpgradeStars  int64
-	SupplyTotal   int
-	Issued        int
-	ModelCount    int
-	PatternCount  int
-	BackdropCount int
-	CreatedBy     string
-	CreatedAt     time.Time
 }
 
 // UniqueStarGift 是一份已经发行的唯一礼物。属性、编号与 slug 一经创建永久不变。
@@ -514,9 +475,12 @@ type StarGiftUpgradePreview struct {
 	SupplyTotal  int
 	Issued       int
 	SlugPrefix   string
-	Models       []StarGiftCollectibleAttribute
-	Patterns     []StarGiftCollectibleAttribute
-	Backdrops    []StarGiftCollectibleAttribute
+	// UpgradeVariants — количество возможных вариантов NFT (произведение
+	// количеств атрибутов), см. StarGiftCollectibleRevision.UpgradeVariants.
+	UpgradeVariants int
+	Models          []StarGiftCollectibleAttribute
+	Patterns        []StarGiftCollectibleAttribute
+	Backdrops       []StarGiftCollectibleAttribute
 }
 
 // StarGiftCollectibleAvailability is the lightweight current-pool projection used
@@ -1019,15 +983,66 @@ type StarGiftCollectionPatch struct {
 	Order     []int64
 }
 
-// StarGiftAnimationFormat 是后台导入源格式。服务端最终总是存储规范化 TGS。
+// CollectibleUpgradeVariants — комбинаторное произведение количеств атрибутов
+// ревизии (модели × узоры × фоны): сколько разных уникальных NFT теоретически
+// можно собрать из пула. Пустой вид атрибутов обнуляет результат.
+func CollectibleUpgradeVariants(models, patterns, backdrops int) int {
+	if models <= 0 || patterns <= 0 || backdrops <= 0 {
+		return 0
+	}
+	return models * patterns * backdrops
+}
+
+// StarGiftAnimationFormat 是后台导入源格式。Lottie 源在服务端规范化为 TGS；
+// 官方客户端支持的媒体格式 (.webp/.webm/.png) 按原始字节存储并原样下发。
 type StarGiftAnimationFormat string
 
 const (
 	StarGiftAnimationTGS    StarGiftAnimationFormat = "tgs"
 	StarGiftAnimationLottie StarGiftAnimationFormat = "lottie"
+	// Раунд 37: официальные клиенты рендерят анимации подарков также из
+	// .webp (статичные/анимированные стикеры), .webm (видео-стикеры) и
+	// .png (статичные карточки). Файл сохраняется как есть — с корректным
+	// mime и атрибутами документа клиент получает исходную анимацию.
+	StarGiftAnimationWEBP StarGiftAnimationFormat = "webp"
+	StarGiftAnimationWEBM StarGiftAnimationFormat = "webm"
+	StarGiftAnimationPNG  StarGiftAnimationFormat = "png"
 )
 
-// StarGiftAnimation 是已规范化并验证的动画。JSON 用于后台播放，TGS 用于客户端。
+// IsLottieFamily — источник проходит Lottie-нормализацию (JSON + gzip TGS).
+func (f StarGiftAnimationFormat) IsLottieFamily() bool {
+	return f == StarGiftAnimationTGS || f == StarGiftAnimationLottie
+}
+
+// MimeType — mime-тип документа, отдаваемого клиенту для этого формата.
+func (f StarGiftAnimationFormat) MimeType() string {
+	switch f {
+	case StarGiftAnimationTGS, StarGiftAnimationLottie:
+		return "application/x-tgsticker"
+	case StarGiftAnimationWEBP:
+		return "image/webp"
+	case StarGiftAnimationWEBM:
+		return "video/webm"
+	case StarGiftAnimationPNG:
+		return "image/png"
+	default:
+		return ""
+	}
+}
+
+// Valid reports whether the format is one of the accepted upload formats.
+func (f StarGiftAnimationFormat) Valid() bool {
+	switch f {
+	case StarGiftAnimationTGS, StarGiftAnimationLottie, StarGiftAnimationWEBP,
+		StarGiftAnimationWEBM, StarGiftAnimationPNG:
+		return true
+	default:
+		return false
+	}
+}
+
+// StarGiftAnimation 是已规范化并验证的动画。Lottie-источники несут JSON（后台播放）
+// 和 TGS（客户端）；медиа-форматы несут исходные байты в TGS, JSON пуст.
 type StarGiftAnimation struct {
 	SourceName   string
 	SourceFormat StarGiftAnimationFormat
@@ -1078,9 +1093,6 @@ type StarGiftCatalogWrite struct {
 	AuctionStartDate     int
 	UpgradeVariants      int
 	Background           *StarGiftBackground
-	// Whitelist — не nil: в той же транзакции, что и ревизия, апсертится
-	// строка gift_whitelists (настройки вайтлиста из админки, раунд 31).
-	Whitelist *GiftWhitelistWrite
 }
 
 // StarGiftCatalogBundleWrite atomically publishes one catalog revision and its optional
@@ -1088,76 +1100,6 @@ type StarGiftCatalogWrite struct {
 type StarGiftCatalogBundleWrite struct {
 	Catalog     StarGiftCatalogWrite
 	Collectible *StarGiftCollectibleWrite
-}
-
-// StarGiftCatalogSettingsWrite — административное редактирование всех параметров
-// подарка без загрузки новой анимации (раунд 32). Метод создаёт НОВУЮ ревизию,
-// копируя анимационные столбцы (document/animation/source/geometry) из текущей
-// активной ревизии, и обновляет агрегат star_gift_catalog. Поля зеркалят
-// StarGiftCatalogWrite без анимации; Whitelist не-nil — апсерт gift_whitelists
-// в той же транзакции.
-type StarGiftCatalogSettingsWrite struct {
-	GiftID              int64
-	Title               string
-	Stars               int64
-	ConvertStars        int64
-	Enabled             bool
-	SortOrder           int
-	Limited             bool
-	SoldOut             bool
-	Birthday            bool
-	RequirePremium      bool
-	LimitedPerUser      bool
-	PeerColorAvailable  bool
-	Auction             bool
-	AvailabilityRemains int
-	AvailabilityTotal   int
-	ReleasedBy          Peer
-	PerUserTotal        int
-	LockedUntilDate     int
-	AuctionSlug         string
-	GiftsPerRound       int
-	AuctionStartDate    int
-	UpgradeVariants     int
-	Background          *StarGiftBackground
-	// Раунд 34: опциональная замена анимации при редактировании параметров.
-	// nil — оставить текущую анимацию (postgres-адаптер копирует её из
-	// активной ревизии); заданная — новые blob/document/анимационные столбцы
-	// (материализует app-сервис, как при первичном импорте).
-	Animation *StarGiftAnimation
-	Document  *Document
-	Blob      *FileBlob
-	Actor     string
-	CommandID string
-	Whitelist *GiftWhitelistWrite
-}
-
-// StarGiftAuctionRuntimeWrite — административные настройки РАБОЧЕЙ строки
-// star_gift_auctions (раунд 32). Длительности раундов, режим повышения ставки,
-// продления и минимальная ставка раньше правились только psql. Нил-поля
-// оставляют текущее значение; JSON-поля: пустая строка = не менять, "null" = NULL
-// (отключить), иначе валидный jsonb-объект. Статус пуст = не менять.
-type StarGiftAuctionRuntimeWrite struct {
-	GiftID             int64
-	RoundDuration      *int
-	RoundDurationsJSON string
-	RaiseMinBid        *bool
-	RoundExtendsJSON   string
-	MinBidAmount       *int64
-	StartDate          *int
-	EndDate            *int
-	// TotalRounds (раунд 35) — явное количество раундов аукциона; замещает
-	// значение, выведенное из supply/gifts_per_round при ленивом создании.
-	// nil = не менять.
-	TotalRounds *int
-	// GiftsLeft / LastGiftNum (раунд 36) — «остаток подарков на аукционе» и
-	// «последний выпущенный номер»: корректировка рабочего состояния при
-	// перезапуске аукциона. nil = не менять.
-	GiftsLeft   *int
-	LastGiftNum *int
-	Status      string
-	Actor       string
-	CommandID   string
 }
 
 type StarGiftCatalogBundleResult struct {
@@ -1263,6 +1205,9 @@ const (
 	MaxStarGiftTGSBytes int64 = 512 << 10
 	// MaxStarGiftLottieBytes 限制解压后的 Lottie JSON。
 	MaxStarGiftLottieBytes int64 = 4 << 20
+	// MaxStarGiftMediaBytes 限制 .webp/.webm/.png 礼物动画（官方视频贴纸
+	// 上限的宽松值：管理面上传通道自身另有 4MB 截断）。
+	MaxStarGiftMediaBytes int64 = 4 << 20
 	// MaxStarGiftAnimationFrameRate / Seconds 限制管理后台播放器和客户端动画时间轴。
 	MaxStarGiftAnimationFrameRate = 120
 	MaxStarGiftAnimationSeconds   = 30
@@ -1293,13 +1238,9 @@ var (
 	ErrStarGiftAlreadyUpgraded        = errors.New("stargift: already upgraded")
 	ErrStarGiftCollectibleSoldOut     = errors.New("stargift: collectible supply exhausted")
 	ErrStarGiftCollectibleInvalid     = errors.New("stargift: invalid collectible definition")
-	// ErrStarGiftCollectibleAttributeInUse — попытка снять строку атрибута
-	// опубликованной ревизии, на которую ссылаются выпущенные уникальные
-	// подарки (unique_star_gifts.model/pattern/backdrop_attribute_id).
-	ErrStarGiftCollectibleAttributeInUse = errors.New("stargift: collectible attribute is referenced by issued gifts")
-	ErrStarGiftCollectionNotFound        = errors.New("stargift: collection not found")
-	ErrStarGiftCollectionsFull           = errors.New("stargift: collections full")
-	ErrStarGiftUnavailable               = errors.New("stargift: unavailable")
+	ErrStarGiftCollectionNotFound     = errors.New("stargift: collection not found")
+	ErrStarGiftCollectionsFull        = errors.New("stargift: collections full")
+	ErrStarGiftUnavailable            = errors.New("stargift: unavailable")
 	// ErrStarGiftUserLimit — исчерпан лимит starGift.limited_per_user:
 	// покупатель уже отправил per_user_total таких подарков. Отдаётся
 	// клиентам как STARGIFT_USER_USAGE_LIMITED (400), см. документацию
@@ -1349,26 +1290,6 @@ type GiftWhitelistInfo struct {
 // NoWhitelist — значение для подарков без строки в gift_whitelists: ограничения
 // не действуют, нумерация выключена.
 var NoWhitelist = GiftWhitelistInfo{Allowed: true}
-
-// GiftWhitelistWrite — административная запись gift_whitelists, создаваемая
-// вместе с подарком (импорт из снимка / загрузка своего подарка через админку,
-// раунд 31). Раньше таблица управлялась только вручную (psql); теперь она
-// заполняется в той же транзакции, что и ревизия каталога.
-//
-//	AllowedBuyers    — jsonb-массив текстовых user id (allowed_buyers);
-//	Hidden           — скрыть подарок от не-вайтлистных (gift_hidden);
-//	Numbered         — выдавать пронумерованные экземпляры (numbered);
-//	DisallowUpgrades — улучшать могут только вайтлистные (disallow_upgrades);
-//	DisallowResell   — офферы/покупки на маркете только вайтлистные (disallow_resell);
-//	Apply            — мастер-выключатель ограничений (apply_whitelist).
-type GiftWhitelistWrite struct {
-	AllowedBuyers    []string
-	Hidden           bool
-	Numbered         bool
-	DisallowUpgrades bool
-	DisallowResell   bool
-	Apply            bool
-}
 
 // StarGiftPriceLimits — серверные лимиты цены листинга и офферов на маркете
 // (раунд 20). Звёзды — целые; TON — нанотон. Граница 0 не проверяется.
@@ -1529,20 +1450,6 @@ func validateStarGiftAttributes(attributes []StarGiftCollectibleAttribute, kind 
 		seen[key] = struct{}{}
 		switch kind {
 		case StarGiftCollectibleModel, StarGiftCollectiblePattern:
-			if attribute.ReuseDocument {
-				// Раунд 33: скопированный атрибут ссылается на уже
-				// сохранённые документ и blob (перезаливки контента нет).
-				// Метаданные анимации копируются из исходной ревизии:
-				// JSON и SHA-256 обязательны, TGS-байты отсутствуют.
-				if attribute.Document == nil || attribute.Document.ID <= 0 ||
-					attribute.Document.MimeType != "application/x-tgsticker" ||
-					!validStarGiftCollectibleDocument(*attribute.Document, kind) ||
-					attribute.Animation == nil || len(attribute.Animation.JSON) == 0 ||
-					len(attribute.Animation.SHA256) != 32 || attribute.Blob != nil {
-					return ErrStarGiftCollectibleInvalid
-				}
-				break
-			}
 			if attribute.Animation == nil || len(attribute.Animation.JSON) == 0 ||
 				len(attribute.Animation.TGS) == 0 || len(attribute.Animation.SHA256) != 32 {
 				return ErrStarGiftCollectibleInvalid

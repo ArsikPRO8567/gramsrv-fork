@@ -128,7 +128,9 @@ func (r *Router) sendOutgoing(ctx context.Context, userID int64, peer domain.Pee
 	if r.deps.Messages == nil {
 		return nil, false, peerIDInvalidErr()
 	}
-	paidMessageStars, err := r.privateContactPaidStarsFor(ctx, userID, peer.ID, p.allowPaidStars, 1)
+	// 问题 B：付费消息门槛校验返回每条消息需支付的星数（0 = 免费）。扣费
+	// 在落库前原子执行（问题 C：借记行与收款方贷记行共享同一个公开交易 ID）。
+	paidPerMessage, err := r.ensurePrivateContactAllowed(ctx, userID, peer.ID, p.allowPaidStars, 1)
 	if err != nil {
 		return nil, false, err
 	}
@@ -158,6 +160,17 @@ func (r *Router) sendOutgoing(ctx context.Context, userID int64, peer domain.Pee
 	// outbox 的排除键定位的是发起 RPC 的物理连接；PFS temp key 绑定后
 	// AuthKeyIDFrom 是业务视角 perm key，不能用它代替连接实际 raw key。
 	authKeyID := rawAuthKeyIDForOrigin(ctx)
+	// 问题 B：付费消息在落库前原子扣费（借记发送方 + 贷记接收方，配对
+	// 交易 ID）。重放（res.Duplicate）与发送失败路径全额补偿退款。
+	var charge domain.StarsPeerTransferResult
+	var charged bool
+	if paidPerMessage > 0 {
+		result, chargeErr := r.chargePrivateMessage(ctx, userID, peer.ID, paidPerMessage)
+		if chargeErr != nil {
+			return nil, false, chargeErr
+		}
+		charge, charged = result, true
+	}
 	res, err := r.deps.Messages.SendPrivateText(ctx, userID, domain.SendPrivateTextRequest{
 		SenderUserID:           userID,
 		RecipientUserID:        peer.ID,
@@ -180,7 +193,6 @@ func (r *Router) sendOutgoing(ctx context.Context, userID int64, peer domain.Pee
 		ViaBotID:               p.viaBotID,
 		GroupedID:              p.groupedID,
 		Effect:                 p.effect,
-		PaidMessageStars:       paidMessageStars,
 	})
 	if err != nil {
 		fields := append(r.contextLogFields(ctx),
@@ -196,7 +208,15 @@ func (r *Router) sendOutgoing(ctx context.Context, userID int64, peer domain.Pee
 			zap.Int64("via_bot_id", p.viaBotID),
 		)
 		r.log.Warn("messages.sendMessage private store failed", fields...)
+		if charged {
+			r.refundPrivateMessage(ctx, userID, peer.ID, paidPerMessage)
+		}
 		return nil, false, messageSendErr(err)
+	}
+	if charged && res.Duplicate {
+		// 精确 random_id 重放：原请求已扣过费，本次预扣退款（避免重复扣费）。
+		r.refundPrivateMessage(ctx, userID, peer.ID, paidPerMessage)
+		charged = false
 	}
 	var users []tg.UserClass
 	var chats []tg.ChatClass
@@ -212,7 +232,12 @@ func (r *Router) sendOutgoing(ctx context.Context, userID int64, peer domain.Pee
 		r.maybeEnqueueWebPageResolve(userID, peer, res.SenderMessage.ID, res.SenderMessage.Media)
 		r.enqueueBotAPIPrivateMessageUpdateAsync(ctx, res)
 	}
-	return tgPrivateSendResultUpdates(res, p.randomID, true, users, chats), res.Duplicate, nil
+	updates := tgPrivateSendResultUpdates(res, p.randomID, true, users, chats)
+	if charged {
+		// 扣费成功后给发送方同步新余额（与付费 reaction 的 updateStarsBalance 一致）。
+		updates.Updates = append(updates.Updates, &tg.UpdateStarsBalance{Balance: &tg.StarsAmount{Amount: charge.SenderBalance}})
+	}
+	return updates, res.Duplicate, nil
 }
 
 // onMessagesUploadMedia 解析 InputMedia（上传或引用），返回可复用的 tg.MessageMedia。
@@ -532,11 +557,9 @@ func (r *Router) onMessagesSendMultiMedia(ctx context.Context, req *tg.MessagesS
 		if req.AllowPaidFloodskip {
 			return nil, paymentUnsupportedErr()
 		}
-		// Раунд 37: пакетная проверка до загрузки медиа — быстрый
-		// ALLOW_PAYMENT_REQUIRED на весь альбом. Списание выполняется в
-		// sendOutgoing/store для каждого элемента (цена за одно сообщение).
-		if _, gateErr := r.privateContactPaidStarsFor(ctx, userID, peer.ID, req.AllowPaidStars, absentCount); gateErr != nil {
-			return nil, gateErr
+		// 问题 B：相册批量发送在 sendOutgoing 内逐条扣费，这里只做门槛校验。
+		if _, err := r.ensurePrivateContactAllowed(ctx, userID, peer.ID, req.AllowPaidStars, absentCount); err != nil {
+			return nil, err
 		}
 	}
 	pendingMedia := make([]tg.InputMediaClass, 0, absentCount)

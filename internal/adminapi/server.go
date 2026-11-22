@@ -83,10 +83,8 @@ type Service interface {
 	PublishStarGiftCollectibles(ctx context.Context, req admin.PublishStarGiftCollectiblesRequest) (admin.CommandResult, error)
 	SetStarGiftEnabled(ctx context.Context, req admin.SetStarGiftEnabledRequest) (admin.CommandResult, error)
 	SetStarGiftSortOrder(ctx context.Context, req admin.SetStarGiftSortOrderRequest) (admin.CommandResult, error)
-	UpdateStarGiftSettings(ctx context.Context, req admin.UpdateStarGiftSettingsRequest) (admin.CommandResult, error)
-	SetStarGiftAuctionSettings(ctx context.Context, req admin.SetStarGiftAuctionSettingsRequest) (admin.CommandResult, error)
 	GiveGift(ctx context.Context, req admin.GiveGiftRequest) (admin.CommandResult, error)
-	StarGiftAnimation(ctx context.Context, giftID int64) ([]byte, bool, error)
+	StarGiftAnimation(ctx context.Context, giftID int64) ([]byte, string, bool, error)
 	EmojiAnimation(ctx context.Context, documentID int64) ([]byte, bool, error)
 	GifCatalog(ctx context.Context) ([]domain.GifCatalogEntry, error)
 	CreateGifCatalogEntry(ctx context.Context, req admin.CreateGifCatalogEntryRequest) (admin.CommandResult, error)
@@ -95,12 +93,6 @@ type Service interface {
 	DeleteGifCatalogEntry(ctx context.Context, req admin.DeleteGifCatalogEntryRequest) (admin.CommandResult, error)
 	GifCatalogDocumentPreview(ctx context.Context, documentID int64) ([]byte, string, bool, error)
 	StarGiftCollectibles(ctx context.Context, giftID int64) (domain.StarGiftUpgradePreview, bool, error)
-	StarGiftCollectibleRevision(ctx context.Context, revisionID int64) (domain.StarGiftCollectibleRevision, error)
-	// Раунд 34/36: список ревизий коллекции (выбор источника копирования;
-	// slug + gift_id, пустые выборки — все ревизии) и лимит возможных
-	// улучшенных подарков опубликованной ревизии.
-	StarGiftCollectibleRevisionSummaries(ctx context.Context, giftID int64, slug string) ([]domain.StarGiftCollectibleRevisionSummary, string, error)
-	SetStarGiftCollectibleSupply(ctx context.Context, req admin.SetStarGiftCollectibleSupplyRequest) (admin.CommandResult, error)
 	StarGiftCollectibleAnimation(ctx context.Context, giftID int64, kind domain.StarGiftCollectibleAttributeKind, attributeID int64) ([]byte, bool, error)
 	ModerationCases(ctx context.Context, filter domain.ModerationCaseFilter) ([]domain.ModerationCase, error)
 	ModerationCase(ctx context.Context, caseID int64) (domain.ModerationCaseDetail, bool, error)
@@ -261,8 +253,6 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("POST /v1/gifts/{id}/collectibles/publish", s.authenticated(s.handlePublishStarGiftCollectibles))
 	mux.HandleFunc("POST /v1/gifts/set-enabled", s.authenticated(s.handleSetStarGiftEnabled))
 	mux.HandleFunc("POST /v1/gifts/set-sort-order", s.authenticated(s.handleSetStarGiftSortOrder))
-	mux.HandleFunc("POST /v1/gifts/update-settings", s.authenticated(s.handleUpdateStarGiftSettings))
-	mux.HandleFunc("POST /v1/gifts/set-auction-settings", s.authenticated(s.handleSetStarGiftAuctionSettings))
 	mux.HandleFunc("POST /v1/gifts/give", s.authenticated(s.handleGiveGift))
 	mux.HandleFunc("GET /v1/gifts/{id}/animation", s.authenticated(s.handleStarGiftAnimation))
 	mux.HandleFunc("GET /v1/emoji/{id}/animation", s.authenticated(s.handleEmojiAnimation))
@@ -274,12 +264,6 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("POST /v1/gif-catalog/delete", s.authenticated(s.handleDeleteGifCatalogEntry))
 	mux.HandleFunc("GET /v1/gifts/{id}/collectibles", s.authenticated(s.handleStarGiftCollectibles))
 	mux.HandleFunc("GET /v1/gifts/{id}/collectibles/{kind}/{attribute_id}/animation", s.authenticated(s.handleStarGiftCollectibleAnimation))
-	// Раунд 33: любая ревизия коллекции по id — источник копирования атрибутов.
-	mux.HandleFunc("GET /v1/gifts/collectibles/revisions/{revision_id}", s.authenticated(s.handleStarGiftCollectibleRevision))
-	// Раунд 34: список ревизий коллекции подарка (выбор источника копирования
-	// блоками) и правка лимита возможных улучшенных подарков.
-	mux.HandleFunc("GET /v1/gifts/{id}/collectibles/revisions", s.authenticated(s.handleStarGiftCollectibleRevisionSummaries))
-	mux.HandleFunc("POST /v1/gifts/set-collectible-supply", s.authenticated(s.handleSetStarGiftCollectibleSupply))
 	mux.HandleFunc("GET /v1/moderation/cases", s.authenticated(s.handleModerationCases))
 	mux.HandleFunc("GET /v1/moderation/cases/{id}", s.authenticated(s.handleModerationCase))
 	mux.HandleFunc("GET /v1/moderation/reports/{id}", s.authenticated(s.handleModerationReport))
@@ -971,15 +955,6 @@ func officialStarGiftListItem(item officialgifts.GiftSummary) map[string]any {
 		"upgrade_stars":      strconv.FormatInt(item.UpgradeStars, 10),
 		"availability_total": item.AvailabilityTotal, "upgrade_variants": item.UpgradeVariants,
 		"limited": item.Limited, "sold_out": item.SoldOut,
-		// Раунд 31: данные для предзаполнения настроек выпуска в форме импорта.
-		"birthday": item.Birthday, "require_premium": item.RequirePremium,
-		"limited_per_user": item.LimitedPerUser, "per_user_total": item.PerUserTotal,
-		"locked_until_date": item.LockedUntilDate, "auction": item.Auction,
-		// Раунд 32: аукционные поля для предзаполнения и признак полного
-		// пула атрибутов — у аукционных подарков upgrade_stars=0, и без
-		// has_attributes форма не показывала бы «включить коллектив».
-		"auction_slug": item.AuctionSlug, "gifts_per_round": item.GiftsPerRound,
-		"auction_start_date": item.AuctionStartDate, "has_attributes": item.HasAttributes(),
 		"model_count": item.ModelCount, "pattern_count": item.PatternCount, "backdrop_count": item.BackdropCount,
 		"crafted_model_count": item.CraftedModelCount, "can_upgrade": item.CanUpgrade(), "can_craft": item.CanCraft(),
 		"document_id": strconv.FormatInt(item.DocumentID, 10), "animation_validated": item.AnimationValidated,
@@ -1040,19 +1015,8 @@ func (s *Server) handlePublishStarGiftCollectibles(w http.ResponseWriter, r *htt
 		return
 	}
 	load := func(upload *admin.StarGiftCollectibleAnimationUpload) error {
-		// Раунд 33: скопированные записи (copy_document_id>0) файл не несут —
-		// документ переиспользуется из ревизии copy_from_revision_id.
-		if upload.CopyDocumentID > 0 {
-			upload.FileKey = ""
-			return nil
-		}
 		upload.FileKey = strings.TrimSpace(upload.FileKey)
 		if upload.FileKey == "" {
-			// Раунд 37: правка строки активной ревизии (attribute_id>0) без
-			// файла — анимация остаётся прежней; с файлом — заменяется.
-			if upload.AttributeID > 0 {
-				return nil
-			}
 			return fmt.Errorf("animation file key is required")
 		}
 		if _, ok := seen[upload.FileKey]; ok {
@@ -1106,54 +1070,6 @@ func (s *Server) handleSetStarGiftSortOrder(w http.ResponseWriter, r *http.Reque
 	writeCommandResult(w, result, err)
 }
 
-// handleUpdateStarGiftSettings (раунд 34) принимает и JSON (только настройки),
-// и multipart (настройки + ОПЦИОНАЛЬНОЕ поле file — новая анимация с
-// предпросмотром в админке). Без файла команда меняет только настройки.
-func (s *Server) handleUpdateStarGiftSettings(w http.ResponseWriter, r *http.Request) {
-	var req admin.UpdateStarGiftSettingsRequest
-	if strings.HasPrefix(r.Header.Get("Content-Type"), "multipart/") {
-		defer r.Body.Close()
-		r.Body = http.MaxBytesReader(w, r.Body, 5<<20)
-		if err := r.ParseMultipartForm(1 << 20); err != nil {
-			writeError(w, http.StatusBadRequest, "invalid multipart form: "+err.Error())
-			return
-		}
-		if r.MultipartForm != nil {
-			defer r.MultipartForm.RemoveAll()
-		}
-		dec := json.NewDecoder(strings.NewReader(r.FormValue("metadata")))
-		dec.DisallowUnknownFields()
-		if err := dec.Decode(&req); err != nil {
-			writeError(w, http.StatusBadRequest, "invalid metadata: "+err.Error())
-			return
-		}
-		file, header, err := r.FormFile("file")
-		if err == nil {
-			defer file.Close()
-			data, err := io.ReadAll(io.LimitReader(file, (4<<20)+1))
-			if err != nil || len(data) == 0 || len(data) > 4<<20 {
-				writeError(w, http.StatusBadRequest, "animation file is empty or too large")
-				return
-			}
-			req.FileName = header.Filename
-			req.Data = data
-		}
-	} else if !decodeJSON(w, r, &req) {
-		return
-	}
-	result, err := s.svc.UpdateStarGiftSettings(r.Context(), req)
-	writeCommandResult(w, result, err)
-}
-
-func (s *Server) handleSetStarGiftAuctionSettings(w http.ResponseWriter, r *http.Request) {
-	var req admin.SetStarGiftAuctionSettingsRequest
-	if !decodeJSON(w, r, &req) {
-		return
-	}
-	result, err := s.svc.SetStarGiftAuctionSettings(r.Context(), req)
-	writeCommandResult(w, result, err)
-}
-
 func (s *Server) handleGiveGift(w http.ResponseWriter, r *http.Request) {
 	var req admin.GiveGiftRequest
 	if !decodeJSON(w, r, &req) {
@@ -1169,7 +1085,7 @@ func (s *Server) handleStarGiftAnimation(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusBadRequest, "invalid gift id")
 		return
 	}
-	raw, found, err := s.svc.StarGiftAnimation(r.Context(), giftID)
+	raw, mime, found, err := s.svc.StarGiftAnimation(r.Context(), giftID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -1178,7 +1094,11 @@ func (s *Server) handleStarGiftAnimation(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusNotFound, "gift animation not found")
 		return
 	}
-	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	if mime == "" {
+		// Совместимость со старыми вызовами без mime: Lottie JSON.
+		mime = "application/json; charset=utf-8"
+	}
+	w.Header().Set("Content-Type", mime)
 	w.Header().Set("Cache-Control", "private, max-age=60")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(raw)
@@ -1313,116 +1233,6 @@ func (s *Server) handleStarGiftCollectibles(w http.ResponseWriter, r *http.Reque
 	writeJSON(w, http.StatusOK, collectiblePreviewResponse(preview))
 }
 
-// handleStarGiftCollectibleRevision (раунд 32) отдаёт ЛЮБУЮ ревизию коллекции
-// по id — источник копирования моделей/узоров/фонов из админ-редактора.
-func (s *Server) handleStarGiftCollectibleRevision(w http.ResponseWriter, r *http.Request) {
-	revisionID, err := strconv.ParseInt(r.PathValue("revision_id"), 10, 64)
-	if err != nil || revisionID <= 0 {
-		writeError(w, http.StatusBadRequest, "invalid revision id")
-		return
-	}
-	revision, err := s.svc.StarGiftCollectibleRevision(r.Context(), revisionID)
-	if err != nil {
-		writeError(w, http.StatusNotFound, "collectible revision not found")
-		return
-	}
-	writeJSON(w, http.StatusOK, collectibleRevisionResponse(revision))
-}
-
-// handleStarGiftCollectibleRevisionSummaries (раунд 34/35) — список ревизий
-// коллекции для выбора источника копирования блоками (модели/фоны/узоры) в
-// редакторе пула атрибутов. Параметр ?slug= отбирает ревизии всей коллекции
-// по slug_prefix (новый подарок ещё не имеет собственных ревизий); без slug —
-// все ревизии gift_id.
-func (s *Server) handleStarGiftCollectibleRevisionSummaries(w http.ResponseWriter, r *http.Request) {
-	giftID, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
-	if err != nil || giftID <= 0 {
-		writeError(w, http.StatusBadRequest, "invalid gift id")
-		return
-	}
-	summaries, scope, err := s.svc.StarGiftCollectibleRevisionSummaries(r.Context(), giftID, r.URL.Query().Get("slug"))
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	rows := make([]map[string]any, 0, len(summaries))
-	for _, summary := range summaries {
-		rows = append(rows, map[string]any{
-			"revision_id":    strconv.FormatInt(summary.RevisionID, 10),
-			"gift_id":        strconv.FormatInt(summary.GiftID, 10),
-			"revision":       summary.Revision,
-			"slug_prefix":    summary.SlugPrefix,
-			"status":         summary.Status,
-			"upgrade_stars":  strconv.FormatInt(summary.UpgradeStars, 10),
-			"supply_total":   summary.SupplyTotal,
-			"issued":         summary.Issued,
-			"model_count":    summary.ModelCount,
-			"pattern_count":  summary.PatternCount,
-			"backdrop_count": summary.BackdropCount,
-			"created_by":     summary.CreatedBy,
-			"created_at":     summary.CreatedAt.UTC().Format(time.RFC3339),
-		})
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"gift_id": strconv.FormatInt(giftID, 10), "scope": scope, "revisions": rows})
-}
-
-// handleSetStarGiftCollectibleSupply (раунд 34) — правит лимит возможных
-// улучшенных подарков опубликованной ревизии коллекции.
-func (s *Server) handleSetStarGiftCollectibleSupply(w http.ResponseWriter, r *http.Request) {
-	var req admin.SetStarGiftCollectibleSupplyRequest
-	if !decodeJSON(w, r, &req) {
-		return
-	}
-	result, err := s.svc.SetStarGiftCollectibleSupply(r.Context(), req)
-	writeCommandResult(w, result, err)
-}
-
-func collectibleRevisionResponse(revision domain.StarGiftCollectibleRevision) map[string]any {
-	attribute := func(value domain.StarGiftCollectibleAttribute) map[string]any {
-		result := map[string]any{
-			"id": strconv.FormatInt(value.ID, 10), "name": value.Name, "rarity_kind": value.RarityKind,
-			"rarity_permille": value.RarityPermille, "crafted": value.Crafted,
-			"official_document_id": strconv.FormatInt(value.OfficialDocumentID, 10),
-			"sort_order":           value.SortOrder, "kind": value.Kind,
-		}
-		if value.Document != nil {
-			result["document_id"] = strconv.FormatInt(value.Document.ID, 10)
-		}
-		if value.Animation != nil {
-			result["source_name"] = value.Animation.SourceName
-			result["source_format"] = value.Animation.SourceFormat
-		}
-		if value.Kind == domain.StarGiftCollectibleBackdrop {
-			result["backdrop_id"] = value.BackdropID
-			result["center_color"] = value.CenterColor
-			result["edge_color"] = value.EdgeColor
-			result["pattern_color"] = value.PatternColor
-			result["text_color"] = value.TextColor
-		}
-		return result
-	}
-	mapAttributes := func(values []domain.StarGiftCollectibleAttribute) []map[string]any {
-		result := make([]map[string]any, 0, len(values))
-		for _, value := range values {
-			result = append(result, attribute(value))
-		}
-		return result
-	}
-	status := "draft"
-	if revision.Published {
-		status = "published"
-	}
-	return map[string]any{
-		"found": true, "revision_id": strconv.FormatInt(revision.ID, 10), "gift_id": strconv.FormatInt(revision.GiftID, 10),
-		"revision": revision.Revision, "status": status,
-		"upgrade_stars": strconv.FormatInt(revision.UpgradeStars, 10),
-		"supply_total":  revision.SupplyTotal, "issued": revision.Issued,
-		"slug_prefix": revision.SlugPrefix,
-		"models":      mapAttributes(revision.Models), "patterns": mapAttributes(revision.Patterns),
-		"backdrops": mapAttributes(revision.Backdrops),
-	}
-}
-
 func collectiblePreviewResponse(preview domain.StarGiftUpgradePreview) map[string]any {
 	attribute := func(value domain.StarGiftCollectibleAttribute) map[string]any {
 		result := map[string]any{
@@ -1430,11 +1240,6 @@ func collectiblePreviewResponse(preview domain.StarGiftUpgradePreview) map[strin
 			"rarity_permille": value.RarityPermille, "crafted": value.Crafted,
 			"official_document_id": strconv.FormatInt(value.OfficialDocumentID, 10),
 			"sort_order":           value.SortOrder, "kind": value.Kind,
-		}
-		// Раунд 33: document_id нужен редактору коллекций для копирования
-		// атрибута в новую ревизию без перезаливки файла.
-		if value.Document != nil {
-			result["document_id"] = strconv.FormatInt(value.Document.ID, 10)
 		}
 		if value.Animation != nil {
 			result["source_name"] = value.Animation.SourceName
@@ -1461,7 +1266,10 @@ func collectiblePreviewResponse(preview domain.StarGiftUpgradePreview) map[strin
 		"upgrade_stars": strconv.FormatInt(preview.UpgradeStars, 10),
 		"supply_total":  preview.SupplyTotal, "issued": preview.Issued,
 		"slug_prefix": preview.SlugPrefix,
-		"models":      mapAttributes(preview.Models), "patterns": mapAttributes(preview.Patterns),
+		// Раунд 37: количество возможных вариантов NFT (модели × узоры × фоны),
+		// сохраняемое в ревизии при публикации пула.
+		"upgrade_variants": preview.UpgradeVariants,
+		"models":           mapAttributes(preview.Models), "patterns": mapAttributes(preview.Patterns),
 		"backdrops": mapAttributes(preview.Backdrops),
 	}
 }

@@ -60,8 +60,8 @@ export function Alert({ children }: { children: ReactNode }) {
   return <div className="alert"><CircleAlert size={16} /> <span>{children}</span></div>;
 }
 
-export function Badge({ children, tone = "neutral" }: { children: ReactNode; tone?: Tone }) {
-  return <span className={`badge ${tone}`}>{children}</span>;
+export function Badge({ children, tone = "neutral", title }: { children: ReactNode; tone?: Tone; title?: string }) {
+  return <span className={`badge ${tone}`} title={title}>{children}</span>;
 }
 
 export function StatusItem({ label, value, tone }: { label: string; value: string; tone: "neutral" | "good" | "warn" }) {

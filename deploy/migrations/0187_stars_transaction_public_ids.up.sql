@@ -68,17 +68,19 @@ WHERE NOT refunded AND amount_nanoton > 0 AND (
 -- reason='gift' с зачислением рисуют подпись «подарок от пользователя», для
 -- конвертации выделен отдельный reason 'gift_convert' (stargift без флага
 -- gift). Исторические строки конвертации переименовываются по их маркеру.
+-- (ton_transactions.title не существует — конвертация подарка выплачивается
+-- только звёздами, в TON-леджере таких строк нет.)
 UPDATE public.stars_transactions SET reason = 'gift_convert'
 WHERE reason = 'gift' AND title = 'Star gift conversion';
 
--- ton_transactions колонки title не имеет (см. выше): сервер никогда не пишет
--- в неё конвертации (обмен подарка на звёзды начисляет stars_transactions),
--- поэтому отдельный перенос reason для TON не нужен. Прежняя версия миграции
--- падала здесь на свежей базе: "column \"title\" does not exist" (42703).
-
-CREATE UNIQUE INDEX IF NOT EXISTS stars_transactions_transaction_id_uidx
+-- Пользовательские ledgers (stars_transactions/ton_transactions) НЕ уникальны
+-- по transaction_id: парный перевод «аккаунт -> аккаунт» (проблема C) кладёт
+-- две строки с ОДНИМ публичным id — дебет отправителя и кредит получателя.
+-- Канальные ledgers остаются уникальными: кредит канала живёт в отдельной
+-- таблице и ни с чем внутри неё не парится.
+CREATE INDEX IF NOT EXISTS stars_transactions_transaction_id_uidx
     ON public.stars_transactions(transaction_id) WHERE transaction_id <> '';
-CREATE UNIQUE INDEX IF NOT EXISTS ton_transactions_transaction_id_uidx
+CREATE INDEX IF NOT EXISTS ton_transactions_transaction_id_uidx
     ON public.ton_transactions(transaction_id) WHERE transaction_id <> '';
 CREATE UNIQUE INDEX IF NOT EXISTS channel_stars_transactions_transaction_id_uidx
     ON public.channel_stars_transactions(transaction_id) WHERE transaction_id <> '';

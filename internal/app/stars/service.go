@@ -99,6 +99,43 @@ func (s *Service) DebitFlags(ctx context.Context, userID, amount int64, reason d
 	return s.store.DebitFlags(ctx, userID, amount, reason, peer, int(s.now().Unix()), title, desc, flags)
 }
 
+// starsPeerTransferStore 是支持账户对账户配对转账的账本扩展（问题 B/C）：
+// 可选能力 — 两个真实实现（postgres/memory）都支持，轻量测试替身可以不实现。
+type starsPeerTransferStore interface {
+	TransferToUser(ctx context.Context, req domain.StarsPeerTransferRequest) (domain.StarsPeerTransferResult, error)
+	RefundPeerTransfer(ctx context.Context, req domain.StarsPeerTransferRequest) (domain.StarsPeerTransferResult, error)
+}
+
+// TransferToUser 账户对账户转账：借记发送方、贷记接收方，两侧行共享同一个
+// 公开交易 ID。先确保发送方起始授予已应用（新账号首读前也能付费）。
+func (s *Service) TransferToUser(ctx context.Context, req domain.StarsPeerTransferRequest) (domain.StarsPeerTransferResult, error) {
+	transfer, ok := s.store.(starsPeerTransferStore)
+	if !ok {
+		return domain.StarsPeerTransferResult{}, domain.ErrStarsInvalidAmount
+	}
+	if req.Amount <= 0 {
+		return domain.StarsPeerTransferResult{}, domain.ErrStarsInvalidAmount
+	}
+	if _, err := s.ensureGranted(ctx, req.SenderUserID); err != nil {
+		return domain.StarsPeerTransferResult{}, err
+	}
+	req.Date = int(s.now().Unix())
+	return transfer.TransferToUser(ctx, req)
+}
+
+// RefundPeerTransfer 原路退回配对转账（补偿路径：消息落库失败等）。
+func (s *Service) RefundPeerTransfer(ctx context.Context, req domain.StarsPeerTransferRequest) (domain.StarsPeerTransferResult, error) {
+	transfer, ok := s.store.(starsPeerTransferStore)
+	if !ok {
+		return domain.StarsPeerTransferResult{}, domain.ErrStarsInvalidAmount
+	}
+	if req.Amount <= 0 {
+		return domain.StarsPeerTransferResult{}, domain.ErrStarsInvalidAmount
+	}
+	req.Date = int(s.now().Unix())
+	return transfer.RefundPeerTransfer(ctx, req)
+}
+
 // ListTransactionsByID 按公开交易 ID 批量读取本人流水（ByID RPC）。首读时惰性授予。
 func (s *Service) ListTransactionsByID(ctx context.Context, userID int64, ids []string) ([]domain.StarsTransaction, error) {
 	if userID <= 0 || len(ids) == 0 {
@@ -154,24 +191,13 @@ func validPurchaseForm(form domain.StarsPurchaseForm) bool {
 	return validPurchaseCommand(form) && form.IssuedAt > 0 && form.ExpiresAt == form.IssuedAt+600
 }
 
-// validStarsTopupAcquisition допускает пустой канал (Fragment по умолчанию)
-// и все четыре известных канала приобретения.
-func validStarsTopupAcquisition(value domain.StarsTopupAcquisition) bool {
-	switch value {
-	case "", domain.StarsTopupFragment, domain.StarsTopupAppStore, domain.StarsTopupPlayMarket, domain.StarsTopupBot:
-		return true
-	default:
-		return false
-	}
-}
-
 func validPurchaseCommand(form domain.StarsPurchaseForm) bool {
 	if !form.Kind.Valid() || form.BuyerUserID <= 0 || form.Stars <= 0 || form.Amount <= 0 || form.Currency == "" {
 		return false
 	}
 	switch form.Kind {
 	case domain.StarsPurchaseTopup:
-		return form.Giveaway == nil && form.RecipientUserID == 0 && validStarsTopupAcquisition(form.Acquisition) && ((form.SpendPurposePeer == domain.Peer{}) ||
+		return form.Giveaway == nil && form.RecipientUserID == 0 && ((form.SpendPurposePeer == domain.Peer{}) ||
 			((form.SpendPurposePeer.Type == domain.PeerTypeUser || form.SpendPurposePeer.Type == domain.PeerTypeChannel) && form.SpendPurposePeer.ID > 0))
 	case domain.StarsPurchaseGift:
 		return form.Giveaway == nil && form.RecipientUserID > 0 && form.BuyerUserID != form.RecipientUserID && form.SpendPurposePeer == (domain.Peer{})
