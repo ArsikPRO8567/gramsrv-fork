@@ -191,13 +191,24 @@ func validPurchaseForm(form domain.StarsPurchaseForm) bool {
 	return validPurchaseCommand(form) && form.IssuedAt > 0 && form.ExpiresAt == form.IssuedAt+600
 }
 
+// validStarsTopupAcquisition допускает пустой канал (Fragment по умолчанию)
+// и все четыре известных канала приобретения.
+func validStarsTopupAcquisition(value domain.StarsTopupAcquisition) bool {
+	switch value {
+	case "", domain.StarsTopupFragment, domain.StarsTopupAppStore, domain.StarsTopupPlayMarket, domain.StarsTopupBot:
+		return true
+	default:
+		return false
+	}
+}
+
 func validPurchaseCommand(form domain.StarsPurchaseForm) bool {
 	if !form.Kind.Valid() || form.BuyerUserID <= 0 || form.Stars <= 0 || form.Amount <= 0 || form.Currency == "" {
 		return false
 	}
 	switch form.Kind {
 	case domain.StarsPurchaseTopup:
-		return form.Giveaway == nil && form.RecipientUserID == 0 && ((form.SpendPurposePeer == domain.Peer{}) ||
+		return form.Giveaway == nil && form.RecipientUserID == 0 && validStarsTopupAcquisition(form.Acquisition) && ((form.SpendPurposePeer == domain.Peer{}) ||
 			((form.SpendPurposePeer.Type == domain.PeerTypeUser || form.SpendPurposePeer.Type == domain.PeerTypeChannel) && form.SpendPurposePeer.ID > 0))
 	case domain.StarsPurchaseGift:
 		return form.Giveaway == nil && form.RecipientUserID > 0 && form.BuyerUserID != form.RecipientUserID && form.SpendPurposePeer == (domain.Peer{})

@@ -1016,6 +1016,9 @@ func (r *Router) starsTopupPaymentForm(ctx context.Context, userID int64, purpos
 		SpendPurposePeer: peer,
 		Stars:            purpose.Stars, Currency: purpose.Currency, Amount: purpose.Amount,
 		IssuedAt: now, ExpiresAt: now + 600,
+		// Раунд 33: канал приобретения фиксируется на форме и перепроверяется
+		// при settlement — транзакция получает корректный counterpart.
+		Acquisition: starsTopupAcquisitionForClient(r, ctx),
 	})
 	if err != nil {
 		return nil, starsPurchaseErr(err)
@@ -1023,6 +1026,26 @@ func (r *Router) starsTopupPaymentForm(ctx context.Context, userID int64, purpos
 	return r.devStarsFiatPaymentForm(userID, form,
 		branding.StarsName(), branding.ProductName()+" dev Stars top-up",
 		[]domain.User{domain.OfficialSystemUser()}), nil
+}
+
+// starsTopupAcquisitionForClient выбирает канал приобретения звёзд по платформе
+// сессии покупателя: iOS — App Store, Android — Google Play, прочие платформы и
+// неопознанные сессии — Fragment (официальная локализация транзакций начисления,
+// раунд 32). typeResolved=false означает сырые метаданные из storage — канал не
+// считается достоверным, деградация к Fragment.
+func starsTopupAcquisitionForClient(r *Router, ctx context.Context) domain.StarsTopupAcquisition {
+	info, resolved := ClientInfoFrom(ctx)
+	if !resolved || !info.typeResolved {
+		return domain.StarsTopupFragment
+	}
+	switch info.Type {
+	case ClientTypeIOS:
+		return domain.StarsTopupAppStore
+	case ClientTypeAndroid:
+		return domain.StarsTopupPlayMarket
+	default:
+		return domain.StarsTopupFragment
+	}
 }
 
 func (r *Router) sendStarsTopupForm(ctx context.Context, userID, formID int64, inv *tg.InputInvoiceStars) (tg.PaymentsPaymentResultClass, error) {
@@ -1046,6 +1069,9 @@ func (r *Router) sendStarsTopupForm(ctx context.Context, userID, formID int64, i
 			FormID: formID, Kind: domain.StarsPurchaseTopup, BuyerUserID: userID,
 			SpendPurposePeer: peer,
 			Stars:            purpose.Stars, Currency: purpose.Currency, Amount: purpose.Amount,
+			// Раунд 33: тот же канал, что был зафиксирован на форме —
+			// store сверяет purpose_json и пишет корректный reason.
+			Acquisition: starsTopupAcquisitionForClient(r, ctx),
 		},
 		Date: int(r.clock.Now().Unix()), OriginAuthKeyID: rawAuthKeyIDForOrigin(ctx),
 		OriginSessionID: sessionIDOrZero(ctx),
@@ -2107,6 +2133,24 @@ func tgSavedStarGifts(viewerUserID int64, gifts []domain.SavedStarGift, catalog 
 			if g.PrepaidUpgradeStars > 0 && canIssue {
 				item.SetUpgradeStars(g.PrepaidUpgradeStars)
 				item.CanUpgrade = true
+			} else if canIssue && current.UpgradeStars == 0 && g.PrepaidUpgradeStars <= 0 {
+				// Раунд 33: бесплатное улучшение (опубликованная ревизия с
+				// ценой 0 — аукционные экземпляры) в профиле тоже требует
+				// положительного ВНЕШНЕГО savedStarGift.upgrade_stars:
+				// клиент выбирает caption «Улучшить бесплатно» (UpgradeButtonFree)
+				// и прямой payments.upgradeStarGift без платёжной формы только
+				// при upgrade_stars>0, иначе рисует платное «Улучшить». Значение —
+				// цена улучшения из каталога, покрытая выигрышной ставкой
+				// (при нулевой цене в каталоге — минимальная положительная,
+				// чтобы клиент не уходил в платный сценарий).
+				wrapperUpgrade := int64(0)
+				if catalogGift, ok := catalog[g.RevisionID]; ok {
+					wrapperUpgrade = catalogGift.UpgradeStars
+				}
+				if wrapperUpgrade <= 0 {
+					wrapperUpgrade = 1
+				}
+				item.SetUpgradeStars(wrapperUpgrade)
 			}
 			// Раунд 21: savedStarGift.refunded — платёж за подарок
 			// возвращён, улучшение откачено до исходного состояния; клиент
@@ -2188,6 +2232,26 @@ func tgSavedStarGiftGift(g domain.SavedStarGift, viewerUserID int64, catalog map
 		}
 		out := tgStarGift(gift)
 		out.ConvertStars = g.ConvertStars
+		// Раунд 31: цена аукционного экземпляра на странице профиля —
+		// выигрышная ставка (paid_stars), а не фиксированная цена каталога.
+		// Та же цена уже показывается в сервисном сообщении победителя
+		// (dispatchStarGiftAuctionAwards кладёт item.amount в блок StarGift).
+		// Обычные покупки/подарки/переносы платный цену не пишут (0) и
+		// продолжают показывать цену ревизии, по которой подарок получен.
+		//
+		// Раунд 36 (исправление «сумма всегда на 1 больше»): клиент считает
+		// стоимость карточки как gift.stars + savedStarGift.upgrade_stars
+		// (StarGiftSheet: Gift2Value). Wrapper бесплатной ревизии пишет во
+		// wrapper upgrade_stars=1 (кнопка «Улучшить бесплатно») — база обязана
+		// уменьшаться на ту же долю, чтобы сумма была ровно выигрышной ставкой.
+		if g.PaidStars > 0 {
+			stars := g.PaidStars
+			if current, ok := availability[g.GiftID]; ok && current.UpgradeStars == 0 &&
+				g.PrepaidUpgradeStars <= 0 && stars > 1 {
+				stars--
+			}
+			out.Stars = stars
+		}
 		if gift.Limited {
 			out.SetAvailabilityRemains(gift.AvailabilityRemains)
 			out.SetAvailabilityTotal(gift.AvailabilityTotal)
@@ -2212,7 +2276,7 @@ func tgSavedStarGiftGift(g domain.SavedStarGift, viewerUserID int64, catalog map
 	return &tg.StarGift{
 		ID:           g.GiftID,
 		Sticker:      &tg.DocumentEmpty{},
-		Stars:        0,
+		Stars:        g.PaidStars,
 		ConvertStars: g.ConvertStars,
 	}
 }

@@ -100,7 +100,6 @@ func (r *Router) onMessagesForwardMessages(ctx context.Context, req *tg.Messages
 	immediate := req.ScheduleDate == 0 || scheduleDateIsImmediate(req.ScheduleDate, int(r.clock.Now().Unix()))
 	// 问题 B：付费消息每条单价（0 = 免费）。门槛校验在下方 toPeer.Type ==
 	// PeerTypeUser 分支里完成；循环逐条扣费。
-	forwardPaidPerMessage := int64(0)
 	replays := make([]outgoingReplayLookup, len(req.ID))
 	absentIndexes := make([]int, 0, len(req.ID))
 	if immediate {
@@ -146,17 +145,18 @@ func (r *Router) onMessagesForwardMessages(ctx context.Context, req *tg.Messages
 	if err != nil {
 		return nil, err
 	}
+	// Раунд 37: платные сообщения при пересылке — цена получателя за КАЖДОЕ
+	// пересылаемое сообщение; само списание делает store в транзакции отправки.
+	var forwardPaidStars int64
 	if toPeer.Type == domain.PeerTypeUser {
 		if req.AllowPaidFloodskip {
 			return nil, paymentUnsupportedErr()
 		}
-		// 问题 B：批量转发在下方循环里逐条扣费（每条消息一笔配对转账），
-		// 这里只做门槛校验并保存每条消息的单价。
-		paidPerMessage, gateErr := r.ensurePrivateContactAllowed(ctx, userID, toPeer.ID, req.AllowPaidStars, len(absentIndexes))
+		paidStars, gateErr := r.privateContactPaidStarsFor(ctx, userID, toPeer.ID, req.AllowPaidStars, len(absentIndexes))
 		if gateErr != nil {
 			return nil, gateErr
 		}
-		forwardPaidPerMessage = paidPerMessage
+		forwardPaidStars = paidStars
 	}
 	absentIDs := make([]int, len(absentIndexes))
 	absentRandomIDs := make([]int64, len(absentIndexes))
@@ -311,15 +311,6 @@ func (r *Router) onMessagesForwardMessages(ctx context.Context, req *tg.Messages
 				saved.SavedFromMsgID = req.ID[i]
 				forward = &saved
 			}
-			// 问题 B：付费消息逐条扣费（借记发送方 + 贷记接收方，配对交易 ID），
-			// 发送失败立即补偿退款；重放不重复扣费。
-			var charged bool
-			if forwardPaidPerMessage > 0 {
-				if _, chargeErr := r.chargePrivateMessage(ctx, userID, toPeer.ID, forwardPaidPerMessage); chargeErr != nil {
-					return nil, chargeErr
-				}
-				charged = true
-			}
 			sent, err := r.deps.Messages.SendPrivateText(ctx, userID, domain.SendPrivateTextRequest{
 				SenderUserID:           userID,
 				RecipientUserID:        toPeer.ID,
@@ -337,17 +328,10 @@ func (r *Router) onMessagesForwardMessages(ctx context.Context, req *tg.Messages
 				RecipientBlocked:       recipientBlocked,
 				IdempotencyFingerprint: idempotencyFingerprints[i],
 				IdempotencyPreflighted: replays[i].checked,
+				PaidMessageStars:       forwardPaidStars,
 			})
 			if err != nil {
-				if charged {
-					r.refundPrivateMessage(ctx, userID, toPeer.ID, forwardPaidPerMessage)
-				}
 				return nil, messageForwardErr(err)
-			}
-			if charged && sent.Duplicate {
-				// 精确 random_id 重放：原请求已扣过费，本次预扣退款。
-				r.refundPrivateMessage(ctx, userID, toPeer.ID, forwardPaidPerMessage)
-				charged = false
 			}
 			if !sent.Duplicate {
 				r.enqueueBotAPIPrivateMessageUpdateAsync(ctx, sent)

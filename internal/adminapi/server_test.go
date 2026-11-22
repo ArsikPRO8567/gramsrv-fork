@@ -764,6 +764,30 @@ func (fakeService) StarGiftAnimation(context.Context, int64) ([]byte, string, bo
 	return []byte(`{"v":"5.7","w":512,"h":512}`), "application/json; charset=utf-8", true, nil
 }
 
+func (fakeService) AnimationMedia(context.Context, int64) ([]byte, string, bool, error) {
+	return []byte(`{"v":"5.7","w":512,"h":512}`), "application/json; charset=utf-8", true, nil
+}
+
+func (fakeService) UpdateStarGiftSettings(_ context.Context, req admin.UpdateStarGiftSettingsRequest) (admin.CommandResult, error) {
+	return admin.CommandResult{CommandID: req.CommandID, Status: "completed", DryRun: req.DryRun}, nil
+}
+
+func (fakeService) SetStarGiftAuctionSettings(_ context.Context, req admin.SetStarGiftAuctionSettingsRequest) (admin.CommandResult, error) {
+	return admin.CommandResult{CommandID: req.CommandID, Status: "completed", DryRun: req.DryRun}, nil
+}
+
+func (fakeService) StarGiftCollectibleRevision(context.Context, int64) (domain.StarGiftCollectibleRevision, error) {
+	return domain.StarGiftCollectibleRevision{}, domain.ErrStarGiftCollectibleInvalid
+}
+
+func (fakeService) StarGiftCollectibleRevisionSummaries(context.Context, int64, string) ([]domain.StarGiftCollectibleRevisionSummary, string, error) {
+	return nil, "all", nil
+}
+
+func (fakeService) SetStarGiftCollectibleSupply(_ context.Context, req admin.SetStarGiftCollectibleSupplyRequest) (admin.CommandResult, error) {
+	return admin.CommandResult{CommandID: req.CommandID, Status: "completed", DryRun: req.DryRun}, nil
+}
+
 func (fakeService) EmojiAnimation(context.Context, int64) ([]byte, bool, error) {
 	return []byte(`{"v":"5.7","w":100,"h":100}`), true, nil
 }

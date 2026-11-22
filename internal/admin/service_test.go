@@ -1110,6 +1110,199 @@ func TestPublishStarGiftCollectiblesDryRunThenConfirm(t *testing.T) {
 	}
 }
 
+// Раунд 33: крафтовые модели — rarity_kind uncommon/rare/epic/legendary вместо
+// permille: в БД rarity_permille NULL, атрибут помечается crafted=true.
+func TestPublishStarGiftCollectiblesCraftedRarityKinds(t *testing.T) {
+	gifts := &fakeGiftsService{}
+	svc := NewService(Dependencies{Commands: newMemoryCommandRepo(), Gifts: gifts, Now: fixedNow})
+	req := PublishStarGiftCollectiblesRequest{
+		GiftID: 11, UpgradeStars: 0, SupplyTotal: 100, SlugPrefix: "cake",
+		Models: []StarGiftCollectibleAnimationUpload{
+			{Name: "Ruby", RarityPermille: 500, FileKey: "model-0", FileName: "ruby.lottie", Data: []byte("model")},
+			{Name: "Sapphire", RarityPermille: 500, FileKey: "model-1", FileName: "sapphire.lottie", Data: []byte("model-1")},
+			{Name: "Crafted", RarityKind: "legendary", SortOrder: 2, FileKey: "model-2", FileName: "crafted.lottie", Data: []byte("crafted")},
+		},
+		Patterns: []StarGiftCollectibleAnimationUpload{
+			{Name: "Stars", RarityPermille: 500, FileKey: "pattern-0", FileName: "stars.tgs", Data: []byte("pattern")},
+			{Name: "Moons", RarityPermille: 500, FileKey: "pattern-1", FileName: "moons.tgs", Data: []byte("pattern-1")},
+		},
+		Backdrops: []StarGiftCollectibleBackdropInput{
+			{Name: "Night", BackdropID: 1, CenterColor: 0x112233, EdgeColor: 0x223344, PatternColor: 0x334455, TextColor: 0xffffff, RarityPermille: 500},
+			{Name: "Day", BackdropID: 2, CenterColor: 0xaabbcc, EdgeColor: 0x778899, PatternColor: 0xddeeff, TextColor: 0x111111, RarityPermille: 500},
+		},
+	}
+	req.CommandMeta = CommandMeta{CommandID: "crafted-collectibles", Actor: "ops", Reason: "crafted pool", DryRun: false}
+	result, err := svc.PublishStarGiftCollectibles(context.Background(), req)
+	if err != nil || gifts.createCalls != 1 || result.Details["crafted_models"] != 1 {
+		t.Fatalf("result=%+v err=%v create=%d", result, err, gifts.createCalls)
+	}
+	write := gifts.lastCollectible
+	if write == nil || len(write.Models) != 3 {
+		t.Fatalf("collectible write = %+v", write)
+	}
+	crafted := write.Models[2]
+	if crafted.RarityKind != domain.StarGiftRarityLegendary || crafted.RarityPermille != 0 || !crafted.Crafted {
+		t.Fatalf("crafted model = %+v", crafted)
+	}
+	if write.Models[0].RarityKind != domain.StarGiftRarityPermille || write.Models[0].RarityPermille != 500 || write.Models[0].Crafted {
+		t.Fatalf("permille model = %+v", write.Models[0])
+	}
+	// Нулевая цена улучшения — бесплатный апгрейд (раунд 21).
+	if write.UpgradeStars != 0 {
+		t.Fatalf("upgrade stars = %d, want 0", write.UpgradeStars)
+	}
+}
+
+// Раунд 33: неизвестный или не-модельный rarity_kind отклоняется.
+func TestPublishStarGiftCollectiblesRejectsBadRarityKind(t *testing.T) {
+	base := func(kind string, kindOnPattern bool) PublishStarGiftCollectiblesRequest {
+		req := PublishStarGiftCollectiblesRequest{
+			GiftID: 11, UpgradeStars: 100, SupplyTotal: 100, SlugPrefix: "cake",
+			Models: []StarGiftCollectibleAnimationUpload{
+				{Name: "Ruby", RarityPermille: 500, FileKey: "model-0", FileName: "ruby.lottie", Data: []byte("model")},
+				{Name: "Sapphire", RarityPermille: 500, FileKey: "model-1", FileName: "sapphire.lottie", Data: []byte("model-1")},
+			},
+			Patterns: []StarGiftCollectibleAnimationUpload{
+				{Name: "Stars", RarityPermille: 500, FileKey: "pattern-0", FileName: "stars.tgs", Data: []byte("pattern")},
+				{Name: "Moons", RarityPermille: 500, FileKey: "pattern-1", FileName: "moons.tgs", Data: []byte("pattern-1")},
+			},
+			Backdrops: []StarGiftCollectibleBackdropInput{
+				{Name: "Night", BackdropID: 1, RarityPermille: 500},
+				{Name: "Day", BackdropID: 2, RarityPermille: 500},
+			},
+		}
+		if kind != "" {
+			if kindOnPattern {
+				req.Patterns[0].RarityKind = kind
+			} else {
+				req.Models[0].RarityKind = kind
+			}
+		} else {
+			// permille без цены — редкость не задана.
+			req.Models[0].RarityPermille = 0
+		}
+		req.CommandMeta = CommandMeta{CommandID: "bad-kind", Actor: "ops", Reason: "validation", DryRun: true}
+		return req
+	}
+	tests := map[string]PublishStarGiftCollectiblesRequest{
+		"unknown kind":       base("mythic", false),
+		"kind on pattern":    base("epic", true),
+		"price without kind": base("", false),
+	}
+	for name, req := range tests {
+		t.Run(name, func(t *testing.T) {
+			svc := NewService(Dependencies{Commands: newMemoryCommandRepo(), Gifts: &fakeGiftsService{}, Now: fixedNow})
+			if _, err := svc.PublishStarGiftCollectibles(context.Background(), req); !errors.Is(err, domain.ErrStarGiftCollectibleInvalid) {
+				t.Fatalf("err=%v, want ErrStarGiftCollectibleInvalid", err)
+			}
+		})
+	}
+}
+
+// Раунд 33: копирование атрибутов из другой ревизии — ReuseDocument, документ
+// и анимация берутся из источника, файлы не загружаются.
+func TestPublishStarGiftCollectiblesCopyFromRevision(t *testing.T) {
+	modelDocument := func(id int64) *domain.Document {
+		return &domain.Document{ID: id, MimeType: "application/x-tgsticker",
+			Attributes: []domain.DocumentAttribute{{Kind: domain.DocAttrSticker, Alt: "🎁"}}}
+	}
+	patternDocument := func(id int64) *domain.Document {
+		return &domain.Document{ID: id, MimeType: "application/x-tgsticker",
+			Attributes: []domain.DocumentAttribute{{Kind: domain.DocAttrCustomEmoji, TextColor: true}},
+			Thumbs:     []domain.PhotoSize{{Kind: domain.PhotoSizeKindPath, Type: "j", Bytes: []byte("path")}}}
+	}
+	source := domain.StarGiftCollectibleRevision{
+		ID: 77, GiftID: 11, Revision: 1, Published: true, UpgradeStars: 100, SupplyTotal: 50, SlugPrefix: "cake",
+		Models: []domain.StarGiftCollectibleAttribute{
+			{ID: 1, Kind: domain.StarGiftCollectibleModel, Name: "Ruby", RarityKind: domain.StarGiftRarityPermille, RarityPermille: 500, SortOrder: 0,
+				Document: modelDocument(900), Animation: &domain.StarGiftAnimation{JSON: []byte(`{"v":"5.7"}`),
+					SHA256: bytesOf(0x01, 32), SourceName: "ruby.lottie", SourceFormat: domain.StarGiftAnimationLottie, Width: 512, Height: 512}},
+			{ID: 2, Kind: domain.StarGiftCollectibleModel, Name: "Sapphire", RarityKind: domain.StarGiftRarityPermille, RarityPermille: 500, SortOrder: 1,
+				Document: modelDocument(901),
+				Animation: &domain.StarGiftAnimation{JSON: []byte(`{"v":"5.7","nm":"sapphire"}`), SHA256: bytesOf(0x02, 32),
+					SourceName: "sapphire.lottie", SourceFormat: domain.StarGiftAnimationLottie, Width: 512, Height: 512}},
+			{ID: 5, Kind: domain.StarGiftCollectibleModel, Name: "Diamond", RarityKind: domain.StarGiftRarityLegendary, Crafted: true, SortOrder: 2,
+				Document: modelDocument(904),
+				Animation: &domain.StarGiftAnimation{JSON: []byte(`{"v":"5.7","nm":"diamond"}`), SHA256: bytesOf(0x05, 32),
+					SourceName: "diamond.lottie", SourceFormat: domain.StarGiftAnimationLottie, Width: 512, Height: 512}},
+		},
+		Patterns: []domain.StarGiftCollectibleAttribute{
+			{ID: 3, Kind: domain.StarGiftCollectiblePattern, Name: "Stars", RarityKind: domain.StarGiftRarityPermille, RarityPermille: 500, SortOrder: 0,
+				Document: patternDocument(902),
+				Animation: &domain.StarGiftAnimation{JSON: []byte(`{"v":"5.7"}`), SHA256: bytesOf(0x03, 32),
+					SourceName: "stars.tgs", SourceFormat: domain.StarGiftAnimationTGS, Width: 512, Height: 512}},
+			{ID: 4, Kind: domain.StarGiftCollectiblePattern, Name: "Moons", RarityKind: domain.StarGiftRarityPermille, RarityPermille: 500, SortOrder: 1,
+				Document: patternDocument(903),
+				Animation: &domain.StarGiftAnimation{JSON: []byte(`{"v":"5.7"}`), SHA256: bytesOf(0x04, 32),
+					SourceName: "moons.tgs", SourceFormat: domain.StarGiftAnimationTGS, Width: 512, Height: 512}},
+		},
+	}
+	gifts := &fakeGiftsService{sourceRevision: &source}
+	svc := NewService(Dependencies{Commands: newMemoryCommandRepo(), Gifts: gifts, Now: fixedNow})
+	req := PublishStarGiftCollectiblesRequest{
+		GiftID: 11, UpgradeStars: 100, SupplyTotal: 50, SlugPrefix: "cake", CopyFromRevisionID: 77,
+		Models: []StarGiftCollectibleAnimationUpload{
+			{Name: "Ruby", CopyDocumentID: 900, RarityPermille: 500},
+			{Name: "Sapphire Renamed", CopyDocumentID: 901, RarityPermille: 400},
+			{Name: "Diamond", CopyDocumentID: 904},
+		},
+		Patterns: []StarGiftCollectibleAnimationUpload{
+			{Name: "Stars", CopyDocumentID: 902, RarityPermille: 500},
+			{Name: "Moons", CopyDocumentID: 903, RarityPermille: 500},
+		},
+		Backdrops: []StarGiftCollectibleBackdropInput{
+			{Name: "Night", BackdropID: 1, CenterColor: 0x112233, EdgeColor: 0x223344, PatternColor: 0x334455, TextColor: 0xffffff, RarityPermille: 500},
+			{Name: "Day", BackdropID: 2, CenterColor: 0xaabbcc, EdgeColor: 0x778899, PatternColor: 0xddeeff, TextColor: 0x111111, RarityPermille: 500},
+		},
+	}
+	req.CommandMeta = CommandMeta{CommandID: "copy-collectibles", Actor: "ops", Reason: "reuse pool", DryRun: false}
+	result, err := svc.PublishStarGiftCollectibles(context.Background(), req)
+	if err != nil || gifts.createCalls != 1 || result.Details["copied_models"] != 3 {
+		t.Fatalf("result=%+v err=%v create=%d", result, err, gifts.createCalls)
+	}
+	write := gifts.lastCollectible
+	if write == nil || len(write.Models) != 3 || len(write.Patterns) != 2 {
+		t.Fatalf("collectible write = %+v", write)
+	}
+	for _, attribute := range append(append([]domain.StarGiftCollectibleAttribute{}, write.Models...), write.Patterns...) {
+		if !attribute.ReuseDocument || attribute.Document == nil || attribute.Document.ID <= 0 ||
+			attribute.Animation == nil || len(attribute.Animation.JSON) == 0 || attribute.Blob != nil {
+			t.Fatalf("copied attribute = %+v", attribute)
+		}
+	}
+	if write.Models[0].Name != "Ruby" || write.Models[0].RarityPermille != 500 ||
+		write.Models[1].Name != "Sapphire Renamed" || write.Models[1].RarityPermille != 400 ||
+		write.Models[2].Name != "Diamond" || write.Models[2].RarityKind != domain.StarGiftRarityLegendary ||
+		write.Models[2].RarityPermille != 0 || !write.Models[2].Crafted {
+		t.Fatalf("models = %+v", write.Models)
+	}
+}
+
+// Раунд 33: копия требует известного copy_from_revision_id и существующего
+// документа в ревизии-источнике.
+func TestPublishStarGiftCollectiblesCopyRejectsUnknownSource(t *testing.T) {
+	req := PublishStarGiftCollectiblesRequest{
+		GiftID: 11, UpgradeStars: 100, SupplyTotal: 50, SlugPrefix: "cake", CopyFromRevisionID: 404,
+		Models: []StarGiftCollectibleAnimationUpload{
+			{Name: "Ruby", CopyDocumentID: 900, RarityPermille: 500},
+			{Name: "Sapphire", CopyDocumentID: 901, RarityPermille: 500},
+		},
+		Patterns: []StarGiftCollectibleAnimationUpload{
+			{Name: "Stars", RarityPermille: 500, FileKey: "pattern-0", FileName: "stars.tgs", Data: []byte("pattern")},
+			{Name: "Moons", RarityPermille: 500, FileKey: "pattern-1", FileName: "moons.tgs", Data: []byte("pattern-1")},
+		},
+		Backdrops: []StarGiftCollectibleBackdropInput{
+			{Name: "Night", BackdropID: 1, RarityPermille: 500},
+			{Name: "Day", BackdropID: 2, RarityPermille: 500},
+		},
+	}
+	req.CommandMeta = CommandMeta{CommandID: "copy-unknown", Actor: "ops", Reason: "validation", DryRun: true}
+	svc := NewService(Dependencies{Commands: newMemoryCommandRepo(), Gifts: &fakeGiftsService{}, Now: fixedNow})
+	if _, err := svc.PublishStarGiftCollectibles(context.Background(), req); !errors.Is(err, domain.ErrStarGiftCollectibleInvalid) {
+		t.Fatalf("err=%v, want ErrStarGiftCollectibleInvalid", err)
+	}
+}
+
 func TestPublishStarGiftCollectiblesRejectsUnsafeClientPreviewPool(t *testing.T) {
 	valid := func() PublishStarGiftCollectiblesRequest {
 		return PublishStarGiftCollectiblesRequest{
@@ -1204,6 +1397,360 @@ func TestImportOfficialStarGiftPreservesCraftedRarityAndPublishesBundle(t *testi
 		t.Fatalf("official provenance was not preserved: %+v", catalog)
 	}
 }
+
+// Раунд 31: аукционный подарок из снимка должен импортироваться без нарушения
+// star_gift_catalog_revision_auction_check / supply_check: auction => limited,
+// slug, gifts_per_round, auction_start_date и положительная поставка.
+func TestImportOfficialStarGiftAuctionSnapshotFillsAuctionAttributes(t *testing.T) {
+	lottie := `{"v":"5.7.4","fr":30,"ip":0,"op":60,"w":512,"h":512,"layers":[{"ty":4}],"assets":[]}`
+	raw := []byte(lottie)
+	sum := sha256.Sum256(raw)
+	baseDocument := officialgifts.Document{ID: 1, FileName: "auction.json", SHA256: hex.EncodeToString(sum[:]), Data: raw}
+	source := &fakeOfficialGiftsSource{bundle: officialgifts.Bundle{
+		ManifestSHA256: bytesOf(0x31, sha256.Size),
+		SourceJSON:     []byte(`{"id":7770001,"auction":true}`),
+		Gift: officialgifts.Gift{
+			ID: 7770001, Title: "Auction Rose", Stars: 500, ConvertStars: 425, DocumentID: 1,
+			// Снимок помечает подарок аукционным, но не несёт round-атрибутов —
+			// ровно тот случай, который раньше падал на SQLSTATE 23514.
+			Auction: true,
+		},
+		BaseDocument: baseDocument,
+	}}
+	gifts := &fakeGiftsService{}
+	svc := NewService(Dependencies{Commands: newMemoryCommandRepo(), Gifts: gifts, OfficialGifts: source, Now: fixedNow})
+	req := ImportOfficialStarGiftRequest{SourceGiftID: "7770001", Enabled: true}
+	req.CommandMeta = CommandMeta{CommandID: "auction-import", Actor: "ops", Reason: "auction snapshot", DryRun: false}
+	result, err := svc.ImportOfficialStarGift(context.Background(), req)
+	if err != nil {
+		t.Fatalf("auction snapshot import: result=%+v err=%v", result, err)
+	}
+	catalog := gifts.lastBundle.Catalog
+	if !catalog.Auction || !catalog.Limited {
+		t.Fatalf("catalog must be a limited auction gift: %+v", catalog)
+	}
+	if catalog.AuctionSlug != "official-7770001" {
+		t.Fatalf("AuctionSlug = %q, want derived official-7770001", catalog.AuctionSlug)
+	}
+	if catalog.GiftsPerRound != 1 || catalog.AuctionStartDate != int(fixedNow().Unix()) {
+		t.Fatalf("GiftsPerRound=%d AuctionStartDate=%d, want 1 and %d", catalog.GiftsPerRound, catalog.AuctionStartDate, int(fixedNow().Unix()))
+	}
+	if catalog.AvailabilityTotal <= 0 || catalog.AvailabilityRemains <= 0 {
+		t.Fatalf("auction supply must be positive: total=%d remains=%d", catalog.AvailabilityTotal, catalog.AvailabilityRemains)
+	}
+}
+
+// Раунд 31: настройки выпуска и вайтлиста из админки применяются к импорту
+// из снимка (количество, «кем выпущено», лимит-на-пользователя, birthday,
+// премиум, дата разблокировки) и попадают в блок вайтлиста ревизии.
+func TestImportOfficialStarGiftIssueSettingsAndWhitelist(t *testing.T) {
+	lottie := `{"v":"5.7.4","fr":30,"ip":0,"op":60,"w":512,"h":512,"layers":[{"ty":4}],"assets":[]}`
+	raw := []byte(lottie)
+	sum := sha256.Sum256(raw)
+	baseDocument := officialgifts.Document{ID: 1, FileName: "gift.json", SHA256: hex.EncodeToString(sum[:]), Data: raw}
+	source := &fakeOfficialGiftsSource{bundle: officialgifts.Bundle{
+		ManifestSHA256: bytesOf(0x32, sha256.Size),
+		SourceJSON:     []byte(`{"id":7770002,"birthday":true,"require_premium":true}`),
+		Gift: officialgifts.Gift{
+			ID: 7770002, Title: "Settings Rose", Stars: 100, ConvertStars: 90, DocumentID: 1,
+			Birthday: true, RequirePremium: true,
+		},
+		BaseDocument: baseDocument,
+	}}
+	gifts := &fakeGiftsService{}
+	svc := NewService(Dependencies{Commands: newMemoryCommandRepo(), Gifts: gifts, OfficialGifts: source, Now: fixedNow})
+	total, remains, perUser, locked := 25, 20, 3, 1_800_000_000
+	req := ImportOfficialStarGiftRequest{
+		SourceGiftID: "7770002", Enabled: true,
+		AvailabilityTotal: &total, AvailabilityRemains: &remains, PerUserTotal: &perUser,
+		ReleasedByType: "channel", ReleasedByID: 777, Birthday: boolPtr(false),
+		RequirePremium: boolPtr(false), LockedUntilDate: &locked,
+		Whitelist: &StarGiftWhitelistSettings{
+			AllowedBuyers: []string{" 123 ", "", "123", "456"}, Hidden: true, Numbered: true,
+			DisallowUpgrades: true, DisallowResell: true, Apply: true,
+		},
+	}
+	req.CommandMeta = CommandMeta{CommandID: "settings-import", Actor: "ops", Reason: "settings", DryRun: false}
+	result, err := svc.ImportOfficialStarGift(context.Background(), req)
+	if err != nil {
+		t.Fatalf("import with issue settings: result=%+v err=%v", result, err)
+	}
+	catalog := gifts.lastBundle.Catalog
+	if !catalog.Limited || catalog.AvailabilityTotal != 25 || catalog.AvailabilityRemains != 20 {
+		t.Fatalf("availability settings not applied: limited=%v total=%d remains=%d", catalog.Limited, catalog.AvailabilityTotal, catalog.AvailabilityRemains)
+	}
+	if !catalog.LimitedPerUser || catalog.PerUserTotal != 3 {
+		t.Fatalf("per-user settings not applied: %+v", catalog)
+	}
+	if catalog.ReleasedBy != (domain.Peer{Type: domain.PeerTypeChannel, ID: 777}) {
+		t.Fatalf("released_by not applied: %+v", catalog.ReleasedBy)
+	}
+	if catalog.Birthday || catalog.RequirePremium || catalog.LockedUntilDate != locked {
+		t.Fatalf("flag settings not applied: birthday=%v premium=%v locked=%d", catalog.Birthday, catalog.RequirePremium, catalog.LockedUntilDate)
+	}
+	whitelist := catalog.Whitelist
+	if whitelist == nil {
+		t.Fatalf("whitelist settings missing")
+	}
+	if len(whitelist.AllowedBuyers) != 2 || whitelist.AllowedBuyers[0] != "123" || whitelist.AllowedBuyers[1] != "456" {
+		t.Fatalf("allowed_buyers not normalized: %q", whitelist.AllowedBuyers)
+	}
+	if !whitelist.Hidden || !whitelist.Numbered || !whitelist.DisallowUpgrades || !whitelist.DisallowResell || !whitelist.Apply {
+		t.Fatalf("whitelist flags not preserved: %+v", whitelist)
+	}
+}
+
+// Раунд 32: аукционный подарок из снимка с ПОЛНЫМ пулом атрибутов (модели/
+// узоры/фоны) импортируется с ревизией коллекции даже без галочки
+// «включить коллектив»: у аукционных подарков upgrade_stars=0, CanUpgrade()
+// ложен, и раньше ревизия коллекции не создавалась.
+func TestImportOfficialStarGiftAuctionAutoIncludesCollectibles(t *testing.T) {
+	lottie := `{"v":"5.7.4","fr":30,"ip":0,"op":60,"w":512,"h":512,"layers":[{"ty":4}],"assets":[]}`
+	raw := []byte(lottie)
+	sum := sha256.Sum256(raw)
+	permille := 500
+	baseDocument := officialgifts.Document{ID: 1, FileName: "auction.json", SHA256: hex.EncodeToString(sum[:]), Data: raw}
+	modelDoc := officialgifts.Document{ID: 11, FileName: "model.json", SHA256: hex.EncodeToString(sum[:]), Data: raw}
+	patternDoc := officialgifts.Document{ID: 12, FileName: "pattern.json", SHA256: hex.EncodeToString(sum[:]), Data: raw}
+	source := &fakeOfficialGiftsSource{bundle: officialgifts.Bundle{
+		ManifestSHA256: bytesOf(0x33, sha256.Size),
+		SourceJSON:     []byte(`{"id":7770003,"auction":true}`),
+		Gift: officialgifts.Gift{
+			ID: 7770003, Title: "Auction Rose", Stars: 500, ConvertStars: 425, DocumentID: 1,
+			Auction: true, AvailabilityTotal: 10,
+		},
+		BaseDocument: baseDocument,
+		Collectible: &officialgifts.CollectibleSet{
+			Models: []officialgifts.Model{
+				{Name: "First", DocumentID: 11, Rarity: officialgifts.Rarity{Kind: "permille", Permille: &permille}, Document: modelDoc},
+				{Name: "Second", DocumentID: 11, Rarity: officialgifts.Rarity{Kind: "permille", Permille: &permille}, Document: modelDoc},
+			},
+			Patterns: []officialgifts.Pattern{
+				{Name: "First", DocumentID: 12, Rarity: officialgifts.Rarity{Kind: "permille", Permille: &permille}, Document: patternDoc},
+				{Name: "Second", DocumentID: 12, Rarity: officialgifts.Rarity{Kind: "permille", Permille: &permille}, Document: patternDoc},
+			},
+			Backdrops: []officialgifts.Backdrop{
+				{Name: "First", BackdropID: 1, Rarity: officialgifts.Rarity{Kind: "permille", Permille: &permille}},
+				{Name: "Second", BackdropID: 2, Rarity: officialgifts.Rarity{Kind: "permille", Permille: &permille}},
+			},
+		},
+	}}
+	gifts := &fakeGiftsService{}
+	svc := NewService(Dependencies{Commands: newMemoryCommandRepo(), Gifts: gifts, OfficialGifts: source, Now: fixedNow})
+	req := ImportOfficialStarGiftRequest{SourceGiftID: "7770003", Enabled: true}
+	req.CommandMeta = CommandMeta{CommandID: "auction-collectible-import", Actor: "ops", Reason: "auction pool", DryRun: false}
+	result, err := svc.ImportOfficialStarGift(context.Background(), req)
+	if err != nil {
+		t.Fatalf("auction import with attribute pool: result=%+v err=%v", result, err)
+	}
+	if gifts.lastBundle.Collectible == nil {
+		t.Fatalf("collectible revision must be written for an auction gift even without include_collectible")
+	}
+	if len(gifts.lastBundle.Collectible.Models) != 2 || len(gifts.lastBundle.Collectible.Patterns) != 2 || len(gifts.lastBundle.Collectible.Backdrops) != 2 {
+		t.Fatalf("collectible pool incomplete: models=%d patterns=%d backdrops=%d",
+			len(gifts.lastBundle.Collectible.Models), len(gifts.lastBundle.Collectible.Patterns), len(gifts.lastBundle.Collectible.Backdrops))
+	}
+	if !gifts.lastBundle.Catalog.Auction {
+		t.Fatalf("catalog must keep the auction flag: %+v", gifts.lastBundle.Catalog)
+	}
+}
+
+// Раунд 32: команда gifts.update_settings применяет ВСЕ параметры (цены,
+// сортировка, настройки выпуска, аукцион, вайтлист) к settings write.
+func TestUpdateStarGiftSettingsAppliesAllParameters(t *testing.T) {
+	gifts := &fakeGiftsService{}
+	svc := NewService(Dependencies{Commands: newMemoryCommandRepo(), Gifts: gifts, Now: fixedNow})
+	total, remains, perUser, locked := 40, 30, 2, 1_900_000_000
+	start := int(fixedNow().Unix())
+	req := UpdateStarGiftSettingsRequest{
+		GiftID: 11, Title: "Edited Rose", Stars: 250, ConvertStars: 200, Enabled: true, SortOrder: 7,
+		AvailabilityTotal: &total, AvailabilityRemains: &remains, PerUserTotal: &perUser,
+		ReleasedByType: "user", ReleasedByID: 42, Birthday: boolPtr(true), RequirePremium: boolPtr(true),
+		LockedUntilDate: &locked,
+		Auction:         boolPtr(true), AuctionSlug: " Edited-Rose ", GiftsPerRound: &start,
+		Whitelist: &StarGiftWhitelistSettings{AllowedBuyers: []string{"  777  "}, Hidden: true, Apply: true},
+	}
+	req.AuctionStartDate = &start
+	req.CommandMeta = CommandMeta{CommandID: "update-settings", Actor: "ops", Reason: "edit", DryRun: false}
+	result, err := svc.UpdateStarGiftSettings(context.Background(), req)
+	if err != nil {
+		t.Fatalf("update gift settings: result=%+v err=%v", result, err)
+	}
+	write := gifts.lastSettings
+	if write.GiftID != 11 || write.Title != "Edited Rose" || write.Stars != 250 || write.ConvertStars != 200 || write.SortOrder != 7 || !write.Enabled {
+		t.Fatalf("base settings not applied: %+v", write)
+	}
+	if !write.Limited || write.AvailabilityTotal != 40 || write.AvailabilityRemains != 30 || !write.LimitedPerUser || write.PerUserTotal != 2 {
+		t.Fatalf("issue settings not applied: %+v", write)
+	}
+	if write.ReleasedBy != (domain.Peer{Type: domain.PeerTypeUser, ID: 42}) || !write.Birthday || !write.RequirePremium || write.LockedUntilDate != locked {
+		t.Fatalf("release/flag settings not applied: %+v", write)
+	}
+	if !write.Auction || write.AuctionSlug != "edited-rose" || write.GiftsPerRound != start || write.AuctionStartDate != start {
+		t.Fatalf("auction settings not applied: %+v", write)
+	}
+	if write.Whitelist == nil || len(write.Whitelist.AllowedBuyers) != 1 || write.Whitelist.AllowedBuyers[0] != "777" || !write.Whitelist.Hidden || !write.Whitelist.Apply {
+		t.Fatalf("whitelist not applied: %+v", write.Whitelist)
+	}
+}
+
+// Раунд 32: валидация зеркалит SQL-констрейнты ревизии — включённый аукцион
+// без slug/периода/старта и несогласованные счётчики отклоняются до записи.
+func TestUpdateStarGiftSettingsValidation(t *testing.T) {
+	gifts := &fakeGiftsService{}
+	svc := NewService(Dependencies{Commands: newMemoryCommandRepo(), Gifts: gifts, Now: fixedNow})
+	perRound := 5
+	cases := []struct {
+		name string
+		mut  func(req *UpdateStarGiftSettingsRequest)
+	}{
+		{"auction without slug", func(req *UpdateStarGiftSettingsRequest) {
+			req.Auction = boolPtr(true)
+			req.GiftsPerRound = &perRound
+			req.AuctionStartDate = intPtr(int(fixedNow().Unix()))
+		}},
+		{"auction without start", func(req *UpdateStarGiftSettingsRequest) {
+			req.Auction = boolPtr(true)
+			req.AuctionSlug = "slug"
+			req.GiftsPerRound = &perRound
+		}},
+		{"auction without per round", func(req *UpdateStarGiftSettingsRequest) { req.Auction = boolPtr(true); req.AuctionSlug = "slug" }},
+		{"convert above stars", func(req *UpdateStarGiftSettingsRequest) { req.Stars, req.ConvertStars = 10, 11 }},
+		{"released type without id", func(req *UpdateStarGiftSettingsRequest) { req.ReleasedByType = "channel" }},
+		{"remains above total", func(req *UpdateStarGiftSettingsRequest) {
+			total, remains := 5, 9
+			req.AvailabilityTotal, req.AvailabilityRemains = &total, &remains
+		}},
+	}
+	for _, tc := range cases {
+		req := UpdateStarGiftSettingsRequest{GiftID: 11, Title: "X", Stars: 50, ConvertStars: 40, Enabled: true}
+		tc.mut(&req)
+		req.CommandMeta = CommandMeta{CommandID: "update-validation", Actor: "ops", Reason: "check", DryRun: false}
+		if _, err := svc.UpdateStarGiftSettings(context.Background(), req); err == nil {
+			t.Fatalf("%s: expected validation error", tc.name)
+		}
+	}
+	// Нулевой gift_id тоже отклоняется.
+	req := UpdateStarGiftSettingsRequest{Title: "X", Stars: 50, Enabled: true}
+	req.CommandMeta = CommandMeta{CommandID: "update-validation-zero", Actor: "ops", Reason: "check", DryRun: false}
+	if _, err := svc.UpdateStarGiftSettings(context.Background(), req); err == nil {
+		t.Fatalf("zero gift id: expected validation error")
+	}
+}
+
+// Раунд 32: команда gifts.set_auction_settings пробрасывает настройки рабочей
+// строки в GiftsService и возвращает результат.
+func TestSetStarGiftAuctionSettingsCommand(t *testing.T) {
+	gifts := &fakeGiftsService{}
+	svc := NewService(Dependencies{Commands: newMemoryCommandRepo(), Gifts: gifts, Now: fixedNow})
+	duration, endDate := 900, 1_999_999_999
+	minBid := int64(250)
+	req := SetStarGiftAuctionSettingsRequest{
+		GiftID: 11, RoundDuration: &duration, RoundDurationsJSON: `{"round_1":120}`,
+		RaiseMinBid: boolPtr(true), RoundExtendsJSON: `{"round_2":{"window":30}}`,
+		MinBidAmount: &minBid, EndDate: &endDate, Status: "active",
+	}
+	req.CommandMeta = CommandMeta{CommandID: "auction-settings", Actor: "ops", Reason: "tune auction", DryRun: false}
+	result, err := svc.SetStarGiftAuctionSettings(context.Background(), req)
+	if err != nil {
+		t.Fatalf("set auction settings: result=%+v err=%v", result, err)
+	}
+	write := gifts.lastAuctionWrite
+	if write.GiftID != 11 || write.RoundDuration == nil || *write.RoundDuration != duration ||
+		write.RoundDurationsJSON != `{"round_1":120}` || write.RaiseMinBid == nil || !*write.RaiseMinBid ||
+		write.RoundExtendsJSON != `{"round_2":{"window":30}}` || write.MinBidAmount == nil || *write.MinBidAmount != minBid ||
+		write.EndDate == nil || *write.EndDate != endDate || write.Status != "active" {
+		t.Fatalf("auction runtime write mismatch: %+v", write)
+	}
+	// DryRun не трогает стор.
+	gifts.lastAuctionWrite = domain.StarGiftAuctionRuntimeWrite{}
+	dry := SetStarGiftAuctionSettingsRequest{GiftID: 11, Status: "pending"}
+	dry.CommandMeta = CommandMeta{CommandID: "auction-settings-dry", Actor: "ops", Reason: "check", DryRun: true}
+	if _, err := svc.SetStarGiftAuctionSettings(context.Background(), dry); err != nil {
+		t.Fatalf("dry run: %v", err)
+	}
+	if gifts.lastAuctionWrite.GiftID != 0 {
+		t.Fatalf("dry run must not touch the store: %+v", gifts.lastAuctionWrite)
+	}
+	// Некорректный статус отклоняется.
+	bad := SetStarGiftAuctionSettingsRequest{GiftID: 11, Status: "running"}
+	bad.CommandMeta = CommandMeta{CommandID: "auction-settings-bad", Actor: "ops", Reason: "check", DryRun: true}
+	if _, err := svc.SetStarGiftAuctionSettings(context.Background(), bad); err == nil {
+		t.Fatalf("invalid status: expected validation error")
+	}
+}
+
+// Раунд 34: команда изменения лимита возможных улучшенных подарков —
+// валидация, проброс в стор и dry-run без записи.
+func TestSetStarGiftCollectibleSupplyCommand(t *testing.T) {
+	gifts := &fakeGiftsService{}
+	gifts.sourceRevision = &domain.StarGiftCollectibleRevision{
+		ID: 9001, GiftID: 11, Revision: 1, UpgradeStars: 50, SupplyTotal: 5, Issued: 0, Published: true,
+	}
+	svc := NewService(Dependencies{Commands: newMemoryCommandRepo(), Gifts: gifts, Now: fixedNow})
+	req := SetStarGiftCollectibleSupplyRequest{GiftID: 11, SupplyTotal: 12}
+	req.CommandMeta = CommandMeta{CommandID: "collectible-supply", Actor: "ops", Reason: "raise limit"}
+	result, err := svc.SetStarGiftCollectibleSupply(context.Background(), req)
+	if err != nil {
+		t.Fatalf("set collectible supply: result=%+v err=%v", result, err)
+	}
+	if gifts.lastSupplyWrite.GiftID != 11 || gifts.lastSupplyWrite.SupplyTotal != 12 {
+		t.Fatalf("supply write mismatch: %+v", gifts.lastSupplyWrite)
+	}
+	// DryRun не трогает стор.
+	gifts.lastSupplyWrite = domain.StarGiftCollectibleSupplyWrite{}
+	dry := SetStarGiftCollectibleSupplyRequest{GiftID: 11, SupplyTotal: 12}
+	dry.CommandMeta = CommandMeta{CommandID: "collectible-supply-dry", Actor: "ops", Reason: "check", DryRun: true}
+	if _, err := svc.SetStarGiftCollectibleSupply(context.Background(), dry); err != nil {
+		t.Fatalf("dry run: %v", err)
+	}
+	if gifts.lastSupplyWrite.GiftID != 0 {
+		t.Fatalf("dry run must not touch the store: %+v", gifts.lastSupplyWrite)
+	}
+	// Некорректные значения отклоняются до записи.
+	bad := SetStarGiftCollectibleSupplyRequest{GiftID: 11, SupplyTotal: 0}
+	bad.CommandMeta = CommandMeta{CommandID: "collectible-supply-bad", Actor: "ops", Reason: "check", DryRun: true}
+	if _, err := svc.SetStarGiftCollectibleSupply(context.Background(), bad); err == nil {
+		t.Fatalf("invalid supply: expected validation error")
+	}
+}
+
+// Раунд 31: валидация настроек выпуска зеркалит SQL-констрейнты —
+// отрицательные/несогласованные значения отклоняются до записи в БД.
+func TestImportStarGiftIssueSettingsValidation(t *testing.T) {
+	total, remains := 10, 20
+	cases := []struct {
+		name string
+		mut  func(req *ImportStarGiftRequest)
+	}{
+		{"remains above total", func(req *ImportStarGiftRequest) { req.AvailabilityTotal, req.AvailabilityRemains = &total, &remains }},
+		{"negative total", func(req *ImportStarGiftRequest) { value := -1; req.AvailabilityTotal = &value }},
+		{"released type without id", func(req *ImportStarGiftRequest) { req.ReleasedByType = "user" }},
+		{"released id without type", func(req *ImportStarGiftRequest) { req.ReleasedByID = 42 }},
+		{"released chat type", func(req *ImportStarGiftRequest) { req.ReleasedByType = "chat"; req.ReleasedByID = 42 }},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			gifts := &fakeGiftsService{}
+			svc := NewService(Dependencies{Commands: newMemoryCommandRepo(), Gifts: gifts, Now: fixedNow})
+			req := ImportStarGiftRequest{Title: "Broken", Stars: 50, ConvertStars: 25, Enabled: true}
+			req.FileName = "gift.tgs"
+			req.Data = []byte("tgs")
+			req.CommandMeta = CommandMeta{CommandID: "invalid-" + testCase.name, Actor: "ops", Reason: "validation", DryRun: false}
+			testCase.mut(&req)
+			_, err := svc.ImportStarGift(context.Background(), req)
+			if !errors.Is(err, domain.ErrStarGiftInvalid) {
+				t.Fatalf("err=%v, want ErrStarGiftInvalid", err)
+			}
+			if gifts.createCalls != 0 {
+				t.Fatalf("invalid settings must not reach the store")
+			}
+		})
+	}
+}
+
+func boolPtr(value bool) *bool { return &value }
+func intPtr(value int) *int    { return &value }
 
 func TestImportOfficialStarGiftPublishesThroughRealGiftService(t *testing.T) {
 	const lottie = `{"v":"5.7.4","fr":30,"ip":0,"op":60,"w":512,"h":512,"layers":[{"ty":4}],"assets":[]}`
@@ -1304,8 +1851,13 @@ func (f *fakeOfficialGiftsSource) Bundle(_ context.Context, giftID int64, includ
 }
 
 type fakeGiftsService struct {
-	createCalls int
-	lastBundle  domain.StarGiftCatalogBundleWrite
+	createCalls      int
+	lastBundle       domain.StarGiftCatalogBundleWrite
+	lastSettings     domain.StarGiftCatalogSettingsWrite
+	lastAuctionWrite domain.StarGiftAuctionRuntimeWrite
+	lastCollectible  *domain.StarGiftCollectibleWrite
+	lastSupplyWrite  domain.StarGiftCollectibleSupplyWrite
+	sourceRevision   *domain.StarGiftCollectibleRevision
 }
 
 func (f *fakeGiftsService) GiftByID(_ context.Context, id int64) (domain.StarGift, bool, error) {
@@ -1345,6 +1897,15 @@ func (*fakeGiftsService) SetCatalogEnabled(context.Context, int64, bool) (bool, 
 func (*fakeGiftsService) SetCatalogSortOrder(context.Context, int64, int) (bool, error) {
 	return true, nil
 }
+func (f *fakeGiftsService) UpdateCatalogSettings(_ context.Context, write domain.StarGiftCatalogSettingsWrite) (domain.StarGiftCatalogEntry, error) {
+	f.createCalls++
+	f.lastSettings = write
+	return domain.StarGiftCatalogEntry{Gift: domain.StarGift{ID: write.GiftID, RevisionID: 22, Stars: write.Stars}, Revision: 2}, nil
+}
+func (f *fakeGiftsService) SetStarGiftAuctionSettings(_ context.Context, write domain.StarGiftAuctionRuntimeWrite) (domain.StarGiftAuction, error) {
+	f.lastAuctionWrite = write
+	return domain.StarGiftAuction{Version: 7, Gift: domain.StarGift{ID: write.GiftID}}, nil
+}
 func (*fakeGiftsService) AnimationJSON(context.Context, int64) ([]byte, bool, error) {
 	return []byte(`{"v":"5.7"}`), true, nil
 }
@@ -1353,10 +1914,59 @@ func (*fakeGiftsService) AnimationMedia(context.Context, int64) ([]byte, string,
 }
 func (f *fakeGiftsService) CreateCollectibleRevision(_ context.Context, write domain.StarGiftCollectibleWrite) (domain.StarGiftCollectibleRevision, error) {
 	f.createCalls++
+	copied := write
+	f.lastCollectible = &copied
 	return domain.StarGiftCollectibleRevision{ID: 33, GiftID: write.GiftID, Revision: 2, Published: true}, nil
+}
+
+// ActiveCollectibleRevision (раунд 37) — фейк без активной ревизии: путь
+// PublishStarGiftCollectibles всегда уходит в CreateCollectibleRevision.
+func (*fakeGiftsService) ActiveCollectibleRevision(context.Context, int64) (domain.StarGiftCollectibleRevision, bool, error) {
+	return domain.StarGiftCollectibleRevision{}, false, nil
 }
 func (*fakeGiftsService) CollectiblePreview(context.Context, int64) (domain.StarGiftUpgradePreview, bool, error) {
 	return domain.StarGiftUpgradePreview{}, false, nil
+}
+func (f *fakeGiftsService) CollectibleRevision(_ context.Context, revisionID int64) (domain.StarGiftCollectibleRevision, error) {
+	if f.sourceRevision == nil || f.sourceRevision.ID != revisionID {
+		return domain.StarGiftCollectibleRevision{}, domain.ErrStarGiftCollectibleInvalid
+	}
+	return *f.sourceRevision, nil
+}
+
+func (f *fakeGiftsService) SetCollectibleSupplyTotal(_ context.Context, write domain.StarGiftCollectibleSupplyWrite) (domain.StarGiftCollectibleRevision, error) {
+	f.lastSupplyWrite = write
+	if f.sourceRevision == nil || f.sourceRevision.GiftID != write.GiftID {
+		return domain.StarGiftCollectibleRevision{}, domain.ErrStarGiftCollectibleInvalid
+	}
+	revision := *f.sourceRevision
+	if write.SupplyTotal < revision.Issued {
+		return domain.StarGiftCollectibleRevision{}, domain.ErrStarGiftCollectibleInvalid
+	}
+	revision.SupplyTotal = write.SupplyTotal
+	f.sourceRevision = &revision
+	return revision, nil
+}
+
+func (f *fakeGiftsService) CollectibleRevisionSummaries(_ context.Context, giftID int64, slug string) ([]domain.StarGiftCollectibleRevisionSummary, string, error) {
+	// Раунд 35/36: slug-режим отбирает ревизии по slug_prefix ИЛИ gift_id.
+	if slug != "" {
+		if f.sourceRevision == nil || (f.sourceRevision.SlugPrefix != slug && f.sourceRevision.GiftID != giftID) {
+			return nil, "all", nil
+		}
+		giftID = f.sourceRevision.GiftID
+	}
+	if f.sourceRevision == nil || f.sourceRevision.GiftID != giftID {
+		return nil, "all", nil
+	}
+	revision := *f.sourceRevision
+	return []domain.StarGiftCollectibleRevisionSummary{{
+		RevisionID: revision.ID, GiftID: revision.GiftID, Revision: revision.Revision,
+		SlugPrefix: revision.SlugPrefix,
+		Status:     "published", UpgradeStars: revision.UpgradeStars, SupplyTotal: revision.SupplyTotal,
+		Issued: revision.Issued, ModelCount: len(revision.Models), PatternCount: len(revision.Patterns),
+		BackdropCount: len(revision.Backdrops), CreatedBy: revision.CreatedBy,
+	}}, "slug", nil
 }
 func (*fakeGiftsService) CollectibleAnimationJSON(context.Context, int64, domain.StarGiftCollectibleAttributeKind, int64) ([]byte, bool, error) {
 	return []byte(`{"v":"5.7"}`), true, nil

@@ -391,6 +391,13 @@ RETURNING id`,
 	return rowID, nil
 }
 
+// insertStarsTxnWithID 写一条流水并使用调用方指定的公开交易 ID（账户间转账
+// 的双方行必须共用同一 ID）；amount 带符号。
+func insertStarsTxnWithID(ctx context.Context, tx pgx.Tx, userID, amount int64, reason domain.StarsTransactionReason, peer domain.Peer, date int, transactionID string) error {
+	_, err := insertStarsTxnFull(ctx, tx, userID, amount, reason, peer, date, "", "", domain.StarsLedgerFlags{TransactionID: transactionID})
+	return err
+}
+
 // ListTransactionsByID 按公开交易 ID 批量读取本人账本流水（
 // payments.getStarsTransactionsByID）。未知 ID 静默跳过：官方服务器对批量
 // 查询返回已找到的子集；畸形 ID 在 rpc 层拒绝。

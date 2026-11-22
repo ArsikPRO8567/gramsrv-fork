@@ -246,6 +246,47 @@ export type StarGiftRow = {
   ReceivedCount: string;
   CreatedBy: string;
   UpdatedAt: string;
+  // Раунд 32: полный набор параметров для предзаполнения формы редактирования.
+  Limited: boolean;
+  SoldOut: boolean;
+  Birthday: boolean;
+  RequirePremium: boolean;
+  LimitedPerUser: boolean;
+  PeerColorAvailable: boolean;
+  Auction: boolean;
+  AvailabilityTotal: number;
+  AvailabilityRemains: number;
+  ReleasedByType: string;
+  ReleasedByID: string;
+  PerUserTotal: number;
+  LockedUntilDate: number;
+  AuctionSlug: string;
+  GiftsPerRound: number;
+  AuctionStartDate: number;
+  UpgradeVariants: number;
+  HasBackground: boolean;
+  BackgroundCenter: number;
+  BackgroundEdge: number;
+  BackgroundText: number;
+  HasWhitelist: boolean;
+  WhitelistBuyersJSON: string;
+  WhitelistHidden: boolean;
+  WhitelistNumbered: boolean;
+  WhitelistDisallowUpgrades: boolean;
+  WhitelistDisallowResell: boolean;
+  WhitelistApply: boolean;
+  AuctionRowExists: boolean;
+  AuctionRoundDuration: number;
+  AuctionRoundDurationsJSON: string;
+  AuctionRaiseMinBid: boolean;
+  AuctionRoundExtendsJSON: string;
+  AuctionMinBidAmount: string;
+  AuctionStateTotalRounds: number;
+  AuctionStateGiftsLeft: number;
+  AuctionStateLastGiftNum: number;
+  AuctionStateStart: number;
+  AuctionStateEnd: number;
+  AuctionStateStatus: string;
 };
 
 export type StarGiftListResponse = { Gifts: StarGiftRow[] };
@@ -260,6 +301,19 @@ export type OfficialStarGiftRow = {
   upgrade_variants: number;
   limited: boolean;
   sold_out: boolean;
+  // Раунд 31: данные для предзаполнения настроек выпуска в форме импорта.
+  birthday: boolean;
+  require_premium: boolean;
+  limited_per_user: boolean;
+  per_user_total: number;
+  locked_until_date: number;
+  auction: boolean;
+  // Раунд 32: аукционные поля для предзаполнения и признак полного пула
+  // атрибутов (у аукционных подарков upgrade_stars=0, но пул полный).
+  auction_slug: string;
+  gifts_per_round: number;
+  auction_start_date: number;
+  has_attributes: boolean;
   model_count: number;
   pattern_count: number;
   backdrop_count: number;
@@ -359,6 +413,9 @@ export type StarGiftCollectibleAttributeRow = {
   rarity_permille: number;
   crafted: boolean;
   official_document_id: string;
+  // Раунд 33: document_id из ревизии — нужен редактору коллекций для
+  // копирования атрибута в новую ревизию без перезаливки файла.
+  document_id?: string;
   sort_order: number;
   source_name?: string;
   source_format?: "tgs" | "lottie";
@@ -381,6 +438,49 @@ export type StarGiftCollectiblePreview = {
   models?: StarGiftCollectibleAttributeRow[];
   patterns?: StarGiftCollectibleAttributeRow[];
   backdrops?: StarGiftCollectibleAttributeRow[];
+};
+
+// Раунд 33: любая ревизия коллекции по id — источник копирования моделей,
+// узоров и фонов в новую ревизию («правка существующей ревизии»).
+export type StarGiftCollectibleRevision = {
+  found: boolean;
+  revision_id: string;
+  gift_id: string;
+  revision: number;
+  status: "draft" | "published";
+  upgrade_stars: string;
+  supply_total: number;
+  issued: number;
+  slug_prefix: string;
+  models?: StarGiftCollectibleAttributeRow[];
+  patterns?: StarGiftCollectibleAttributeRow[];
+  backdrops?: StarGiftCollectibleAttributeRow[];
+};
+
+// Раунд 34: лёгкая строка списка ревизий коллекции — выбор источника
+// копирования блоками (модели/фоны/узоры) без загрузки полных метаданных.
+export type StarGiftCollectibleRevisionSummary = {
+  revision_id: string;
+  gift_id: string;
+  revision: number;
+  slug_prefix: string;
+  status: "draft" | "published";
+  upgrade_stars: string;
+  supply_total: number;
+  issued: number;
+  model_count: number;
+  pattern_count: number;
+  backdrop_count: number;
+  created_by: string;
+  created_at: string;
+};
+
+export type StarGiftCollectibleRevisionList = {
+  gift_id: string;
+  // Раунд 36: источник выборки — "slug" (по slug ИЛИ gift_id), "gift" (по
+  // gift_id) или "all" (fallback: последние ревизии всех коллекций).
+  scope: "slug" | "gift" | "all";
+  revisions: StarGiftCollectibleRevisionSummary[];
 };
 
 export type CollectibleUsernameStatus = "vault" | "owned" | "burned";

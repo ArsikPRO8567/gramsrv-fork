@@ -568,7 +568,9 @@
 }
 
 .gift-fields-grid input,
-.gift-reason-field input {
+.gift-fields-grid select,
+.gift-reason-field input,
+.gift-reason-field textarea {
   width: 100%;
   min-width: 0;
   height: 38px;
@@ -577,10 +579,24 @@
   background: var(--input-bg);
   border: 1px solid var(--line);
   border-radius: var(--radius-sm);
+  font: inherit;
 }
 
+.gift-reason-field textarea { height: auto; padding: 8px 10px; resize: vertical; line-height: 1.45; }
+.gift-fields-grid input:disabled { opacity: .55; cursor: not-allowed; }
+
 .gift-fields-grid input:focus,
-.gift-reason-field input:focus { border-color: var(--brand); box-shadow: 0 0 0 3px var(--focus); outline: none; }
+.gift-fields-grid select:focus,
+.gift-reason-field input:focus,
+.gift-reason-field textarea:focus { border-color: var(--brand); box-shadow: 0 0 0 3px var(--focus); outline: none; }
+
+/* Раунд 31: блок настроек выпуска и вайтлиста в форме импорта подарка. */
+.gift-settings-block { display: grid; gap: 12px; }
+.gift-settings-head { display: grid; gap: 3px; color: var(--text); font-size: 12px; }
+.gift-settings-head span { color: var(--muted); font-size: 11px; font-weight: 600; line-height: 1.45; }
+.gift-fields-grid-wide { grid-template-columns: repeat(3, minmax(120px, 1fr)); }
+.gift-settings-switches { display: flex; flex-wrap: wrap; gap: 10px 18px; }
+.gift-whitelist-block { display: grid; gap: 10px; padding: 12px; border: 1px dashed var(--line); border-radius: var(--radius-sm); }
 
 .gift-switch { display: inline-flex; align-items: center; gap: 9px; color: var(--text-soft); font-size: 12px; font-weight: 700; cursor: pointer; }
 .gift-switch input { position: absolute; width: 1px; height: 1px; opacity: 0; }
@@ -663,8 +679,14 @@
 .collectible-rows { display: grid; gap: 7px; }
 .collectible-row { position: relative; display: grid; align-items: end; gap: 7px; padding: 9px 9px 9px 36px; background: var(--panel-subtle); border: 1px solid var(--line); border-radius: var(--radius-sm); }
 .collectible-row:hover { background: var(--panel); border-color: var(--line-strong); box-shadow: var(--shadow-sm); }
-.collectible-row.animated { grid-template-columns: minmax(120px, 1.2fr) 90px 78px minmax(160px, 1.4fr) 48px 30px; }
-.collectible-row.backdrop { grid-template-columns: minmax(110px, 1.2fr) 70px 80px 70px repeat(4, 52px) 48px 30px; }
+/* Раунд 36: в строке animated СЕМЬ полей (раунд 33 добавил выбор типа
+   редкости) — прежние 6 колонок выталкивали кнопку удаления на неявный
+   второй ряд и элементы наслаивались друг на друга. */
+.collectible-row.animated { grid-template-columns: minmax(104px, 1.1fr) 92px 78px 68px minmax(132px, 1.25fr) 42px 28px; }
+/* Раунд 36: уплотнённые фиксированные колонки — строка фонов помещается в
+   ширину модального окна без наложения (было ~880px минимум при ~700px
+   доступных). */
+.collectible-row.backdrop { grid-template-columns: minmax(96px, 1fr) 58px 66px 58px repeat(4, 42px) 40px 28px; }
 .collectible-row-index { position: absolute; top: 0; bottom: 0; left: 0; display: grid; width: 27px; place-items: center; color: var(--purple-text); background: var(--purple-tint); border-right: 1px solid var(--purple-border); border-radius: var(--radius-xs) 0 0 var(--radius-xs); font-size: 10px; font-weight: 800; }
 .collectible-row label { display: grid; min-width: 0; gap: 4px; }
 .collectible-row label > span { color: var(--muted); font-size: 9px; font-weight: 800; text-transform: uppercase; letter-spacing: .025em; }
@@ -683,6 +705,44 @@
 .collectible-backdrop-preview { display: grid; width: 42px; height: 42px; flex: 0 0 42px; place-items: center; border: 1px solid rgba(42, 31, 71, .18); border-radius: var(--radius-sm); box-shadow: inset 0 0 0 1px rgba(255,255,255,.2); font-size: 11px; font-weight: 900; }
 .collectible-row .icon-btn { align-self: center; }
 .collectible-row .icon-btn:disabled { opacity: .28; }
+
+/* Раунд 34: поблочное копирование из другой ревизии — выбор источника
+   (список ревизий коллекции по slug) + кнопка прямо в шапке секции. */
+.collectible-copy-tools { display: flex; min-width: 0; align-items: center; gap: 6px; }
+.collectible-copy-select { height: 30px; max-width: 190px; padding: 0 8px; color: var(--text); background: var(--input-bg); border: 1px solid var(--line-strong); border-radius: var(--radius-sm); font: inherit; font-size: 11px; }
+.collectible-copy-select:focus { border-color: var(--purple); box-shadow: 0 0 0 3px var(--purple-tint); outline: none; }
+.collectible-copy-tools .btn { flex: 0 0 auto; }
+.collectible-copy-block .collectible-copy-tools-all { padding: 0; }
+.collectible-copy-block .collectible-copy-select { flex: 1 1 auto; max-width: 320px; height: 34px; }
+/* Раунд 35: пустой список ревизий / подсказка под выбором источника. */
+.collectible-copy-empty { display: block; color: var(--muted); font-size: 10px; }
+
+/* Раунд 34: лимит возможных улучшенных подарков опубликованной ревизии. */
+.collectible-supply-row { display: flex; flex-wrap: wrap; align-items: center; gap: 9px; padding: 10px 14px; border-bottom: 1px solid var(--purple-border); background: var(--panel-subtle); }
+.collectible-supply-row label { display: grid; gap: 4px; }
+.collectible-supply-row label > span { color: var(--muted); font-size: 9px; font-weight: 800; text-transform: uppercase; letter-spacing: .025em; }
+.collectible-supply-row input { width: 110px; height: 30px; padding: 0 8px; color: var(--text); background: var(--input-bg); border: 1px solid var(--line-strong); border-radius: var(--radius-sm); font: inherit; font-size: 11px; }
+.collectible-supply-row input:focus { border-color: var(--purple); box-shadow: 0 0 0 3px var(--purple-tint); outline: none; }
+.collectible-supply-hint { flex: 1 1 220px; min-width: 0; color: var(--muted); font-size: 10px; }
+.gift-validation.compact { padding: 9px 12px; }
+
+/* Раунд 34: окно загрузки и предпросмотра новой анимации в редакторе. */
+.gift-edit-animation { display: grid; gap: 10px; padding: 12px; border: 1px dashed var(--line); border-radius: var(--radius-sm); }
+.gift-edit-animation-head { display: grid; gap: 3px; }
+.gift-edit-animation-head span { color: var(--muted); font-size: 10px; font-weight: 500; }
+.gift-edit-animation-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 12px; }
+.gift-edit-animation-current,
+.gift-edit-animation-new { display: grid; min-width: 0; align-content: start; gap: 8px; padding: 10px; background: var(--panel-subtle); border: 1px solid var(--line); border-radius: var(--radius-sm); }
+.gift-edit-animation-label { color: var(--muted); font-size: 9px; font-weight: 800; text-transform: uppercase; letter-spacing: .025em; }
+.gift-edit-animation-current .gift-animation-shell { width: 116px; height: 116px; margin: 0 auto; }
+.gift-edit-animation-placeholder { display: grid; place-items: center; height: 116px; gap: 6px; color: var(--muted); background: var(--panel); border: 1px dashed var(--line-strong); border-radius: var(--radius-sm); font-size: 10px; text-align: center; }
+.gift-edit-animation-new .gift-file-picker { position: relative; }
+.gift-edit-animation-new .gift-animation-shell { width: 116px; height: 116px; margin: 0 auto; }
+
+@media (max-width: 900px) {
+  .gift-edit-animation-grid { grid-template-columns: 1fr; }
+  .collectible-copy-select { max-width: none; flex: 1 1 140px; }
+}
 
 @media (max-width: 900px) {
   .gift-fields-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }

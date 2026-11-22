@@ -51,9 +51,36 @@ type StarsGiveawayPurchase struct {
 	WinnersAreVisible  bool     `json:"winners_are_visible,omitempty"`
 }
 
-// StarsPurchaseForm binds one short-lived fiat Stars checkout to its
-// authenticated buyer, purpose and exact server-advertised package. Recipient
-// is zero for a self top-up and mandatory for a friend gift.
+// StarsTopupAcquisition — канал приобретения звёзд (раунд 29/32): определяет
+// проекцию транзакции начисления для локализации официальными клиентами.
+// Fragment — «Покупка на Fragment», AppStore/PlayMarket — «Покупка в
+// приложении», Bot — «Бот для покупки звёзд».
+type StarsTopupAcquisition string
+
+const (
+	StarsTopupFragment   StarsTopupAcquisition = "fragment"
+	StarsTopupAppStore   StarsTopupAcquisition = "appstore"
+	StarsTopupPlayMarket StarsTopupAcquisition = "playmarket"
+	StarsTopupBot        StarsTopupAcquisition = "bot"
+)
+
+// StarsTopupReason маппит канал приобретения в reason транзакции начисления;
+// пустой/неизвестный канал деградирует к Fragment-начислению (StarsReasonTopup).
+func (a StarsTopupAcquisition) StarsTopupReason() StarsTransactionReason {
+	switch a {
+	case StarsTopupAppStore:
+		return StarsReasonTopupAppStore
+	case StarsTopupPlayMarket:
+		return StarsReasonTopupPlayMarket
+	case StarsTopupBot:
+		return StarsReasonTopupBot
+	default:
+		return StarsReasonTopup
+	}
+}
+
+// StarsPurchaseForm is the immutable checkout intent persisted by
+// IssueStarsPurchaseForm and settled by sendPaymentForm.
 type StarsPurchaseForm struct {
 	FormID           int64
 	Kind             StarsPurchaseKind
@@ -66,6 +93,9 @@ type StarsPurchaseForm struct {
 	Amount           int64
 	IssuedAt         int
 	ExpiresAt        int
+	// Acquisition задаёт канал приобретения для топап-покупки (раунд 32):
+	// пустое значение = Fragment; для не-топап форм игнорируется.
+	Acquisition StarsTopupAcquisition
 }
 
 // StarsPurchaseRequest is the immutable settlement command carried by
@@ -103,10 +133,16 @@ type StarsGiveawayInfo struct {
 type StarsTransactionReason string
 
 const (
-	StarsReasonGrant    StarsTransactionReason = "grant"    // 起始余额自动授予
-	StarsReasonTopup    StarsTransactionReason = "topup"    // 充值（本地铸造）
-	StarsReasonReaction StarsTransactionReason = "reaction" // 付费 reaction 花费
-	StarsReasonGift     StarsTransactionReason = "gift"     // 星礼花费/收取
+	StarsReasonGrant StarsTransactionReason = "grant" // 起始余额自动授予
+	StarsReasonTopup StarsTransactionReason = "topup" // 充值（本地铸造）
+	// Раунд 32: варианты пополнения, ожидаемые payments_stars_topup_variants_test
+	// (снимок, загруженный на GitHub, ссылался на эти константы — без них
+	// go test ./internal/rpc не собирался). Семантика: откуда пришла оплата.
+	StarsReasonTopupAppStore   StarsTransactionReason = "topup_appstore"   // Покупка в приложении (App Store)
+	StarsReasonTopupPlayMarket StarsTransactionReason = "topup_playmarket" // Покупка в приложении (Play Market)
+	StarsReasonTopupBot        StarsTransactionReason = "topup_bot"        // Бот для покупки звёзд
+	StarsReasonReaction        StarsTransactionReason = "reaction"         // 付费 reaction 花费
+	StarsReasonGift            StarsTransactionReason = "gift"             // 星礼花费/收取
 	// StarsReasonGiftConvert 是礼物转星（兑换回 Stars）的专用原因：官方客户端
 	// 对「出售礼物」不画 gift 标志的「来自用户的礼物」签名，只按 stargift
 	// 渲染礼物本体。

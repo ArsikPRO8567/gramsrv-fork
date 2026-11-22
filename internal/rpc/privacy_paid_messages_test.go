@@ -12,13 +12,12 @@ import (
 
 	appaccount "telesrv/internal/app/account"
 	appprivacy "telesrv/internal/app/privacy"
-	appstars "telesrv/internal/app/stars"
 	appusers "telesrv/internal/app/users"
 	"telesrv/internal/domain"
 	"telesrv/internal/store/memory"
 )
 
-func newPrivateRequirementRouter(t *testing.T, senderPremium bool) (*Router, *appaccount.Service, *appprivacy.Service, *memory.ContactStore, domain.User, domain.User) {
+func newPrivateRequirementRouter(t *testing.T, senderPremium bool) (*Router, *appaccount.Service, *appprivacy.Service, *memory.ContactStore, domain.User, domain.User, *captureMessages) {
 	t.Helper()
 	ctx := context.Background()
 	usersStore := memory.NewUserStore()
@@ -39,52 +38,19 @@ func newPrivateRequirementRouter(t *testing.T, senderPremium bool) (*Router, *ap
 	privacy := appprivacy.NewService(memory.NewPrivacyStore(), contacts).ConfigureReadModels(users, nil)
 	settingsStore := memory.NewPasswordStore()
 	account := appaccount.NewService(settingsStore, appaccount.WithAccountSettings(settingsStore))
+	messages := &captureMessages{}
 	router := New(Config{}, Deps{
 		Account:  account,
 		Privacy:  privacy,
 		Users:    users,
-		Messages: &captureMessages{},
+		Messages: messages,
 	}, zaptest.NewLogger(t), clock.System)
-	return router, account, privacy, contacts, alice, bob
-}
-
-// newPrivateLedgerRouter 复用上面的骨架并接入真实账本（memory StarsStore）：
-// 问题 B 的付费消息扣费与问题 C 的配对交易 ID 都在这条链路上验证。
-func newPrivateLedgerRouter(t *testing.T, senderPremium bool) (*Router, *appaccount.Service, *memory.StarsStore, domain.User, domain.User) {
-	t.Helper()
-	ctx := context.Background()
-	usersStore := memory.NewUserStore()
-	aliceInput := domain.User{AccessHash: 11, Phone: "15550008101", FirstName: "Alice"}
-	if senderPremium {
-		aliceInput.PremiumUntil = int(time.Now().Add(time.Hour).Unix())
-	}
-	alice, err := usersStore.Create(ctx, aliceInput)
-	if err != nil {
-		t.Fatalf("create Alice: %v", err)
-	}
-	bob, err := usersStore.Create(ctx, domain.User{AccessHash: 22, Phone: "15550008102", FirstName: "Bob"})
-	if err != nil {
-		t.Fatalf("create Bob: %v", err)
-	}
-	users := appusers.NewService(usersStore)
-	contacts := memory.NewContactStore()
-	privacy := appprivacy.NewService(memory.NewPrivacyStore(), contacts).ConfigureReadModels(users, nil)
-	settingsStore := memory.NewPasswordStore()
-	account := appaccount.NewService(settingsStore, appaccount.WithAccountSettings(settingsStore))
-	starsStore := memory.NewStarsStore()
-	router := New(Config{}, Deps{
-		Account:  account,
-		Privacy:  privacy,
-		Users:    users,
-		Messages: &captureMessages{},
-		Stars:    appstars.NewService(starsStore, appstars.WithStartingGrant(0)),
-	}, zaptest.NewLogger(t), clock.System)
-	return router, account, starsStore, alice, bob
+	return router, account, privacy, contacts, alice, bob, messages
 }
 
 func TestPrivateContactRequirementUsesNoPaidMessagesReadModel(t *testing.T) {
 	ctx := context.Background()
-	r, account, privacy, contacts, alice, bob := newPrivateRequirementRouter(t, false)
+	r, account, privacy, contacts, alice, bob, messages := newPrivateRequirementRouter(t, false)
 	if _, err := account.SetGlobalPrivacy(ctx, bob.ID, domain.GlobalPrivacy{NoncontactPeersPaidStars: 7}); err != nil {
 		t.Fatalf("set Bob paid requirement: %v", err)
 	}
@@ -130,8 +96,14 @@ func TestPrivateContactRequirementUsesNoPaidMessagesReadModel(t *testing.T) {
 	if err := send(81001, 0); err == nil || !strings.Contains(err.Error(), "ALLOW_PAYMENT_REQUIRED") || !strings.Contains(err.Error(), "(7)") {
 		t.Fatalf("non-exempt send err = %v, want ALLOW_PAYMENT_REQUIRED 7", err)
 	}
-	if err := send(81002, 7); err == nil || !strings.Contains(err.Error(), "PAYMENT_UNSUPPORTED") {
-		t.Fatalf("authorized paid send err = %v, want explicit unsupported ledger", err)
+	// Раунд 37: авторизованная платная отправка БОЛЬШЕ НЕ ОТКАЗЫВАЕТ
+	// PAYMENT_UNSUPPORTED — гейт передаёт цену в store, списание выполняется
+	// в транзакции отправки (см. TestMessagesSendMessagePaidMessageChargesSender).
+	if err := send(81002, 7); err != nil {
+		t.Fatalf("authorized paid send err = %v, want success with store charge", err)
+	}
+	if messages.sendReq.PaidMessageStars != 7 {
+		t.Fatalf("authorized paid send store price = %d, want 7", messages.sendReq.PaidMessageStars)
 	}
 
 	if _, err := privacy.SetRules(ctx, bob.ID, domain.PrivacyKeyNoPaidMessages, []domain.PrivacyRule{{
@@ -169,98 +141,6 @@ func TestPrivateContactRequirementUsesNoPaidMessagesReadModel(t *testing.T) {
 	}
 }
 
-// TestPaidMessageLedgerTransfer 问题 B+C：接入真实账本后，授权的付费消息
-// 发送成功并原子扣费；发送方借记行与接收方贷记行共享同一个公开交易 ID。
-func TestPaidMessageLedgerTransfer(t *testing.T) {
-	ctx := context.Background()
-	r, account, starsStore, alice, bob := newPrivateLedgerRouter(t, false)
-	if _, err := account.SetGlobalPrivacy(ctx, bob.ID, domain.GlobalPrivacy{NoncontactPeersPaidStars: 7}); err != nil {
-		t.Fatalf("set Bob paid requirement: %v", err)
-	}
-	// 起始授予关闭（WithStartingGrant(0)）：先手动给 Alice 足够余额。
-	if _, _, err := starsStore.EnsureGrant(ctx, alice.ID, 100, int(time.Now().Unix())); err != nil {
-		t.Fatalf("grant Alice stars: %v", err)
-	}
-	sent, err := r.onMessagesSendMessage(WithUserID(ctx, alice.ID), &tg.MessagesSendMessageRequest{
-		Peer:           &tg.InputPeerUser{UserID: bob.ID, AccessHash: bob.AccessHash},
-		Message:        "paid hello",
-		RandomID:       83001,
-		AllowPaidStars: 7,
-	})
-	if err != nil {
-		t.Fatalf("paid send err = %v, want success with ledger charge", err)
-	}
-	if sent == nil {
-		t.Fatalf("paid send returned nil updates")
-	}
-	// 余额：Alice 100 - 7 = 93；Bob 0 + 7 = 7。
-	aliceBalance, err := starsStore.GetBalance(ctx, alice.ID)
-	if err != nil || aliceBalance.Balance != 93 {
-		t.Fatalf("alice balance = %d, err %v; want 93", aliceBalance.Balance, err)
-	}
-	bobBalance, err := starsStore.GetBalance(ctx, bob.ID)
-	if err != nil || bobBalance.Balance != 7 {
-		t.Fatalf("bob balance = %d, err %v; want 7", bobBalance.Balance, err)
-	}
-	// 问题 C：两侧行共享同一个公开交易 ID，reason=paid_message，peer 互指。
-	senderPage, err := starsStore.ListTransactions(ctx, alice.ID, domain.StarsTransactionQuery{Limit: 10})
-	if err != nil {
-		t.Fatalf("list alice txns: %v", err)
-	}
-	var senderRow domain.StarsTransaction
-	for _, item := range senderPage.Transactions {
-		if item.Amount == -7 {
-			senderRow = item
-			break
-		}
-	}
-	if senderRow.ID == 0 {
-		t.Fatalf("alice debit row missing; page %+v", senderPage.Transactions)
-	}
-	if senderRow.Reason != domain.StarsReasonPaidMessage {
-		t.Fatalf("sender reason = %s, want paid_message", senderRow.Reason)
-	}
-	if senderRow.Peer != (domain.Peer{Type: domain.PeerTypeUser, ID: bob.ID}) {
-		t.Fatalf("sender peer = %+v, want Bob", senderRow.Peer)
-	}
-	if senderRow.TransactionID == "" {
-		t.Fatalf("sender row carries no public transaction id")
-	}
-	recipientPage, err := starsStore.ListTransactions(ctx, bob.ID, domain.StarsTransactionQuery{Limit: 10})
-	if err != nil {
-		t.Fatalf("list bob txns: %v", err)
-	}
-	if len(recipientPage.Transactions) != 1 {
-		t.Fatalf("bob txn count = %d, want 1", len(recipientPage.Transactions))
-	}
-	recipientRow := recipientPage.Transactions[0]
-	if recipientRow.Amount != 7 || recipientRow.Reason != domain.StarsReasonPaidMessage {
-		t.Fatalf("recipient row = %+v, want +7 paid_message", recipientRow)
-	}
-	if recipientRow.Peer != (domain.Peer{Type: domain.PeerTypeUser, ID: alice.ID}) {
-		t.Fatalf("recipient peer = %+v, want Alice", recipientRow.Peer)
-	}
-	if recipientRow.TransactionID != senderRow.TransactionID {
-		t.Fatalf("paired transaction ids differ: sender %q recipient %q", senderRow.TransactionID, recipientRow.TransactionID)
-	}
-	// 余额不足：全新 router（无缓存的隐私/设置读模型），发送方没有余额 →
-	// BALANCE_TOO_LOW。生产环境设置变更经 PostgreSQL read-model listener 失效
-	// 缓存；内存测试没有 listener，避免复用已缓存的 router。
-	r2, account2, _, alice2, bob2 := newPrivateLedgerRouter(t, false)
-	if _, err := account2.SetGlobalPrivacy(ctx, bob2.ID, domain.GlobalPrivacy{NoncontactPeersPaidStars: 7}); err != nil {
-		t.Fatalf("set Bob2 paid requirement: %v", err)
-	}
-	_, err = r2.onMessagesSendMessage(WithUserID(ctx, alice2.ID), &tg.MessagesSendMessageRequest{
-		Peer:           &tg.InputPeerUser{UserID: bob2.ID, AccessHash: bob2.AccessHash},
-		Message:        "cannot afford",
-		RandomID:       83002,
-		AllowPaidStars: 7,
-	})
-	if err == nil || !strings.Contains(err.Error(), "BALANCE_TOO_LOW") {
-		t.Fatalf("insufficient paid send err = %v, want BALANCE_TOO_LOW", err)
-	}
-}
-
 func TestPrivateContactRequirementPremiumGateUsesViewerFactsReadModel(t *testing.T) {
 	ctx := context.Background()
 	for _, tc := range []struct {
@@ -272,7 +152,7 @@ func TestPrivateContactRequirementPremiumGateUsesViewerFactsReadModel(t *testing
 		{name: "premium allowed", senderPremium: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			r, account, _, _, alice, bob := newPrivateRequirementRouter(t, tc.senderPremium)
+			r, account, _, _, alice, bob, _ := newPrivateRequirementRouter(t, tc.senderPremium)
 			if _, err := account.SetGlobalPrivacy(ctx, bob.ID, domain.GlobalPrivacy{NewNoncontactPeersRequirePremium: true}); err != nil {
 				t.Fatalf("set premium requirement: %v", err)
 			}
