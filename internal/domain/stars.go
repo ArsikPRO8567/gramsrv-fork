@@ -51,36 +51,9 @@ type StarsGiveawayPurchase struct {
 	WinnersAreVisible  bool     `json:"winners_are_visible,omitempty"`
 }
 
-// StarsTopupAcquisition — канал приобретения звёзд (раунд 29/32): определяет
-// проекцию транзакции начисления для локализации официальными клиентами.
-// Fragment — «Покупка на Fragment», AppStore/PlayMarket — «Покупка в
-// приложении», Bot — «Бот для покупки звёзд».
-type StarsTopupAcquisition string
-
-const (
-	StarsTopupFragment   StarsTopupAcquisition = "fragment"
-	StarsTopupAppStore   StarsTopupAcquisition = "appstore"
-	StarsTopupPlayMarket StarsTopupAcquisition = "playmarket"
-	StarsTopupBot        StarsTopupAcquisition = "bot"
-)
-
-// StarsTopupReason маппит канал приобретения в reason транзакции начисления;
-// пустой/неизвестный канал деградирует к Fragment-начислению (StarsReasonTopup).
-func (a StarsTopupAcquisition) StarsTopupReason() StarsTransactionReason {
-	switch a {
-	case StarsTopupAppStore:
-		return StarsReasonTopupAppStore
-	case StarsTopupPlayMarket:
-		return StarsReasonTopupPlayMarket
-	case StarsTopupBot:
-		return StarsReasonTopupBot
-	default:
-		return StarsReasonTopup
-	}
-}
-
-// StarsPurchaseForm is the immutable checkout intent persisted by
-// IssueStarsPurchaseForm and settled by sendPaymentForm.
+// StarsPurchaseForm binds one short-lived fiat Stars checkout to its
+// authenticated buyer, purpose and exact server-advertised package. Recipient
+// is zero for a self top-up and mandatory for a friend gift.
 type StarsPurchaseForm struct {
 	FormID           int64
 	Kind             StarsPurchaseKind
@@ -93,9 +66,6 @@ type StarsPurchaseForm struct {
 	Amount           int64
 	IssuedAt         int
 	ExpiresAt        int
-	// Acquisition задаёт канал приобретения для топап-покупки (раунд 32):
-	// пустое значение = Fragment; для не-топап форм игнорируется.
-	Acquisition StarsTopupAcquisition
 }
 
 // StarsPurchaseRequest is the immutable settlement command carried by
@@ -133,16 +103,10 @@ type StarsGiveawayInfo struct {
 type StarsTransactionReason string
 
 const (
-	StarsReasonGrant StarsTransactionReason = "grant" // 起始余额自动授予
-	StarsReasonTopup StarsTransactionReason = "topup" // 充值（本地铸造）
-	// Раунд 32: варианты пополнения, ожидаемые payments_stars_topup_variants_test
-	// (снимок, загруженный на GitHub, ссылался на эти константы — без них
-	// go test ./internal/rpc не собирался). Семантика: откуда пришла оплата.
-	StarsReasonTopupAppStore   StarsTransactionReason = "topup_appstore"   // Покупка в приложении (App Store)
-	StarsReasonTopupPlayMarket StarsTransactionReason = "topup_playmarket" // Покупка в приложении (Play Market)
-	StarsReasonTopupBot        StarsTransactionReason = "topup_bot"        // Бот для покупки звёзд
-	StarsReasonReaction        StarsTransactionReason = "reaction"         // 付费 reaction 花费
-	StarsReasonGift            StarsTransactionReason = "gift"             // 星礼花费/收取
+	StarsReasonGrant    StarsTransactionReason = "grant"    // 起始余额自动授予
+	StarsReasonTopup    StarsTransactionReason = "topup"    // 充值（本地铸造）
+	StarsReasonReaction StarsTransactionReason = "reaction" // 付费 reaction 花费
+	StarsReasonGift     StarsTransactionReason = "gift"     // 星礼花费/收取
 	// StarsReasonGiftConvert 是礼物转星（兑换回 Stars）的专用原因：官方客户端
 	// 对「出售礼物」不画 gift 标志的「来自用户的礼物」签名，只按 stargift
 	// 渲染礼物本体。
@@ -194,45 +158,15 @@ func (t StarsTransaction) PublicID() string {
 
 // StarsLedgerFlags 携带写入流水时的可选官方投影属性（礼物载荷与退款标志）。
 // 独立于 amount 符号：退款既可能是入账（撤销发放）也可能是出账（撤销扣款）。
-// TransactionID 是账户对账户转账的共享公开 ID（问题 C）：付款方借记行与
-// 收款方贷记行必须携带同一个 stars_/ton_ 标识，客户端两侧比对交易时能对上。
-// 空值表示单边流水，写入点自行生成新的公开 ID。
 type StarsLedgerFlags struct {
-	GiftID        int64  // 关联礼物；0 = 无礼物载荷
-	GiftIsUnique  bool   // GiftID 指向 unique_star_gifts.id（否则为目录礼物）
-	Refunded      bool   // starsTransaction.refund
-	TransactionID string // 配对转账的共享公开 ID；空 = 由写入点生成
-}
-
-// StarsPeerTransferRequest 描述一笔账户对账户的 Stars 转账：从 SenderUserID
-// 借记 Amount（>0）并给 RecipientUserID 入账同一金额，两侧流水共享同一个
-// 公开交易 ID（StarsPeerTransferResult.TransactionID），在同一个数据库事务内
-// 提交（余额与两条流水永不漂移）。Refund 变体把资金原路转回，两侧行都
-// 携带 starsTransaction.refund。
-type StarsPeerTransferRequest struct {
-	SenderUserID    int64
-	RecipientUserID int64
-	Amount          int64
-	Reason          StarsTransactionReason
-	Date            int
-}
-
-// StarsPeerTransferResult 返回转账后的两侧余额与共享公开交易 ID。
-type StarsPeerTransferResult struct {
-	TransactionID    string
-	SenderBalance    int64
-	RecipientBalance int64
-}
-
-// IsZero 报告请求是否为空（未配置转账）。
-func (r StarsPeerTransferRequest) IsZero() bool {
-	return r.SenderUserID == 0 && r.RecipientUserID == 0 && r.Amount == 0 && r.Reason == "" && r.Date == 0
+	GiftID       int64 // 关联礼物；0 = 无礼物载荷
+	GiftIsUnique bool  // GiftID 指向 unique_star_gifts.id（否则为目录礼物）
+	Refunded     bool  // starsTransaction.refund
 }
 
 // NewStarsTransactionID 生成官方形状的公开交易 ID：前缀 + 60 位 [A-Za-z0-9]
-// 随机串（如 stars_ab12…/ton_ab12…）。加密随机源保证不可预测；62^60 空间下
-// 冲突实际不可能。配对转账（StarsLedgerFlags.TransactionID）两侧行共享同
-// 一个 ID，账户对账户的资金转移在双方流水里可互相印证。
+// 随机串（如 stars_ab12…/ton_ab12…）。加密随机源保证不可预测；唯一性由
+// transaction_id 上的部分唯一索引兜底，62^60 空间下冲突实际不可能。
 func NewStarsTransactionID(ton bool) string {
 	prefix := "stars_"
 	if ton {

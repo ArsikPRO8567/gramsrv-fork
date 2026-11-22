@@ -132,117 +132,6 @@ func (s *StarsStore) Debit(ctx context.Context, userID, amount int64, reason dom
 	return s.DebitFlags(ctx, userID, amount, reason, peer, date, title, desc, domain.StarsLedgerFlags{})
 }
 
-// TransferToUser 在单个事务内执行账户对账户的 Stars 转账（问题 B/C）：从
-// SenderUserID 借记 Amount 并给 RecipientUserID 入账同一金额，两条流水共享
-// 同一个公开交易 ID（payment_messages 变体由 rpc 层编排骨点调用；转售由
-// lifecycle 借助 starsLedgerExtra.transactionID 复用同一机制）。余额不足
-// 返回 domain.ErrStarsInsufficient（rpc 映射为 BALANCE_TOO_LOW）。
-func (s *StarsStore) TransferToUser(ctx context.Context, req domain.StarsPeerTransferRequest) (domain.StarsPeerTransferResult, error) {
-	if req.SenderUserID <= 0 || req.RecipientUserID <= 0 || req.Amount <= 0 || req.Reason == "" || req.Date <= 0 {
-		return domain.StarsPeerTransferResult{}, domain.ErrStarsInvalidAmount
-	}
-	if req.SenderUserID == req.RecipientUserID {
-		return domain.StarsPeerTransferResult{}, domain.ErrStarsInvalidAmount
-	}
-	shared := domain.NewStarsTransactionID(false)
-	var out domain.StarsPeerTransferResult
-	err := withTx(ctx, s.db, "transfer stars between users", func(tx pgx.Tx) error {
-		var senderBalance int64
-		var granted bool
-		err := tx.QueryRow(ctx, `SELECT balance, granted FROM stars_balances WHERE user_id = $1 FOR UPDATE`, req.SenderUserID).
-			Scan(&senderBalance, &granted)
-		if errors.Is(err, pgx.ErrNoRows) || (err == nil && senderBalance < req.Amount) {
-			return domain.ErrStarsInsufficient
-		}
-		if err != nil {
-			return fmt.Errorf("select sender stars balance for transfer: %w", err)
-		}
-		if err := tx.QueryRow(ctx, `UPDATE stars_balances SET balance = balance - $2, updated_at = now() WHERE user_id = $1 RETURNING balance`,
-			req.SenderUserID, req.Amount).Scan(&senderBalance); err != nil {
-			return fmt.Errorf("debit sender stars balance: %w", err)
-		}
-		var recipientBalance int64
-		if err := tx.QueryRow(ctx, `
-INSERT INTO stars_balances (user_id, balance, updated_at) VALUES ($1, $2, now())
-ON CONFLICT (user_id) DO UPDATE SET balance = stars_balances.balance + EXCLUDED.balance, updated_at = now()
-RETURNING balance, granted`, req.RecipientUserID, req.Amount).Scan(&recipientBalance, &granted); err != nil {
-			return fmt.Errorf("credit recipient stars balance: %w", err)
-		}
-		// 两侧行共享同一个公开 ID（问题 C）：付款方 peer = 收款人，收款方
-		// peer = 付款人 — 客户端按对手方渲染「付费消息给/来自 X」。
-		if _, err := insertStarsTxnFull(ctx, tx, req.SenderUserID, -req.Amount, req.Reason,
-			domain.Peer{Type: domain.PeerTypeUser, ID: req.RecipientUserID}, req.Date, "", "",
-			domain.StarsLedgerFlags{TransactionID: shared}); err != nil {
-			return err
-		}
-		if _, err := insertStarsTxnFull(ctx, tx, req.RecipientUserID, req.Amount, req.Reason,
-			domain.Peer{Type: domain.PeerTypeUser, ID: req.SenderUserID}, req.Date, "", "",
-			domain.StarsLedgerFlags{TransactionID: shared}); err != nil {
-			return err
-		}
-		out = domain.StarsPeerTransferResult{TransactionID: shared, SenderBalance: senderBalance, RecipientBalance: recipientBalance}
-		return nil
-	})
-	if err != nil {
-		return domain.StarsPeerTransferResult{}, err
-	}
-	return out, nil
-}
-
-// RefundPeerTransfer 把一笔账户对账户转账原路退回：给原付款方入账、从原
-// 收款方扣款，两侧行都携带 starsTransaction.refund 并共享一个新的公开 ID
-// （退款是独立交易；原始转账的共享 ID 保持不变）。
-func (s *StarsStore) RefundPeerTransfer(ctx context.Context, req domain.StarsPeerTransferRequest) (domain.StarsPeerTransferResult, error) {
-	if req.SenderUserID <= 0 || req.RecipientUserID <= 0 || req.Amount <= 0 || req.Reason == "" || req.Date <= 0 {
-		return domain.StarsPeerTransferResult{}, domain.ErrStarsInvalidAmount
-	}
-	if req.SenderUserID == req.RecipientUserID {
-		return domain.StarsPeerTransferResult{}, domain.ErrStarsInvalidAmount
-	}
-	shared := domain.NewStarsTransactionID(false)
-	var out domain.StarsPeerTransferResult
-	err := withTx(ctx, s.db, "refund stars peer transfer", func(tx pgx.Tx) error {
-		// 收款方余额充足（同一请求内刚入账，中间没有消费窗口），但依然走
-		// FOR UPDATE 充足性检查 — 常规账本不变量不因退款路径放宽。
-		var recipientBalance int64
-		var granted bool
-		err := tx.QueryRow(ctx, `SELECT balance, granted FROM stars_balances WHERE user_id = $1 FOR UPDATE`, req.RecipientUserID).
-			Scan(&recipientBalance, &granted)
-		if errors.Is(err, pgx.ErrNoRows) || (err == nil && recipientBalance < req.Amount) {
-			return domain.ErrStarsInsufficient
-		}
-		if err != nil {
-			return fmt.Errorf("select recipient stars balance for refund: %w", err)
-		}
-		if err := tx.QueryRow(ctx, `UPDATE stars_balances SET balance = balance - $2, updated_at = now() WHERE user_id = $1 RETURNING balance`,
-			req.RecipientUserID, req.Amount).Scan(&recipientBalance); err != nil {
-			return fmt.Errorf("debit recipient stars balance: %w", err)
-		}
-		var senderBalance int64
-		if err := tx.QueryRow(ctx, `
-INSERT INTO stars_balances (user_id, balance, updated_at) VALUES ($1, $2, now())
-ON CONFLICT (user_id) DO UPDATE SET balance = stars_balances.balance + EXCLUDED.balance, updated_at = now()
-RETURNING balance, granted`, req.SenderUserID, req.Amount).Scan(&senderBalance, &granted); err != nil {
-			return fmt.Errorf("credit sender stars balance: %w", err)
-		}
-		refundFlags := domain.StarsLedgerFlags{TransactionID: shared, Refunded: true}
-		if _, err := insertStarsTxnFull(ctx, tx, req.RecipientUserID, -req.Amount, req.Reason,
-			domain.Peer{Type: domain.PeerTypeUser, ID: req.SenderUserID}, req.Date, "", "", refundFlags); err != nil {
-			return err
-		}
-		if _, err := insertStarsTxnFull(ctx, tx, req.SenderUserID, req.Amount, req.Reason,
-			domain.Peer{Type: domain.PeerTypeUser, ID: req.RecipientUserID}, req.Date, "", "", refundFlags); err != nil {
-			return err
-		}
-		out = domain.StarsPeerTransferResult{TransactionID: shared, SenderBalance: senderBalance, RecipientBalance: recipientBalance}
-		return nil
-	})
-	if err != nil {
-		return domain.StarsPeerTransferResult{}, err
-	}
-	return out, nil
-}
-
 // DebitFlags 借记并写入官方投影属性（礼物载荷/退款标志）。余额不足返回
 // domain.ErrStarsInsufficient；其余语义同 Debit。
 func (s *StarsStore) DebitFlags(ctx context.Context, userID, amount int64, reason domain.StarsTransactionReason, peer domain.Peer, date int, title, desc string, flags domain.StarsLedgerFlags) (domain.StarsBalance, error) {
@@ -372,12 +261,6 @@ func insertStarsTxnFull(ctx context.Context, tx pgx.Tx, userID, amount int64, re
 	if flags.GiftID > 0 {
 		giftID = flags.GiftID
 	}
-	// 共享公开 ID（问题 C）：配对转账两侧行写入同一个 stars_… 标识；
-	// 单边流水在写入点生成新的公开 ID。
-	publicID := flags.TransactionID
-	if publicID == "" {
-		publicID = domain.NewStarsTransactionID(false)
-	}
 	var rowID int64
 	if err := tx.QueryRow(ctx, `
 INSERT INTO stars_transactions (user_id, peer_type, peer_id, amount, reason, title, description, date,
@@ -385,17 +268,10 @@ INSERT INTO stars_transactions (user_id, peer_type, peer_id, amount, reason, tit
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
 RETURNING id`,
 		userID, string(peer.Type), peer.ID, amount, string(reason), title, desc, date,
-		publicID, flags.Refunded, giftID, flags.GiftIsUnique).Scan(&rowID); err != nil {
+		domain.NewStarsTransactionID(false), flags.Refunded, giftID, flags.GiftIsUnique).Scan(&rowID); err != nil {
 		return 0, fmt.Errorf("insert stars transaction: %w", err)
 	}
 	return rowID, nil
-}
-
-// insertStarsTxnWithID 写一条流水并使用调用方指定的公开交易 ID（账户间转账
-// 的双方行必须共用同一 ID）；amount 带符号。
-func insertStarsTxnWithID(ctx context.Context, tx pgx.Tx, userID, amount int64, reason domain.StarsTransactionReason, peer domain.Peer, date int, transactionID string) error {
-	_, err := insertStarsTxnFull(ctx, tx, userID, amount, reason, peer, date, "", "", domain.StarsLedgerFlags{TransactionID: transactionID})
-	return err
 }
 
 // ListTransactionsByID 按公开交易 ID 批量读取本人账本流水（

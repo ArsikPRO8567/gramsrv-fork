@@ -435,20 +435,6 @@ WHERE b.owner_user_id=$1 AND b.box_id=$2`, owner.ID, upgraded.Send.SenderMessage
 	if err != nil || tonPage.Balance != 999000 || len(tonPage.Transactions) < 2 {
 		t.Fatalf("TON ledger page = %+v err %v", tonPage, err)
 	}
-	// Раунд 37: перевод между аккаунтами — у списания покупателя и зачисления
-	// продавца ОДИН публичный transaction_id.
-	var buyerResaleTxnID, sellerResaleTxnID string
-	if err := pool.QueryRow(ctx, `SELECT transaction_id FROM ton_transactions WHERE user_id=$1 AND reason='gift_resale' AND amount_nanoton<0`,
-		resaleBuyer.ID).Scan(&buyerResaleTxnID); err != nil || buyerResaleTxnID == "" {
-		t.Fatalf("buyer resale txn id = %q err %v", buyerResaleTxnID, err)
-	}
-	if err := pool.QueryRow(ctx, `SELECT transaction_id FROM ton_transactions WHERE user_id=$1 AND reason='gift_resale' AND amount_nanoton>0`,
-		offerBuyer.ID).Scan(&sellerResaleTxnID); err != nil || sellerResaleTxnID == "" {
-		t.Fatalf("seller resale txn id = %q err %v", sellerResaleTxnID, err)
-	}
-	if buyerResaleTxnID != sellerResaleTxnID {
-		t.Fatalf("resale transaction ids must match: buyer %q seller %q", buyerResaleTxnID, sellerResaleTxnID)
-	}
 
 	transferred, err := lifecycle.TransferStarGift(ctx, domain.StarGiftTransferRequest{ActorUserID: resaleBuyer.ID,
 		Ref: domain.SavedStarGiftRef{Owner: domain.Peer{Type: domain.PeerTypeUser, ID: resaleBuyer.ID}, MsgID: resold.Saved.MsgID},
@@ -906,31 +892,6 @@ can_resell_at,drop_original_details_stars,can_craft_at FROM peer_star_gifts WHER
 		Scan(&auctionSavedCount); err != nil || auctionSavedCount != 1 {
 		t.Fatalf("auction saved award count = %d err %v", auctionSavedCount, err)
 	}
-	// Раунд 37: проекция уникального номера аукционного подарка должна
-	// сохраняться и в сервисных сообщениях (копия победителя в чате
-	// «Telegram» и копия получателя), и в профиле владельца — без
-	// gift_num клиент нигде не показывает «№N».
-	winnerCopy := starGiftActionFromBox(t, ctx, pool, resaleBuyer.ID, domain.OfficialSystemUserID)
-	if winnerCopy == nil || winnerCopy.GiftNum != 1 {
-		t.Fatalf("auction winner copy gift_num = %+v, want 1", winnerCopy)
-	}
-	recipientCopy := starGiftActionFromBox(t, ctx, pool, owner.ID, resaleBuyer.ID)
-	if recipientCopy == nil || recipientCopy.GiftNum != 1 {
-		t.Fatalf("auction recipient copy gift_num = %+v, want 1", recipientCopy)
-	}
-	profileGifts, err := gifts.ListByOwnerFiltered(ctx, domain.SavedStarGiftFilter{Owner: ownerPeer, Limit: 50})
-	if err != nil || len(profileGifts.Gifts) == 0 {
-		t.Fatalf("profile list for gift_num = %+v err %v", profileGifts, err)
-	}
-	profileNum := 0
-	for _, g := range profileGifts.Gifts {
-		if g.GiftID == auctionEntry.Gift.ID {
-			profileNum = g.GiftNum
-		}
-	}
-	if profileNum != 1 {
-		t.Fatalf("profile gift_num = %d, want 1", profileNum)
-	}
 
 }
 
@@ -1173,12 +1134,10 @@ WHERE channel_id=$1 AND event_type='send_message' AND message::text LIKE '%star_
 		t.Fatalf("channel stars balance projection = %d err %v", balance, err)
 	}
 	starsPage, err := lifecycle.ChannelStarsTransactions(ctx, created.Channel.ID, domain.StarsTransactionQuery{Limit: 20})
+	// Раунд 30: конвертация — «продажа» (reason='gift_convert'), а не
+	// «получение подарка» (gift), в том числе для канальных владельцев.
 	if err != nil || starsPage.Balance != 20 || len(starsPage.Transactions) != 1 ||
-		starsPage.Transactions[0].Amount != 20 ||
-		// Раунд 30/37: конвертация — «продажа подарка» на обоих уровнях леджера:
-		// клиент рисует её по reason='gift_convert' + stargift (без текстовых
-		// заголовков), поэтому канальная конвертация тоже несёт gift_convert.
-		starsPage.Transactions[0].Reason != domain.StarsReasonGiftConvert {
+		starsPage.Transactions[0].Amount != 20 || starsPage.Transactions[0].Reason != domain.StarsReasonGiftConvert {
 		t.Fatalf("channel stars transaction projection = %+v err %v", starsPage, err)
 	}
 	if _, err := lifecycle.ConvertStarGift(ctx, domain.StarGiftConvertRequest{ActorUserID: actor.ID,
@@ -1356,20 +1315,6 @@ AND media #>> '{service_action,star_gift_unique,transferred}' IS NULL`,
 	}
 	if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM channel_ton_transactions WHERE channel_id=$1 AND gift_id=$2`, created.Channel.ID, listed.ID).Scan(&channelTONTxns); err != nil || channelTONTxns != 1 {
 		t.Fatalf("channel local TON transactions = %d err %v", channelTONTxns, err)
-	}
-	// Раунд 37: покупка в канал — списание покупателя и зачисление каналу
-	// тоже носят один публичный transaction_id.
-	var buyerChannelResaleTxnID, channelResaleTxnID string
-	if err := pool.QueryRow(ctx, `SELECT transaction_id FROM ton_transactions WHERE user_id=$1 AND reason='gift_resale' AND amount_nanoton<0`,
-		actor.ID).Scan(&buyerChannelResaleTxnID); err != nil || buyerChannelResaleTxnID == "" {
-		t.Fatalf("channel resale buyer txn id = %q err %v", buyerChannelResaleTxnID, err)
-	}
-	if err := pool.QueryRow(ctx, `SELECT transaction_id FROM channel_ton_transactions WHERE channel_id=$1 AND reason='gift_resale' AND amount_nanoton>0`,
-		created.Channel.ID).Scan(&channelResaleTxnID); err != nil || channelResaleTxnID == "" {
-		t.Fatalf("channel resale credit txn id = %q err %v", channelResaleTxnID, err)
-	}
-	if buyerChannelResaleTxnID != channelResaleTxnID {
-		t.Fatalf("channel resale transaction ids must match: buyer %q channel %q", buyerChannelResaleTxnID, channelResaleTxnID)
 	}
 	if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM channel_admin_log_events WHERE channel_id=$1 AND message::text LIKE '%star_gift_unique%'`,
 		createdTarget.Channel.ID).Scan(&targetResaleLogs); err != nil || targetResaleLogs != 1 {
@@ -1861,23 +1806,6 @@ func craftedSourceEditForUserAndGift(result domain.StarGiftCraftResult, userID, 
 		}
 	}
 	return domain.EditedMessageForUser{UserID: userID}
-}
-
-// starGiftActionFromBox читает последнее сервисное сообщение диалога
-// (owner_user_id, peer_id) и возвращает его StarGift-action.
-func starGiftActionFromBox(t *testing.T, ctx context.Context, pool *pgxpool.Pool, ownerUserID, peerID int64) *domain.MessageStarGiftAction {
-	t.Helper()
-	var mediaJSON string
-	if err := pool.QueryRow(ctx, `SELECT media::text FROM message_boxes
-WHERE owner_user_id=$1 AND peer_id=$2 ORDER BY box_id DESC LIMIT 1`, ownerUserID, peerID).
-		Scan(&mediaJSON); err != nil {
-		t.Fatalf("load star gift box %d/%d: %v", ownerUserID, peerID, err)
-	}
-	media, err := decodeMessageMedia(mediaJSON)
-	if err != nil || media == nil || media.ServiceAction == nil || media.ServiceAction.StarGift == nil {
-		t.Fatalf("decode star gift box %d/%d: media=%+v err=%v", ownerUserID, peerID, media, err)
-	}
-	return media.ServiceAction.StarGift
 }
 
 func starGiftUniqueActionFromEdit(edit domain.EditedMessageForUser) *domain.MessageStarGiftUniqueAction {
