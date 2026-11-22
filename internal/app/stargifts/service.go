@@ -491,6 +491,106 @@ func (s *Service) CollectibleAvailability(ctx context.Context, giftIDs []int64) 
 	return s.store.CollectibleAvailability(ctx, giftIDs)
 }
 
+// ActiveCollectibleRevision (раунд 37) возвращает активную ревизию подарка
+// с полными метаданными строк атрибутов — источник правки опубликованной
+// ревизии «на месте» (SyncActiveCollectibleRevision) в админке.
+func (s *Service) ActiveCollectibleRevision(ctx context.Context, giftID int64) (domain.StarGiftCollectibleRevision, bool, error) {
+	if s == nil || s.store == nil || giftID <= 0 {
+		return domain.StarGiftCollectibleRevision{}, false, nil
+	}
+	return s.store.ActiveCollectibleRevision(ctx, giftID)
+}
+
+// CollectibleRevision (раунд 37) возвращает ревизию коллекции по id —
+// источник правки «на месте» и просмотр произвольной ревизии в админке.
+func (s *Service) CollectibleRevision(ctx context.Context, revisionID int64) (domain.StarGiftCollectibleRevision, error) {
+	if s == nil || s.store == nil || revisionID <= 0 {
+		return domain.StarGiftCollectibleRevision{}, domain.ErrStarGiftNotFound
+	}
+	return s.store.CollectibleRevision(ctx, revisionID)
+}
+
+// CollectibleRevisionSummaries (раунд 34/36) перечисляет ревизии коллекции
+// в лёгкой проекции для выбора источника копирования атрибутов: непустой
+// slug — по slug_prefix И gift_id; пустые выборки — последние ревизии всех
+// коллекций (scope "all").
+func (s *Service) CollectibleRevisionSummaries(ctx context.Context, giftID int64, slug string) ([]domain.StarGiftCollectibleRevisionSummary, string, error) {
+	if s == nil || s.store == nil {
+		return nil, "", nil
+	}
+	return s.store.CollectibleRevisionSummaries(ctx, giftID, slug)
+}
+
+// UpdateCatalogSettings публикует новую ревизию каталога без обязательной
+// загрузки новой анимации: документ и блоб копируются из активной ревизии.
+func (s *Service) UpdateCatalogSettings(ctx context.Context, write domain.StarGiftCatalogSettingsWrite) (domain.StarGiftCatalogEntry, error) {
+	if s == nil || s.store == nil {
+		return domain.StarGiftCatalogEntry{}, domain.ErrStarGiftNotFound
+	}
+	entry, err := s.store.UpdateCatalogSettings(ctx, write)
+	if err == nil {
+		s.InvalidateStarGiftCatalog()
+	}
+	return entry, err
+}
+
+// SetStarGiftAuctionSettings (раунд 34/36) применяет административные правки
+// рабочего состояния аукциона (длительности раундов, минимум, даты,
+// количество раундов, остаток подарков, последний номер) с пересчётом
+// границ; агрегат живёт в lifecycle-хранилище.
+func (s *Service) SetStarGiftAuctionSettings(ctx context.Context, write domain.StarGiftAuctionRuntimeWrite) (domain.StarGiftAuction, error) {
+	if s == nil || s.lifecycle == nil {
+		return domain.StarGiftAuction{}, domain.ErrStarGiftAuctionUnavailable
+	}
+	return s.lifecycle.SetStarGiftAuctionSettings(ctx, write)
+}
+
+// SetCollectibleSupplyTotal (раунд 34) правит лимит возможных улучшенных
+// подарков опубликованной ревизии коллекции: supply каталога может быть
+// увеличен админом, лимит ревизии поднимается следом (только повышение).
+func (s *Service) SetCollectibleSupplyTotal(ctx context.Context, write domain.StarGiftCollectibleSupplyWrite) (domain.StarGiftCollectibleRevision, error) {
+	if s == nil || s.store == nil {
+		return domain.StarGiftCollectibleRevision{}, domain.ErrStarGiftCollectibleInvalid
+	}
+	revision, err := s.store.SetCollectibleSupplyTotal(ctx, write)
+	if err == nil {
+		s.InvalidateStarGiftCatalog()
+	}
+	return revision, err
+}
+
+// AnimationMedia (раунд 37) — payload анимации активной ревизии вместе с
+// mime: Lottie/TGS отдают нормализованный JSON (превью админки), медиа-
+// форматы (.webp/.webm/.png) — исходные байты файла: из payload
+// (memory-адаптер) или из контентно-адресного блоб-бэкенда по objectKey.
+func (s *Service) AnimationMedia(ctx context.Context, giftID int64) (payload []byte, mime string, found bool, err error) {
+	if s == nil || s.store == nil || giftID <= 0 {
+		return nil, "", false, nil
+	}
+	raw, format, objectKey, ok, err := s.store.AnimationPayload(ctx, giftID)
+	if err != nil || !ok {
+		return nil, "", false, err
+	}
+	if format.IsLottieFamily() {
+		// Превью админки: JSON, как и до раунда 37 (giftAnimation парсит его).
+		return raw, "application/json; charset=utf-8", true, nil
+	}
+	if len(raw) > 0 {
+		return raw, format.MimeType(), true, nil
+	}
+	if objectKey == "" {
+		return nil, "", false, fmt.Errorf("star gift animation blob is missing")
+	}
+	if s.blobs == nil {
+		return nil, "", false, fmt.Errorf("star gift blob backend is not configured")
+	}
+	data, err := s.blobs.Get(ctx, objectKey)
+	if err != nil {
+		return nil, "", false, fmt.Errorf("load star gift animation media: %w", err)
+	}
+	return data, format.MimeType(), true, nil
+}
+
 func (s *Service) CollectibleAnimationJSON(ctx context.Context, giftID int64, kind domain.StarGiftCollectibleAttributeKind, attributeID int64) ([]byte, bool, error) {
 	if s == nil || s.store == nil {
 		return nil, false, nil

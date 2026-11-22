@@ -978,7 +978,7 @@ func lockSavedStarGiftByID(ctx context.Context, tx pgx.Tx, savedID int64) (domai
 func lockSavedStarGiftWhere(ctx context.Context, tx pgx.Tx, where string, args ...any) (domain.SavedStarGift, error) {
 	row := tx.QueryRow(ctx, `
 SELECT p.id, p.owner_peer_type, p.owner_peer_id, p.from_user_id, p.gift_id, p.catalog_revision_id,
-       p.msg_id, p.saved_id, p.gift_date, p.name_hidden, p.unsaved, p.converted, p.convert_stars, p.prepaid_upgrade_stars, p.prepaid_upgrade_hash, p.gift_num,
+       p.msg_id, p.saved_id, p.gift_date, p.name_hidden, p.unsaved, p.converted, p.convert_stars, p.prepaid_upgrade_stars, p.prepaid_upgrade_hash, p.gift_num, COALESCE(p.paid_stars, 0),
            p.lifecycle_status, p.transfer_stars, p.can_export_at, p.can_transfer_at, p.can_resell_at,
            p.drop_original_details_stars, p.can_craft_at,
        p.message, COALESCE(p.message_entities, '[]'::jsonb)::text, COALESCE(p.unique_gift_id, 0), p.upgrade_msg_id, p.pinned_order,

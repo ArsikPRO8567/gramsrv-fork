@@ -683,17 +683,20 @@ WHERE c.gift_id=$1`, giftID).Scan(&raw)
 
 // AnimationPayload возвращает payload анимации активной ревизии вместе с
 // форматом источника. Lottie-ревизии несут JSON в payload; медиа-ревизии
-// (.webp/.webm/.png, раунд 37) — пустой payload и objectKey блоба: байты
-// читает вызывающий через блоб-бэкенд.
+// (.webp/.webm/.png, раунд 37) — пустой payload и objectKey блоба: ключ
+// берётся из file_blobs по location_key 'doc:<document_id>', байты читает
+// вызывающий через контентно-адресный блоб-бэкенд.
 func (s *StarGiftStore) AnimationPayload(ctx context.Context, giftID int64) (payload []byte, format domain.StarGiftAnimationFormat, objectKey string, found bool, err error) {
 	var raw []byte
 	var sourceFormat string
 	var documentID int64
+	var blobKey string
 	err = s.db.QueryRow(ctx, `
-SELECT r.animation_json::text, r.source_format, r.document_id
+SELECT r.animation_json::text, r.source_format, r.document_id, COALESCE(fb.object_key, '')
 FROM star_gift_catalog c
 JOIN star_gift_catalog_revisions r ON r.id = c.active_revision_id
-WHERE c.gift_id=$1`, giftID).Scan(&raw, &sourceFormat, &documentID)
+LEFT JOIN file_blobs fb ON fb.location_key = 'doc:' || r.document_id::text
+WHERE c.gift_id=$1`, giftID).Scan(&raw, &sourceFormat, &documentID, &blobKey)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, "", "", false, nil
 	}
@@ -704,7 +707,7 @@ WHERE c.gift_id=$1`, giftID).Scan(&raw, &sourceFormat, &documentID)
 	if format.IsLottieFamily() {
 		return raw, format, "", true, nil
 	}
-	return nil, format, fmt.Sprintf("doc:%d", documentID), true, nil
+	return nil, format, blobKey, true, nil
 }
 
 func catalogEntryByID(ctx context.Context, db sqlcgen.DBTX, giftID int64) (domain.StarGiftCatalogEntry, error) {

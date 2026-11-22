@@ -165,6 +165,13 @@ WHERE c.active_revision_id = cr.id AND c.gift_id = cr.gift_id AND c.gift_id = $2
 	return result, err
 }
 
+// CollectibleRevision (раунд 37) возвращает ревизию коллекции по id с
+// полными метаданными строк атрибутов. Неизвестный id — ошибка с
+// pgx.ErrNoRows внутри (админ-слой показывает «не найдено»).
+func (s *StarGiftStore) CollectibleRevision(ctx context.Context, revisionID int64) (domain.StarGiftCollectibleRevision, error) {
+	return collectibleRevisionByID(ctx, s.db, revisionID)
+}
+
 func (s *StarGiftStore) ActiveCollectibleRevision(ctx context.Context, giftID int64) (domain.StarGiftCollectibleRevision, bool, error) {
 	revisionID, ok, err := activeCollectibleRevisionID(ctx, s.db, giftID)
 	if err != nil || !ok {
