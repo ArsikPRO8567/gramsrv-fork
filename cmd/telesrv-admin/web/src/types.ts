@@ -418,7 +418,7 @@ export type StarGiftCollectibleAttributeRow = {
   document_id?: string;
   sort_order: number;
   source_name?: string;
-  source_format?: "tgs" | "lottie";
+  source_format?: "tgs" | "lottie" | "webp" | "webm" | "png";
   backdrop_id?: number;
   center_color?: number;
   edge_color?: number;

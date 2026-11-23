@@ -23,7 +23,7 @@ import (
 
 // newPaidMessagesFlowRouter собирает роутер на реальных memory-store (сообщения +
 // звёздный ledger связаны AttachStarsStore) для сквозного сценария платных сообщений.
-func newPaidMessagesFlowRouter(t *testing.T) (*Router, *memory.StarsStore, domain.User, domain.User) {
+func newPaidMessagesFlowRouter(t *testing.T) (*Router, *memory.StarsStore, *memory.UserStore, domain.User, domain.User) {
         t.Helper()
         ctx := context.Background()
         usersStore := memory.NewUserStore()
@@ -57,7 +57,7 @@ func newPaidMessagesFlowRouter(t *testing.T) (*Router, *memory.StarsStore, domai
                 Stars:    appstars.NewService(starsStore),
                 Updates:  appupdates.NewService(memory.NewUpdateStateStore(), memory.NewUpdateEventStore()),
         }, zaptest.NewLogger(t), clock.System)
-        return router, starsStore, alice, bob
+        return router, starsStore, usersStore, alice, bob
 }
 
 func paidFlowBalance(t *testing.T, st *memory.StarsStore, userID int64) int64 {
@@ -84,10 +84,12 @@ func paidFlowSend(t *testing.T, r *Router, ctx context.Context, sender domain.Us
 }
 
 // TestPaidMessagesChargeFlow — полный протокол: плата за сообщение, недостаток
-// средств, «получатель платы пишет первым», возврат через toggleNoPaidMessagesException.
+// средств, сохранение платы после ответа получателя (ответ НЕ снимает плату),
+// автоосвобождение при первом сообщении получателя платы и возврат через
+// toggleNoPaidMessagesException с сервисным сообщением о возврате.
 func TestPaidMessagesChargeFlow(t *testing.T) {
         ctx := context.Background()
-        r, stars, alice, bob := newPaidMessagesFlowRouter(t)
+        r, stars, usersStore, alice, bob := newPaidMessagesFlowRouter(t)
 
         // Bob включил плату 10 звёзд за сообщение от не-контактов.
         account := r.deps.Account.(interface {
@@ -144,27 +146,51 @@ func TestPaidMessagesChargeFlow(t *testing.T) {
         }
 
         // Возврат стартового баланса (грант уже погашен при первом списании —
-        // EnsureGrant был бы no-op) и проверка «получатель платы пишет первым»:
-        // Bob пишет Alice — она освобождается от платы Bob'а (протокол paid-messages).
+        // EnsureGrant был бы no-op).
         if _, err := stars.Credit(context.Background(), alice.ID, domain.DefaultStarsStartingGrant, domain.StarsReasonAdjust, domain.Peer{}, 0, "", ""); err != nil {
                 t.Fatalf("regrant alice: %v", err)
         }
+
+        // Раунд 41: ответ получателя платы НЕ снимает плату — диалог начала Alice,
+        // поэтому Bob'у запрещено автоосвобождать её. Ответ уходит без платы
+        // (Bob ничего не должен Alice), после него Alice по-прежнему платит.
         if err := paidFlowSend(t, r, ctx, bob, alice, 9004, 0); err != nil {
-                t.Fatalf("fee owner first message: %v", err)
+                t.Fatalf("fee owner reply: %v", err)
         }
-        if got := paidFlowBalance(t, stars, bob.ID); got != int64(10*850/1000) {
-                t.Fatalf("bob balance after own send = %d, want unchanged %d", got, 10*850/1000)
+        err = paidFlowSend(t, r, ctx, alice, bob, 9005, 0)
+        if err == nil || !strings.Contains(err.Error(), "ALLOW_PAYMENT_REQUIRED") {
+                t.Fatalf("send after owner reply err = %v, want ALLOW_PAYMENT_REQUIRED (fee persists)", err)
         }
-        // Alice теперь в исключениях Bob'а — её отправка бесплатна и без allow_paid_stars.
-        if err := paidFlowSend(t, r, ctx, alice, bob, 9005, 0); err != nil {
+        if err := paidFlowSend(t, r, ctx, alice, bob, 9006, 10); err != nil {
+                t.Fatalf("paid send after owner reply: %v", err)
+        }
+        if got, want := paidFlowBalance(t, stars, alice.ID), int64(domain.DefaultStarsStartingGrant-10); got != want {
+                t.Fatalf("alice balance after second charge = %d, want %d", got, want)
+        }
+        if got, want := paidFlowBalance(t, stars, bob.ID), int64(2*(10*850/1000)); got != want {
+                t.Fatalf("bob balance after second charge = %d, want %d", got, want)
+        }
+
+        // Раунд 41: «получатель платы пишет первым» — Bob инициирует диалог с Carol,
+        // никогда ему не писавшей: Carol автоматически освобождается от платы.
+        carol, err := usersStore.Create(ctx, domain.User{AccessHash: 33, Phone: "15550009003", FirstName: "Carol"})
+        if err != nil {
+                t.Fatalf("create Carol: %v", err)
+        }
+        if err := paidFlowSend(t, r, ctx, bob, carol, 9007, 0); err != nil {
+                t.Fatalf("fee owner first message to Carol: %v", err)
+        }
+        carolBefore := paidFlowBalance(t, stars, carol.ID)
+        if err := paidFlowSend(t, r, ctx, carol, bob, 9008, 0); err != nil {
                 t.Fatalf("exempt-by-first-message send: %v", err)
         }
-        if got := paidFlowBalance(t, stars, alice.ID); got != domain.DefaultStarsStartingGrant {
-                t.Fatalf("alice balance after free send = %d, want %d", got, domain.DefaultStarsStartingGrant)
+        if got := paidFlowBalance(t, stars, carol.ID); got != carolBefore {
+                t.Fatalf("carol balance after free send = %d, want unchanged %d (стартовый грант ленивый)", got, carolBefore)
         }
 
         // Возврат: Bob нажимает «Не брать плату» с refund_charged — Alice получает
-        // все потраченные на Bob'а звёзды (10), Bob теряет свою нетто-выручку (8).
+        // все потраченные на Bob'а звёзды (20 за два сообщения), Bob теряет свою
+        // нетто-выручку (16). В чате появляется сервисное сообщение о возврате.
         ok, err := r.onAccountToggleNoPaidMessagesException(WithUserID(ctx, bob.ID), &tg.AccountToggleNoPaidMessagesExceptionRequest{
                 RefundCharged: true,
                 UserID:        &tg.InputUser{UserID: alice.ID, AccessHash: alice.AccessHash},
@@ -173,11 +199,21 @@ func TestPaidMessagesChargeFlow(t *testing.T) {
                 t.Fatalf("toggle exception: ok=%v err=%v", ok, err)
         }
         if got, want := paidFlowBalance(t, stars, alice.ID), domain.DefaultStarsStartingGrant+int64(10); got != want {
-                t.Fatalf("alice balance after refund = %d, want %d", got, want)
+                t.Fatalf("alice balance after refund = %d, want %d (грант восстановлен после дрена, -10 за второе сообщение, +20 возврат)", got, want)
         }
         if got, want := paidFlowBalance(t, stars, bob.ID), int64(0); got != want {
                 t.Fatalf("bob balance after claw back = %d, want %d", got, want)
         }
+        assertPaidMessagesRefundedServiceMessage(t, r, bob.ID, alice.ID, 2, 20)
+
+        // После снятия платы отправка Alice бесплатна (исключение).
+        if err := paidFlowSend(t, r, ctx, alice, bob, 9009, 0); err != nil {
+                t.Fatalf("exempt send after refund: %v", err)
+        }
+        if got := paidFlowBalance(t, stars, alice.ID); got != domain.DefaultStarsStartingGrant+int64(10) {
+                t.Fatalf("alice balance after free send = %d, want %d", got, domain.DefaultStarsStartingGrant+10)
+        }
+
         // Повторный вызов ничего не возвращает (защита от двойного возврата).
         if _, err := r.onAccountToggleNoPaidMessagesException(WithUserID(ctx, bob.ID), &tg.AccountToggleNoPaidMessagesExceptionRequest{
                 RefundCharged: true,
@@ -199,11 +235,39 @@ func TestPaidMessagesChargeFlow(t *testing.T) {
         }
 }
 
+// assertPaidMessagesRefundedServiceMessage (раунд 41) — в диалоге appeared
+// messageActionPaidMessagesRefunded с числом погашенных сообщений и суммой.
+func assertPaidMessagesRefundedServiceMessage(t *testing.T, r *Router, ownerUserID, peerUserID int64, wantCount int, wantStars int64) {
+        t.Helper()
+        history, err := r.deps.Messages.GetHistory(context.Background(), ownerUserID, domain.MessageFilter{
+                HasPeer: true,
+                Peer:    domain.Peer{Type: domain.PeerTypeUser, ID: peerUserID},
+                Limit:   10,
+        })
+        if err != nil {
+                t.Fatalf("history for refund service message: %v", err)
+        }
+        for _, msg := range history.Messages {
+                if msg.Media == nil || msg.Media.Kind != domain.MessageMediaKindService || msg.Media.ServiceAction == nil {
+                        continue
+                }
+                action := msg.Media.ServiceAction
+                if action.Kind != domain.MessageServiceActionPaidMessagesRefunded || action.PaidMessagesRefunded == nil {
+                        continue
+                }
+                if action.PaidMessagesRefunded.Count != wantCount || action.PaidMessagesRefunded.Stars != wantStars {
+                        t.Fatalf("refund service message = %+v, want count %d stars %d", action.PaidMessagesRefunded, wantCount, wantStars)
+                }
+                return
+        }
+        t.Fatalf("paid messages refunded service message not found in dialog %d -> %d", ownerUserID, peerUserID)
+}
+
 // TestPaidMessagesToggleRejectsMonoforumFlags — пользовательские вызовы не
 // могут требовать оплату (require_payment) и не поддерживают parent_peer.
 func TestPaidMessagesToggleRejectsMonoforumFlags(t *testing.T) {
         ctx := context.Background()
-        r, _, alice, bob := newPaidMessagesFlowRouter(t)
+        r, _, _, alice, bob := newPaidMessagesFlowRouter(t)
         _, err := r.onAccountToggleNoPaidMessagesException(WithUserID(ctx, alice.ID), &tg.AccountToggleNoPaidMessagesExceptionRequest{
                 RequirePayment: true,
                 UserID:         &tg.InputUser{UserID: bob.ID, AccessHash: bob.AccessHash},

@@ -75,9 +75,43 @@ func (r *Router) privateContactRestrictionFor(
         }
         global := settings.GlobalPrivacy
         if global.NoncontactPeersPaidStars > 0 {
+                // Раунд 41: плата берётся только с участника, начавшего диалог с
+                // получателем платы первым (core.telegram.org/api/paid-messages —
+                // «users the recipient has messaged first» бесплатны). Диалог,
+                // начатый получателем платы до включения настройки, тоже остаётся
+                // бесплатным; ответ получателя платы платность не меняет.
+                if initiated, probed := r.privateDialogInitiatedBySender(ctx, senderUserID, recipientUserID); probed && !initiated {
+                        return privateContactRequirement{}, nil
+                }
                 return privateContactRequirement{paidStars: global.NoncontactPeersPaidStars}, nil
         }
         return privateContactRequirement{requirePremium: global.NewNoncontactPeersRequirePremium}, nil
+}
+
+// privateDialogInitiatorProbe — узкий доступ к хранилищу сообщений для пробы
+// инициатора диалога (реализации: memory/postgres MessageStore; тестовые фейки
+// интерфейс не несут — проба считается недоступной).
+type privateDialogInitiatorProbe interface {
+        PrivateDialogInitiatedBy(ctx context.Context, aUserID, bUserID int64) (bool, error)
+}
+
+// privateDialogInitiatedBySender сообщает, инициировал ли senderUserID диалог
+// с recipientUserID (самое раннее сообщение пары — его, или диалога ещё нет).
+// Проба недоступна или ошиблась → (true, false): сохраняется прежнее поведение
+// «плата берётся», отправка не блокируется.
+func (r *Router) privateDialogInitiatedBySender(ctx context.Context, senderUserID, recipientUserID int64) (initiated bool, probed bool) {
+        if r == nil || r.deps.Messages == nil || senderUserID == 0 || recipientUserID == 0 || senderUserID == recipientUserID {
+                return true, false
+        }
+        probe, ok := r.deps.Messages.(privateDialogInitiatorProbe)
+        if !ok {
+                return true, false
+        }
+        initiated, err := probe.PrivateDialogInitiatedBy(ctx, senderUserID, recipientUserID)
+        if err != nil {
+                return true, false
+        }
+        return initiated, true
 }
 
 func (r *Router) viewerIsPremiumForPrivacy(ctx context.Context, viewerUserID int64) (bool, error) {

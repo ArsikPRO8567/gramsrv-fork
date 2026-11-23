@@ -8,7 +8,7 @@ import { Alert, Badge, EmptyRow, Metric, PageFrame, QueryPanel } from "../compon
 import { useI18n } from "../i18n";
 import { formatDate } from "../lib/format";
 import type { CommandResult, OfficialStarGiftRow, StarGiftRow } from "../types";
-import { GiftCollectiblesModal, parseAnimationFile } from "./GiftCollectiblesModal";
+import { GiftCollectiblesModal, isMediaAnimation, parseAnimationFile, type ParsedAnimation } from "./GiftCollectiblesModal";
 
 type OfficialGiftCategory = "all" | "upgrade" | "craft" | "basic";
 
@@ -98,14 +98,20 @@ function OfficialLottiePreview({ sourceGiftID }: { sourceGiftID: string }) {
 }
 
 // Раунд 34: предпросмотр выбранного в редакторе файла (разобранного локально
-// в Lottie JSON) — рядом с текущей анимацией подарка.
-function EditAnimationPreview({ data }: { data: Record<string, unknown> }) {
+// в Lottie JSON; .webp/.webm/.png — <img>/<video> по objectURL) — рядом с
+// текущей анимацией подарка.
+function EditAnimationPreview({ data }: { data: ParsedAnimation }) {
   const host = useRef<HTMLDivElement>(null);
   useEffect(() => {
-    if (!host.current) return;
+    if (!host.current || isMediaAnimation(data)) return;
     const player = lottie.loadAnimation({ container: host.current, renderer: "canvas", loop: true, autoplay: true, animationData: structuredClone(data) });
     return () => player.destroy();
   }, [data]);
+  if (isMediaAnimation(data)) {
+    return <div className="gift-animation-shell"><div className="gift-animation">{data.__media === "webm"
+      ? <video className="gift-media-preview" src={data.url} autoPlay loop muted playsInline />
+      : <img className="gift-media-preview" src={data.url} alt="" />}</div></div>;
+  }
   return <div className="gift-animation-shell"><div className="gift-animation" ref={host} /></div>;
 }
 
@@ -176,7 +182,7 @@ export function GiftsPage() {
   // редактирования. Файл не выбран — команда меняет только настройки
   // (анимация копируется из активной ревизии на сервере).
   const [editFile, setEditFile] = useState<File | null>(null);
-  const [editAnimation, setEditAnimation] = useState<Record<string, unknown> | null>(null);
+  const [editAnimation, setEditAnimation] = useState<ParsedAnimation | null>(null);
   const [editFileError, setEditFileError] = useState("");
   const [reason, setReason] = useState("");
   const [preview, setPreview] = useState<CommandResult | null>(null);
@@ -660,7 +666,7 @@ export function GiftsPage() {
                   </div>}
                 </>}
               </section> : <>
-                <div className="gift-import-note"><span>{t("gifts.importHint")}</span><div className="gift-format-chips" aria-label={t("gifts.formats")}><span>TGS</span><span>Lottie JSON</span></div></div>
+                <div className="gift-import-note"><span>{t("gifts.importHint")}</span><div className="gift-format-chips" aria-label={t("gifts.formats")}><span>TGS</span><span>Lottie JSON</span><span>WEBP</span><span>WEBM</span><span>PNG</span></div></div>
                 <label className={`gift-file-picker ${file ? "has-file" : ""}`}>
                   <input type="file" accept=".tgs,.json,.lottie,.webp,.webm,.png,application/json,application/x-tgsticker,image/webp,video/webm,image/png" onChange={(e) => { setFile(e.target.files?.[0] ?? null); setPreview(null); }} />
                   <span className="gift-file-icon"><FileJson2 size={22} /></span>
@@ -688,7 +694,7 @@ export function GiftsPage() {
                       ? <EditAnimationPreview data={editAnimation} />
                       : <div className="gift-edit-animation-placeholder"><FileJson2 size={22} /><span>{t("gifts.editAnimationKeep")}</span></div>}
                     <label className={`gift-file-picker compact ${editFile ? "has-file" : ""}`}>
-                      <input type="file" accept=".tgs,.json,.lottie,application/json,application/x-tgsticker" onChange={(e) => void chooseEditFile(e.target.files?.[0] ?? null)} />
+                      <input type="file" accept=".tgs,.json,.lottie,.webp,.webm,.png,application/json,application/x-tgsticker,image/webp,image/png,video/webm" onChange={(e) => void chooseEditFile(e.target.files?.[0] ?? null)} />
                       <span className="gift-file-icon"><FileJson2 size={18} /></span>
                       <span className="gift-file-copy"><span className="gift-field-label">{t("gifts.animation")}</span><strong>{editFile ? editFile.name : t("gifts.filePrompt")}</strong><small>{editFile ? formatBytes(editFile.size) : t("gifts.editAnimationKeep")}</small></span>
                       <span className="gift-file-action">{editFile ? t("gifts.changeFile") : t("gifts.chooseFile")}</span>

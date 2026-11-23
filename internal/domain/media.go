@@ -600,6 +600,10 @@ const (
         MessageServiceActionStarGiftOffer         MessageServiceActionKind = "star_gift_offer"
         MessageServiceActionStarGiftOfferDeclined MessageServiceActionKind = "star_gift_offer_declined"
         MessageServiceActionGiftPremium           MessageServiceActionKind = "gift_premium"
+        // MessageServiceActionPaidMessagesRefunded 映射 messageActionPaidMessagesRefunded：
+        // получатель платы снял её (account.toggleNoPaidMessagesException с
+        // refund_charged=true) и вернул плательщику все звёзды за сообщения чата.
+        MessageServiceActionPaidMessagesRefunded MessageServiceActionKind = "paid_messages_refunded"
 )
 
 // MessagePhoneCallAction 是 messageActionPhoneCall 的协议中立载荷。
@@ -692,6 +696,17 @@ type MessageServiceAction struct {
         StarGiftOffer         *MessageStarGiftOfferAction         `json:"star_gift_offer,omitempty"`
         StarGiftOfferDeclined *MessageStarGiftOfferDeclinedAction `json:"star_gift_offer_declined,omitempty"`
         GiftPremium           *MessageGiftPremiumAction           `json:"gift_premium,omitempty"`
+        // PaidMessagesRefunded — возврат звёзд за платные сообщения чата
+        // (messageActionPaidMessagesRefunded#ac1f1fcd).
+        PaidMessagesRefunded *MessagePaidMessagesRefundedAction `json:"paid_messages_refunded,omitempty"`
+}
+
+// MessagePaidMessagesRefundedAction — messageActionPaidMessagesRefunded:
+// Count — число погашенных платных сообщений, Stars — возвращённая сумма
+// (брутто: комиссия сервера при возврате не удерживается).
+type MessagePaidMessagesRefundedAction struct {
+        Count int   `json:"count"`
+        Stars int64 `json:"stars"`
 }
 
 // MessageGiftPremiumAction is projected as

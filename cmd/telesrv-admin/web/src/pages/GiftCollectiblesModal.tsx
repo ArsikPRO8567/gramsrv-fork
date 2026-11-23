@@ -8,6 +8,43 @@ import { useI18n } from "../i18n";
 import type { CommandResult, StarGiftCollectibleAttributeRow, StarGiftCollectiblePreview, StarGiftCollectibleRevision, StarGiftCollectibleRevisionSummary, StarGiftRow } from "../types";
 
 type AnimationData = Record<string, unknown>;
+// Раунд 41: медиа-анимации (.webp/.webm/.png) не разбираются как Lottie —
+// сервер хранит исходные байты, превью строится из objectURL документа.
+export type MediaAnimationDescriptor = {
+  __media: "webp" | "webm" | "png";
+  url: string;
+  name: string;
+};
+export type ParsedAnimation = AnimationData | MediaAnimationDescriptor;
+
+export function isMediaAnimation(value: ParsedAnimation | null): value is MediaAnimationDescriptor {
+  return !!value && (value as MediaAnimationDescriptor).__media !== undefined;
+}
+
+// Раунд 41: распознавание медиа-формата по магическим байтам — PNG-подпись,
+// RIFF/WEBP и EBML-магия webm (совпадает с серверным sniffMediaAnimation).
+function isPNGBytes(bytes: Uint8Array): boolean {
+  return bytes.length >= 8 && bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47 &&
+    bytes[4] === 0x0d && bytes[5] === 0x0a && bytes[6] === 0x1a && bytes[7] === 0x0a;
+}
+
+function isWEBPBytes(bytes: Uint8Array): boolean {
+  return bytes.length >= 12 && bytes[0] === 0x52 && bytes[1] === 0x49 && bytes[2] === 0x46 && bytes[3] === 0x46 &&
+    bytes[8] === 0x57 && bytes[9] === 0x45 && bytes[10] === 0x42 && bytes[11] === 0x50;
+}
+
+function isWEBMBytes(bytes: Uint8Array): boolean {
+  return bytes.length >= 4 && bytes[0] === 0x1a && bytes[1] === 0x45 && bytes[2] === 0xdf && bytes[3] === 0xa3;
+}
+
+function mediaAnimationExtension(file: File): MediaAnimationDescriptor["__media"] | "" {
+  const name = file.name.toLowerCase();
+  if (name.endsWith(".webp")) return "webp";
+  if (name.endsWith(".webm")) return "webm";
+  if (name.endsWith(".png")) return "png";
+  return "";
+}
+
 type AnimatedDraft = {
   key: string;
   name: string;
@@ -18,7 +55,7 @@ type AnimatedDraft = {
   rarity: string;
   sortOrder: string;
   file: File | null;
-  animation: AnimationData | null;
+  animation: ParsedAnimation | null;
   fileError: string;
   // Раунд 33: копия из другой ревизии — document_id исходного атрибута
   // (файл не загружается, документ и анимация переиспользуются).
@@ -29,6 +66,9 @@ type AnimatedDraft = {
   // Раунд 37: правка строки АКТИВНОЙ ревизии этого подарка «на месте».
   // Непустой id — строка обновляется (id сохраняется), файл опционален.
   attributeID: string;
+  // Раунд 41: document_id сохранённого атрибута — источник байтов
+  // медиа-анимации (.webp/.webm/.png) для предпросмотра.
+  documentID: string;
 };
 type BackdropDraft = {
   key: string;
@@ -66,7 +106,7 @@ function rebalanceRarity<T extends { key: string; rarityKind?: string; rarity: s
 
 const newAnimated = (kind: string, sortOrder: number): AnimatedDraft => ({
   key: nextKey(kind), name: "", rarityKind: "permille", rarity: "1", sortOrder: String(sortOrder),
-  file: null, animation: null, fileError: "", copyDocumentID: "", copyFromRevisionID: "", attributeID: ""
+  file: null, animation: null, fileError: "", copyDocumentID: "", copyFromRevisionID: "", attributeID: "", documentID: ""
 });
 
 function newBackdrop(rows: BackdropDraft[]): BackdropDraft {
@@ -84,34 +124,60 @@ const initialBackdrops = () => {
   return rebalanceRarity([first, newBackdrop([first])]);
 };
 
-function AnimationPreview({ data, compact = false }: { data: AnimationData; compact?: boolean }) {
+function AnimationPreview({ data, compact = false }: { data: ParsedAnimation; compact?: boolean }) {
   const host = useRef<HTMLDivElement>(null);
   useEffect(() => {
-    if (!host.current) return;
+    if (!host.current || isMediaAnimation(data)) return;
     const player = lottie.loadAnimation({ container: host.current, renderer: "canvas", loop: true, autoplay: true, animationData: structuredClone(data) });
     return () => player.destroy();
   }, [data]);
+  // Раунд 41: медиа-форматы рендерятся <img>/<video> — Lottie-плеер не участвует.
+  if (isMediaAnimation(data)) {
+    return <div className={`collectible-animation ${compact ? "compact" : ""}`}>{data.__media === "webm"
+      ? <video className="gift-media-preview" src={data.url} autoPlay loop muted playsInline />
+      : <img className="gift-media-preview" src={data.url} alt="" />}</div>;
+  }
   return <div className={`collectible-animation ${compact ? "compact" : ""}`} ref={host} />;
 }
 
 function RemoteAnimation({ giftID, attribute }: { giftID: string; attribute: StarGiftCollectibleAttributeRow }) {
-  const [data, setData] = useState<AnimationData | null>(null);
+  const [data, setData] = useState<ParsedAnimation | null>(null);
   const [failed, setFailed] = useState(false);
   useEffect(() => {
     let cancelled = false;
     setFailed(false);
     api.giftCollectibleAnimation(giftID, attribute.kind as "model" | "pattern", attribute.id)
-      .then((value) => { if (!cancelled) setData(value); })
+      .then((value) => {
+        if (cancelled) return;
+        // Раунд 41: у медиа-атрибута animation_json несёт дескриптор
+        // {format:"webp"|"webm"|"png",...} — байты рендерим из документа.
+        const format = value && typeof value === "object" && !Array.isArray(value)
+          ? (value as Record<string, unknown>).format : undefined;
+        if (format === "webp" || format === "webm" || format === "png") {
+          if (!attribute.document_id) throw new Error("missing document");
+          setData({ __media: format, url: api.stickerDocumentAnimationURL(attribute.document_id), name: attribute.source_name ?? "" });
+          return;
+        }
+        setData(value);
+      })
       .catch(() => { if (!cancelled) setFailed(true); });
     return () => { cancelled = true; };
-  }, [giftID, attribute.id, attribute.kind]);
+  }, [giftID, attribute.id, attribute.kind, attribute.document_id, attribute.source_name]);
   if (failed) return <div className="collectible-animation compact failed">!</div>;
   if (!data) return <div className="collectible-animation compact loading"><Loader2 className="spin" size={15} /></div>;
   return <AnimationPreview data={data} compact />;
 }
 
-export async function parseAnimationFile(file: File): Promise<AnimationData> {
+export async function parseAnimationFile(file: File): Promise<ParsedAnimation> {
   const bytes = new Uint8Array(await file.arrayBuffer());
+  // Раунд 41: медиа-форматы (.webp/.webm/.png) идут мимо Lottie-парсера —
+  // байты отдаются как есть, сервер проверит геометрию/длительность при
+  // публикации. Превью строится из objectURL файла.
+  const byMagic = isPNGBytes(bytes) ? "png" : isWEBPBytes(bytes) ? "webp" : isWEBMBytes(bytes) ? "webm" : "";
+  const mediaKind = byMagic || mediaAnimationExtension(file);
+  if (mediaKind) {
+    return { __media: mediaKind, url: URL.createObjectURL(file), name: file.name };
+  }
   let raw: Uint8Array = bytes;
   // Валидный TGS — это gzip-поток (магия 0x1f 0x8b). Проверка байта должна
   // совпадать с реальной магией gzip: ошибочный байт оставлял бинарный файл
@@ -149,7 +215,8 @@ const animatedFromPreview = (rows: StarGiftCollectibleAttributeRow[] | undefined
     fileError: "",
     copyDocumentID: "",
     copyFromRevisionID: "",
-    attributeID: row.id
+    attributeID: row.id,
+    documentID: row.document_id ?? ""
   } as AnimatedDraft));
 
 const backdropsFromPreview = (rows: StarGiftCollectibleAttributeRow[] | undefined): BackdropDraft[] =>
@@ -309,7 +376,8 @@ export function GiftCollectiblesModal({ gift, onClose, onPublished }: { gift: St
       fileError: "",
       copyDocumentID: inPlace ? "" : row.document_id ?? "",
       copyFromRevisionID: inPlace ? "" : sourceID,
-      attributeID: inPlace ? row.id : ""
+      attributeID: inPlace ? row.id : "",
+      documentID: row.document_id ?? ""
     } as AnimatedDraft));
   };
 
@@ -541,11 +609,11 @@ export function GiftCollectiblesModal({ gift, onClose, onPublished }: { gift: St
             ? <label className="collectible-file copied"><span>{t("gifts.animation")}</span><em><Copy size={13} />{t("collectibles.copiedBadge")} #{row.copyDocumentID}</em></label>
             : row.attributeID && !row.file
               ? <label className="collectible-file copied"><span>{t("gifts.animation")}</span><em><Gem size={13} />{t("collectibles.storedAnimation")} #{row.attributeID}</em></label>
-              : <label className="collectible-file"><span>{t("gifts.animation")}</span><input type="file" accept=".tgs,.json,.lottie,application/json,application/x-tgsticker" onChange={(e) => void chooseFile(kind, row, e.target.files?.[0] ?? null)} /><em><FileJson2 size={13} />{row.file?.name ?? t("gifts.chooseFile")}</em></label>}
+              : <label className="collectible-file"><span>{t("gifts.animation")}</span><input type="file" accept=".tgs,.json,.lottie,.webp,.webm,.png,application/json,application/x-tgsticker,image/webp,image/png,video/webm" onChange={(e) => void chooseFile(kind, row, e.target.files?.[0] ?? null)} /><em><FileJson2 size={13} />{row.file?.name ?? t("gifts.chooseFile")}</em></label>}
           <div className="collectible-inline-preview">{row.animation
             ? <AnimationPreview data={row.animation} compact />
             : row.attributeID && !row.file && (kind === "models" || kind === "patterns")
-              ? <RemoteAnimation giftID={gift.GiftID} attribute={{ id: row.attributeID, kind: kind === "models" ? "model" : "pattern", name: row.name, rarity_kind: row.rarityKind, rarity_permille: Number(row.rarity) || 1, crafted: row.rarityKind !== "permille", official_document_id: "", sort_order: Number(row.sortOrder) } as StarGiftCollectibleAttributeRow} />
+              ? <RemoteAnimation giftID={gift.GiftID} attribute={{ id: row.attributeID, kind: kind === "models" ? "model" : "pattern", name: row.name, rarity_kind: row.rarityKind, rarity_permille: Number(row.rarity) || 1, crafted: row.rarityKind !== "permille", official_document_id: "", sort_order: Number(row.sortOrder), document_id: row.documentID || undefined } as StarGiftCollectibleAttributeRow} />
               : <Sparkles size={16} />}</div>
           <button className="icon-btn danger" type="button" disabled={rows.length <= 2} onClick={() => { setRows(rebalanceRarity(rows.filter((value) => value.key !== row.key))); invalidate(); }} aria-label={t("collectibles.remove")}><Trash2 size={14} /></button>
           {row.fileError && <span className="collectible-file-error">{row.fileError}</span>}

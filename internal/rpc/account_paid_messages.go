@@ -25,6 +25,13 @@ func (r *Router) exemptPaidMessagesRecipient(ctx context.Context, ownerUserID, r
         if err != nil || settings.GlobalPrivacy.NoncontactPeersPaidStars <= 0 {
                 return
         }
+        // Раунд 41: освобождаем только собеседника, с которым владелец платы
+        // инициирует диалог. Если диалог начал платящий (писал первым до или
+        // после включения платы), его плата сохраняется до явного «Не брать
+        // плату» — ответ владельца платность не снимает.
+        if initiated, probed := r.privateDialogInitiatedBySender(ctx, ownerUserID, recipientUserID); probed && !initiated {
+                return
+        }
         _, changed, err := r.deps.Privacy.AddAllowUser(ctx, ownerUserID, domain.PrivacyKeyNoPaidMessages, recipientUserID)
         if err != nil {
                 r.log.Warn("paid messages auto-exemption failed",
@@ -124,6 +131,10 @@ func (r *Router) onAccountToggleNoPaidMessagesException(ctx context.Context, req
                                 zap.Int64("refunded_stars", refund.Refunded),
                                 zap.Int64("clawed_back_stars", refund.ClawedBack),
                                 zap.Int("charges", refund.Charges))
+                        // Раунд 41: официальный протокол paid-messages требует
+                        // сервисное сообщение messageActionPaidMessagesRefunded в
+                        // диалоге — «владелец платы вернул звёзды за сообщения».
+                        r.sendPaidMessagesRefundedServiceMessage(ctx, userID, target.ID, refund)
                 }
         }
         if r.deps.Privacy != nil {
@@ -134,6 +145,49 @@ func (r *Router) onAccountToggleNoPaidMessagesException(ctx context.Context, req
         r.invalidateRPCProjectionForViewer(userID)
         r.pushPaidMessagesPeerSettingsRefresh(ctx, userID, target.ID)
         return true, nil
+}
+
+// sendPaidMessagesRefundedServiceMessage (раунд 41) — сервисное сообщение
+// messageActionPaidMessagesRefunded в диалог владельца платы и плательщика:
+// официальный протокол (core.telegram.org/api/paid-messages) отправляет
+// подтверждение возврата звёзд в самом чате, от имени вернувшего (owner).
+// Best-effort: возврат уже зафиксирован в леджере, сбой доставки не отменяет
+// toggle и не ломает RPC.
+func (r *Router) sendPaidMessagesRefundedServiceMessage(ctx context.Context, ownerUserID, payerUserID int64, refund domain.PaidMessagesRefund) {
+        if r == nil || r.deps.Messages == nil || refund.Refunded <= 0 {
+                return
+        }
+        recipientBlocked, err := r.peerBlocksUser(ctx, ownerUserID, payerUserID)
+        if err != nil {
+                r.log.Warn("paid messages refund service message block probe failed",
+                        zap.Int64("owner_user_id", ownerUserID),
+                        zap.Int64("payer_user_id", payerUserID),
+                        zap.Error(err))
+                recipientBlocked = false
+        }
+        media := &domain.MessageMedia{
+                Kind: domain.MessageMediaKindService,
+                ServiceAction: &domain.MessageServiceAction{
+                        Kind:                 domain.MessageServiceActionPaidMessagesRefunded,
+                        PaidMessagesRefunded: &domain.MessagePaidMessagesRefundedAction{Count: refund.Charges, Stars: refund.Refunded},
+                },
+        }
+        sessionID, _ := SessionIDFrom(ctx)
+        if _, err := r.deps.Messages.SendPrivateText(ctx, ownerUserID, domain.SendPrivateTextRequest{
+                SenderUserID:     ownerUserID,
+                RecipientUserID:  payerUserID,
+                RandomID:         randomNonZeroInt64(),
+                Media:            media,
+                Date:             int(r.clock.Now().Unix()),
+                OriginAuthKeyID:  rawAuthKeyIDForOrigin(ctx),
+                OriginSessionID:  sessionID,
+                RecipientBlocked: recipientBlocked,
+        }); err != nil {
+                r.log.Warn("paid messages refund service message delivery failed",
+                        zap.Int64("owner_user_id", ownerUserID),
+                        zap.Int64("payer_user_id", payerUserID),
+                        zap.Error(err))
+        }
 }
 
 // onAccountGetPaidMessagesRevenue — account.getPaidMessagesRevenue: сколько

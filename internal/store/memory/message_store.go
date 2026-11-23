@@ -1,6 +1,7 @@
 package memory
 
 import (
+        "context"
         "sync"
         "telesrv/internal/domain"
 )
@@ -81,4 +82,38 @@ func (s *MessageStore) AttachStarsStore(stars *StarsStore) {
         s.mu.Lock()
         defer s.mu.Unlock()
         s.stars = stars
+}
+
+// PrivateDialogInitiatedBy (раунд 41) — проба инициатора приватного диалога
+// пары (a,b): true, если самое раннее сообщение пары отправил a, либо диалога
+// ещё нет. Согласована с postgres-реализацией (private_dialog_initiation.go):
+// протокол paid-messages берёт плату только с участника, начавшего диалог
+// первым, а ответ получателя платы платность не меняет.
+func (s *MessageStore) PrivateDialogInitiatedBy(_ context.Context, aUserID, bUserID int64) (bool, error) {
+        if s == nil || aUserID <= 0 || bUserID <= 0 || aUserID == bUserID {
+                return true, nil
+        }
+        s.mu.RLock()
+        defer s.mu.RUnlock()
+        // Обе стороны диалога лежат в боксе a (исходящие и входящие): первое
+        // совпадение по Peer.ID в порядке вставки — самое раннее сообщение пары.
+        if first, found := firstPrivatePairMessage(s.m[aUserID], bUserID); found {
+                return first.Out, nil
+        }
+        // Бокс a мог быть очищен — пробуем бокс b и инвертируем направление.
+        if first, found := firstPrivatePairMessage(s.m[bUserID], aUserID); found {
+                return !first.Out, nil
+        }
+        return true, nil
+}
+
+// firstPrivatePairMessage возвращает первое (по порядку вставки) сообщение
+// бокса в диалоге с peerUserID.
+func firstPrivatePairMessage(box []domain.Message, peerUserID int64) (domain.Message, bool) {
+        for _, msg := range box {
+                if msg.Peer.ID == peerUserID {
+                        return msg, true
+                }
+        }
+        return domain.Message{}, false
 }
