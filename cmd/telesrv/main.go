@@ -715,7 +715,10 @@ func run(logger *zap.Logger) error {
         chatlistStore := postgres.NewChatlistStore(pool)
         messageStore := postgres.NewMessageStore(pool,
                 postgres.WithMessageAllocators(boxIDAllocator),
-                postgres.WithMessageLogger(logger.Named("store").Named("messages")))
+                postgres.WithMessageLogger(logger.Named("store").Named("messages")),
+                // Доля получателя платного сообщения в промилле (раунд 42,
+                // stars_paid_message_commission_permille): остаток — комиссия сервера.
+                postgres.WithPaidMessageCommissionPermille(cfg.StarsPaidMessageCommissionPermille))
         broadcastStore := postgres.NewBroadcastStore(pool)
         broadcastService := broadcastapp.NewService(broadcastStore, messageStore, logger.Named("app").Named("broadcast"))
         // 共享频道行/成员缓存 + 统一 read-model LISTEN/NOTIFY 实时失效：消除高频「逐 RPC
@@ -730,7 +733,10 @@ func run(logger *zap.Logger) error {
                 postgres.WithChannelRowCache(channelRowCache),
                 postgres.WithChannelMemberCache(channelMemberCache),
                 postgres.WithChannelDialogCache(channelDialogCache),
-                postgres.WithChannelBoostCache(channelBoostCache))
+                postgres.WithChannelBoostCache(channelBoostCache),
+                // Та же доля канала в платных сообщениях (Direct Messages) и
+                // платежах за предложенные посты (раунд 42).
+                postgres.WithChannelPaidMessageCommissionPermille(cfg.StarsPaidMessageCommissionPermille))
         communityStore := postgres.NewCommunityStore(pool, channelIDAllocator, channelMessageIDAllocator)
         pollStore := postgres.NewPollStore(pool)
         mediaStore := postgres.NewMediaStore(pool)

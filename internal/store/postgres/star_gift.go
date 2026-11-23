@@ -172,6 +172,17 @@ func validCatalogStickerMime(mime string) bool {
         }
 }
 
+// validStoreAnimationDimensions — габариты ревизии на границе хранилища.
+// Lottie/TGS — ровно 512×512 (нормализация), медиа-форматы — в пределах
+// стикер-лимита 512×512 (раунд 42, миграция 0198 ослабила shape-check БД:
+// медиа-исходник может быть меньше и не квадратным).
+func validStoreAnimationDimensions(format domain.StarGiftAnimationFormat, width, height int) bool {
+        if format.IsLottieFamily() {
+                return width == 512 && height == 512
+        }
+        return width > 0 && height > 0 && width <= 512 && height <= 512
+}
+
 func (s *StarGiftStore) CreateCatalogRevision(ctx context.Context, write domain.StarGiftCatalogWrite) (domain.StarGiftCatalogEntry, error) {
         // Раунд 37: помимо TGS/Lottie каталог принимает медиа-анимации .webp/
         // .webm/.png — документ обязан нести стикер-атрибут и корректный mime
@@ -180,7 +191,7 @@ func (s *StarGiftStore) CreateCatalogRevision(ctx context.Context, write domain.
         if write.Stars <= 0 || write.ConvertStars < 0 || write.ConvertStars > write.Stars ||
                 write.Document.ID <= 0 || !write.Document.IsSticker() || write.Document.MimeType != write.Animation.SourceFormat.MimeType() ||
                 len(write.Animation.JSON) == 0 || len(write.Animation.SHA256) != 32 || !write.Animation.SourceFormat.Valid() ||
-                write.Animation.Width != 512 || write.Animation.Height != 512 {
+                !validStoreAnimationDimensions(write.Animation.SourceFormat, write.Animation.Width, write.Animation.Height) {
                 return domain.StarGiftCatalogEntry{}, domain.ErrStarGiftInvalid
         }
         var entry domain.StarGiftCatalogEntry
@@ -428,9 +439,16 @@ SELECT COALESCE(MAX(revision), 0) + 1 FROM star_gift_catalog_revisions WHERE gif
                 newAnimation := write.Animation != nil && write.Document != nil && write.Blob != nil
                 var documentID int64
                 if newAnimation {
-                        if write.Document.ID <= 0 || write.Document.MimeType != "application/x-tgsticker" ||
+                        // Раунд 42: медиа-ревизии (.webp/.webm/.png) заменяют анимацию
+                        // так же, как TGS/Lottie: mime документа обязан совпадать с mime
+                        // формата (раньше гейт требовал каноничный tgsticker, поэтому
+                        // замена на медиа-файл падала с «stargift: invalid gift id», а
+                        // анимация в окне редактирования не применялась).
+                        if write.Document.ID <= 0 || !write.Document.IsSticker() ||
+                                write.Document.MimeType != write.Animation.SourceFormat.MimeType() ||
                                 len(write.Animation.JSON) == 0 || len(write.Animation.SHA256) != 32 ||
-                                len(write.Animation.TGS) == 0 {
+                                len(write.Animation.TGS) == 0 ||
+                                !validStoreAnimationDimensions(write.Animation.SourceFormat, write.Animation.Width, write.Animation.Height) {
                                 return domain.ErrStarGiftInvalid
                         }
                         media := NewMediaStore(tx)
@@ -556,13 +574,13 @@ WHERE id = (SELECT active_revision_id FROM star_gift_catalog WHERE gift_id=$1)`,
                 if newAnimation {
                         animJSON = write.Animation.JSON
                         animSHA = write.Animation.SHA256
-                        animSourceName = strings.TrimSpace(write.Animation.SourceName)
-                        if animSourceName == "" {
-                                animSourceName = "gift.tgs"
-                        }
                         animSourceFormat = string(write.Animation.SourceFormat)
                         if animSourceFormat == "" {
                                 animSourceFormat = string(domain.StarGiftAnimationTGS)
+                        }
+                        animSourceName = strings.TrimSpace(write.Animation.SourceName)
+                        if animSourceName == "" {
+                                animSourceName = domain.StarGiftAnimationFormat(animSourceFormat).FileName()
                         }
                         animWidth = write.Animation.Width
                         animHeight = write.Animation.Height

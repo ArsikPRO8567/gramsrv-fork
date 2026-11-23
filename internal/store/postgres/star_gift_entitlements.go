@@ -111,6 +111,18 @@ func (s *StarGiftLifecycleStore) PrepayStarGiftUpgrade(ctx context.Context, req 
 		if _, err := tx.Exec(ctx, `UPDATE peer_star_gifts SET prepaid_upgrade_stars=$2,prepaid_upgrade_hash='' WHERE id=$1`, locked.ID, req.ChargeStars); err != nil {
 			return err
 		}
+		// Раунд 42: переписываем исходное сервисное сообщение о подарке (обе
+		// копии — владелец и отправитель): конвертация предоплаченного подарка
+		// запрещена (convert_stars=0 — кнопки «обменять» больше нет), кнопка
+		// улучшения становится бесплатной (prepaid_upgrade=true +
+		// upgrade_stars=сумма предоплаты). Официальные клиенты читают оба
+		// флага прямо из messageActionStarGift (StarGiftSheet /
+		// PremiumGift::subtitle): владелец видит «Улучшить бесплатно», а
+		// отправитель — «{user} может сделать этот подарок уникальным
+		// коллекционным» вместо «может показывать подарок в профиле».
+		if err := s.markStarGiftSourcePrepaidUpgradeTx(ctx, tx, req, locked, req.ChargeStars); err != nil {
+			return err
+		}
 		if _, err := tx.Exec(ctx, `INSERT INTO star_gift_prepaid_upgrade_commands(payer_user_id,command_key,saved_gift_id,form_id,charge_stars,balance_after,created_at)
 VALUES($1,$2,$3,$4,$5,$6,$7)`, req.PayerUserID, req.CommandKey, locked.ID, req.FormID, req.ChargeStars, balance.Balance, req.Date); err != nil {
 			return err

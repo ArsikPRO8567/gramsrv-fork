@@ -192,7 +192,7 @@ func (s *Service) CreateCatalogRevision(ctx context.Context, write domain.StarGi
         }
         write.Title = branding.UserVisibleText(strings.TrimSpace(write.Title), "")
         if write.Stars <= 0 || write.ConvertStars < 0 || write.ConvertStars > write.Stars ||
-                write.Animation.Width != 512 || write.Animation.Height != 512 || len(write.Animation.TGS) == 0 ||
+                !validStarGiftAnimationDimensions(write.Animation) || len(write.Animation.TGS) == 0 ||
                 len([]rune(write.Title)) > domain.MaxStarGiftTitleRunes {
                 return domain.StarGiftCatalogEntry{}, domain.ErrStarGiftInvalid
         }
@@ -224,19 +224,36 @@ func (s *Service) materializeCatalogWrite(ctx context.Context, write *domain.Sta
         if _, err := rand.Read(fileReference); err != nil {
                 return fmt.Errorf("generate star gift file reference: %w", err)
         }
+        // Раунд 42: MIME/имя файла/атрибуты зависят от формата. Медиа-ревизии
+        // (.webp/.webm/.png) отдаются клиентам как есть — официальный клиент
+        // рендерит sticker-документ по его mime (image/webp, video/webm,
+        // image/png); store-гейт CreateCatalogRevision сверяет mime документа с
+        // mime формата, поэтому каноничный tgsticker на медиа-ревизии давал
+        // «stargift: invalid gift id» уже после успешной проверки файла.
+        mimeType := write.Animation.SourceFormat.MimeType()
+        fileName := write.Animation.SourceFormat.FileName()
+        attributes := []domain.DocumentAttribute{
+                {Kind: domain.DocAttrImageSize, W: write.Animation.Width, H: write.Animation.Height},
+                {Kind: domain.DocAttrSticker, Alt: "🎁"},
+                {Kind: domain.DocAttrFilename, FileName: fileName},
+        }
+        if write.Animation.SourceFormat == domain.StarGiftAnimationWEBM && write.Animation.OutPoint > 0 {
+                // video/webm-стикеры несут атрибут Video с размерами и длительностью
+                // (секунды), как у видео-стикеров, загружаемых клиентами.
+                attributes = append(attributes, domain.DocumentAttribute{
+                        Kind: domain.DocAttrVideo, W: write.Animation.Width, H: write.Animation.Height,
+                        Duration: write.Animation.OutPoint,
+                })
+        }
         write.Document = domain.Document{
                 ID:            documentID,
                 AccessHash:    accessHash,
                 FileReference: fileReference,
                 Date:          int(time.Now().Unix()),
-                MimeType:      "application/x-tgsticker",
+                MimeType:      mimeType,
                 Size:          int64(len(write.Animation.TGS)),
                 DCID:          s.dc,
-                Attributes: []domain.DocumentAttribute{
-                        {Kind: domain.DocAttrImageSize, W: 512, H: 512},
-                        {Kind: domain.DocAttrSticker, Alt: "🎁"},
-                        {Kind: domain.DocAttrFilename, FileName: "gift.tgs"},
-                },
+                Attributes:    attributes,
         }
         write.Blob = domain.FileBlob{
                 LocationKey: fmt.Sprintf("doc:%d", documentID),
@@ -244,9 +261,43 @@ func (s *Service) materializeCatalogWrite(ctx context.Context, write *domain.Sta
                 ObjectKey:   objectKey,
                 Size:        int64(len(write.Animation.TGS)),
                 SHA256:      append([]byte(nil), write.Animation.SHA256...),
-                MimeType:    "application/x-tgsticker",
+                MimeType:    mimeType,
         }
         return nil
+}
+
+// materializeAnimationAsset materializes one verified animation into a blob +
+// sticker document pair (per-format MIME/filename/attributes). Shared by the
+// catalog import (CreateCatalogRevision) and the settings editor
+// (UpdateCatalogSettings, раунд 34: замена анимации в окне редактирования).
+// Без материализации store-гейт newAnimation (Document/Blob != nil) никогда
+// не срабатывал и загруженный файл молча отбрасывался — «Изменение анимации
+// не работает, хоть файлы и проходят проверку».
+func (s *Service) materializeAnimationAsset(ctx context.Context, animation domain.StarGiftAnimation) (domain.Document, domain.FileBlob, error) {
+        if animation.SourceFormat.IsLottieFamily() {
+                if animation.Width != 512 || animation.Height != 512 || len(animation.TGS) == 0 {
+                        return domain.Document{}, domain.FileBlob{}, domain.ErrStarGiftInvalid
+                }
+        } else if animation.Width <= 0 || animation.Height <= 0 ||
+                animation.Width > 512 || animation.Height > 512 || len(animation.TGS) == 0 {
+                return domain.Document{}, domain.FileBlob{}, domain.ErrStarGiftInvalid
+        }
+        write := domain.StarGiftCatalogWrite{Animation: animation}
+        if err := s.materializeCatalogWrite(ctx, &write); err != nil {
+                return domain.Document{}, domain.FileBlob{}, err
+        }
+        return write.Document, write.Blob, nil
+}
+
+// validStarGiftAnimationDimensions — габариты ревизии каталога: Lottie/TGS
+// обязаны быть ровно 512×512 (shape-check нормализации), медиа-форматы — в
+// пределах стикер-лимита 512×512 (не обязательно квадратные).
+func validStarGiftAnimationDimensions(animation domain.StarGiftAnimation) bool {
+        if animation.SourceFormat.IsLottieFamily() {
+                return animation.Width == 512 && animation.Height == 512
+        }
+        return animation.Width > 0 && animation.Height > 0 &&
+                animation.Width <= 512 && animation.Height <= 512
 }
 
 // CreateCatalogBundle materializes every verified asset before publishing both active
@@ -259,7 +310,7 @@ func (s *Service) CreateCatalogBundle(ctx context.Context, write domain.StarGift
         write.Catalog.Title = branding.UserVisibleText(strings.TrimSpace(write.Catalog.Title), "")
         write.Catalog.AuctionSlug = branding.UserVisibleText(strings.TrimSpace(write.Catalog.AuctionSlug), "")
         if write.Catalog.Stars <= 0 || write.Catalog.ConvertStars < 0 || write.Catalog.ConvertStars > write.Catalog.Stars ||
-                write.Catalog.Animation.Width != 512 || write.Catalog.Animation.Height != 512 || len(write.Catalog.Animation.TGS) == 0 ||
+                !validStarGiftAnimationDimensions(write.Catalog.Animation) || len(write.Catalog.Animation.TGS) == 0 ||
                 len([]rune(write.Catalog.Title)) > domain.MaxStarGiftTitleRunes {
                 return domain.StarGiftCatalogBundleResult{}, domain.ErrStarGiftInvalid
         }
@@ -526,6 +577,16 @@ func (s *Service) CollectibleRevisionSummaries(ctx context.Context, giftID int64
 func (s *Service) UpdateCatalogSettings(ctx context.Context, write domain.StarGiftCatalogSettingsWrite) (domain.StarGiftCatalogEntry, error) {
         if s == nil || s.store == nil {
                 return domain.StarGiftCatalogEntry{}, domain.ErrStarGiftNotFound
+        }
+        // Раунд 42: загруженная в окне редактирования анимация обязана
+        // материализоваться в документ+blob — иначе store-гейт newAnimation
+        // (Document/Blob != nil) не срабатывал и файл молча отбрасывался.
+        if write.Animation != nil && (write.Document == nil || write.Blob == nil) {
+                document, blob, err := s.materializeAnimationAsset(ctx, *write.Animation)
+                if err != nil {
+                        return domain.StarGiftCatalogEntry{}, err
+                }
+                write.Document, write.Blob = &document, &blob
         }
         entry, err := s.store.UpdateCatalogSettings(ctx, write)
         if err == nil {
@@ -1110,6 +1171,18 @@ func (s *Service) CountSaved(ctx context.Context, owner domain.Peer) (int, error
 
 func (s *Service) ToggleSaved(ctx context.Context, ref domain.SavedStarGiftRef, unsaved bool) (bool, error) {
         return s.store.SetUnsaved(ctx, ref, unsaved)
+}
+
+// ToggleSavedAggregate — продакшн-путь payments.saveStarGift (раунд 42): в
+// одной транзакции обновляются unsaved/pinned_order агрегата и флаг saved во
+// всех сервисных сообщениях о подарке (кнопки «показать/скрыть» в чате —
+// обычный и уникальный подарок). Изолированные memory/RPC-адаптеры без
+// lifecycle-хранилища продолжают работать через ToggleSaved.
+func (s *Service) ToggleSavedAggregate(ctx context.Context, req domain.StarGiftSavedToggleRequest) (domain.SavedStarGift, bool, error) {
+        if s == nil || s.lifecycle == nil {
+                return domain.SavedStarGift{}, false, domain.ErrStarGiftUnavailable
+        }
+        return s.lifecycle.ToggleStarGiftSaved(ctx, req)
 }
 
 // Convert keeps the in-memory/catalog store primitive available to isolated

@@ -16,6 +16,10 @@ type MessageStore struct {
 	q      *sqlcgen.Queries
 	boxIDs store.BoxIDAllocator
 	log    *zap.Logger
+	// paidMessageCommissionPermille — доля получателя платного сообщения в
+	// промилле (stars_paid_message_commission_permille, раунд 42).
+	// 0 = не настроено → серверный дефолт 850.
+	paidMessageCommissionPermille int64
 }
 
 type txBeginner interface {
@@ -52,4 +56,14 @@ func NewMessageStore(db sqlcgen.DBTX, opts ...MessageStoreOption) *MessageStore 
 		s.boxIDs = pgBoxIDAllocator{s: s}
 	}
 	return s
+}
+
+// WithPaidMessageCommissionPermille 配置付费消息接收者份额（промилле）:
+// .env 变量 TELESRV_STARS_PAID_MESSAGE_COMMISSION_PERMILLE；0/越界保留默认 850。
+func WithPaidMessageCommissionPermille(permille int64) MessageStoreOption {
+	return func(s *MessageStore) {
+		if permille > 0 && permille <= 1000 {
+			s.paidMessageCommissionPermille = permille
+		}
+	}
 }

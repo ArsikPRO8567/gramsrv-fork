@@ -356,6 +356,11 @@ const (
         MaxStarsTransactionsLimit = 100
         // MaxStarsTransactionsOffsetBytes 是 keyset 游标字符串长度上限。
         MaxStarsTransactionsOffsetBytes = 64
+        // DefaultPaidMessageCommissionPermille — stars_paid_message_commission_permille
+        // 的服务器默认值：付费消息接收者收到 amount*permille/1000（850‰ = 85%，
+        // 余下 15% 为服务器佣金）。可用 TELESRV_STARS_PAID_MESSAGE_COMMISSION_PERMILLE
+        // 覆盖；0/越界值回落到该默认值（раунд 42）。
+        DefaultPaidMessageCommissionPermille = 850
 )
 
 // Stars 账本哨兵错误（rpc 层 errors.Is 匹配后映射为 tgerr，仿 ErrPremiumRequired）。

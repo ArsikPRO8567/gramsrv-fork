@@ -165,9 +165,19 @@ func TestPrepareMediaAnimationFormats(t *testing.T) {
 	if _, err := prepareAnimation("gift.webp", buildWEBPIncomplete); !errors.Is(err, domain.ErrStarGiftFileInvalid) {
 		t.Fatalf("webp without chunk err=%v", err)
 	}
-	// Не 512×512 — требования стикеров Telegram и shape-check каталога.
-	if _, err := prepareAnimation("gift.png", buildPNG(256, 384)); !errors.Is(err, domain.ErrStarGiftFileInvalid) {
-		t.Fatalf("non-512 png err=%v", err)
+	// Раунд 42: не-512 и не-квадратные размеры в пределах стикер-лимита
+	// принимаются (официальные клиенты масштабируют блок подарка под
+	// документ; миграция 0198 ослабила shape-check БД).
+	nonSquare, err := prepareAnimation("gift.png", buildPNG(256, 384))
+	if err != nil {
+		t.Fatalf("non-square png err=%v", err)
+	}
+	if nonSquare.Width != 256 || nonSquare.Height != 384 || nonSquare.SourceFormat != domain.StarGiftAnimationPNG {
+		t.Fatalf("non-square png = %+v", nonSquare)
+	}
+	// Больше 512×512 — всё ещё отказ (лимит стикеров Telegram).
+	if _, err := prepareAnimation("gift.png", buildPNG(513, 513)); !errors.Is(err, domain.ErrStarGiftFileInvalid) {
+		t.Fatalf("oversized png err=%v", err)
 	}
 	// Слишком длинный webm — отказ по длительности.
 	if _, err := prepareAnimation("gift.webm", buildWEBM(512, 512, 31000)); !errors.Is(err, domain.ErrStarGiftFileInvalid) {

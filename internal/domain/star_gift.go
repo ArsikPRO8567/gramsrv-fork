@@ -659,6 +659,19 @@ type StarGiftConvertResult struct {
 	OwnerBalance int64
 }
 
+// StarGiftSavedToggleRequest — одна операция payments.saveStarGift (кнопки
+// «показать/скрыть подарок в профиле» в сервисном сообщении и профиле).
+// Unsaved=true скрывает подарок. Агрегат синхронно переписывает флаг saved
+// (messageActionStarGift.saved / messageActionStarGiftUnique.saved) во всех
+// живых проекциях сервисных сообщений, чтобы клиентские кнопки отражали
+// актуальное состояние сразу после edit-события (раунд 42).
+type StarGiftSavedToggleRequest struct {
+	ActorUserID int64
+	Ref         SavedStarGiftRef
+	Unsaved     bool
+	Date        int
+}
+
 type StarGiftUpgradeResult struct {
 	Saved       SavedStarGift
 	Unique      UniqueStarGift
@@ -1071,6 +1084,21 @@ func (f StarGiftAnimationFormat) MimeType() string {
 		return "image/png"
 	default:
 		return ""
+	}
+}
+
+// FileName — каноническое имя файла документа ревизии (контент
+// содержимо-адресный blob, имя — только метка для клиентов).
+func (f StarGiftAnimationFormat) FileName() string {
+	switch f {
+	case StarGiftAnimationWEBP:
+		return "gift.webp"
+	case StarGiftAnimationWEBM:
+		return "gift.webm"
+	case StarGiftAnimationPNG:
+		return "gift.png"
+	default:
+		return "gift.tgs"
 	}
 }
 

@@ -106,9 +106,12 @@ func prepareMediaAnimation(fileName string, data []byte, format domain.StarGiftA
 	default:
 		return domain.StarGiftAnimation{}, domain.ErrStarGiftFileInvalid
 	}
-	// Официальные клиенты масштабируют блок подарка под документ; shape-check
-	// каталога требует ровно 512×512, как и у нормализованного TGS.
-	if width != 512 || height != 512 {
+	// Официальные клиенты масштабируют блок подарка под документ, поэтому
+	// медиа-анимация может быть любого размера в пределах лимита стикера
+	// 512×512 (не обязательно квадратной и не обязательно ровно 512×512 —
+	// раунд 42: админ загружает исходник как есть). Больше 512 не допускаем
+	// по лимитам стикеров Telegram; миграция 0198 ослабила shape-check БД.
+	if width <= 0 || height <= 0 || width > 512 || height > 512 {
 		return domain.StarGiftAnimation{}, domain.ErrStarGiftFileInvalid
 	}
 	descriptor, err := json.Marshal(map[string]any{

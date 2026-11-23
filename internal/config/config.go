@@ -437,6 +437,15 @@ type Config struct {
         // показывают неверную сумму получения. Комиссия 0 — продавец получает всё.
         StarGiftStarsCommissionPermille int
         StarGiftTONCommissionPermille   int
+        // StarsPaidMessageCommissionPermille — официальная семантика конфига
+        // stars_paid_message_commission_permille (раунд 42): доля получателя
+        // платного сообщения в промилле. Отправитель платит цену целиком,
+        // получатель получает amount*permille/1000, остаток — комиссия сервера.
+        // Задаётся в .env (TELESRV_STARS_PAID_MESSAGE_COMMISSION_PERMILLE) и
+        // применяется и к приватным платным сообщениям (privacy:
+        // noncontact_peers_paid_stars), и к платным сообщениям каналов
+        // (channels.updatePaidMessagesPrice / monoforum Direct Messages).
+        StarsPaidMessageCommissionPermille int64
         // Лимиты цены листинга/офферов на маркете (раунд 20). Звёзды — целые,
         // TON — нанотон. Граница со значением 0 не проверяется; значения по
         // умолчанию повторяют клиентские ограничения официальных приложений
@@ -928,6 +937,10 @@ func Load() (Config, error) {
                         "TELESRV_STARGIFT_STARS_PROCEEDS_PERMILLE"),
                 StarGiftTONCommissionPermille:   fileEnv.starGiftCommissionEnvOr("TELESRV_STARGIFT_TON_COMMISSION_PERMILLE",
                         "TELESRV_STARGIFT_TON_PROCEEDS_PERMILLE"),
+                // Доля получателя платного сообщения в промилле (раунд 42);
+                // 0/вне диапазона → серверный дефолт 850 в stores.
+                StarsPaidMessageCommissionPermille: envInt64Or("TELESRV_STARS_PAID_MESSAGE_COMMISSION_PERMILLE",
+                        domain.DefaultPaidMessageCommissionPermille),
                 // Эквивалентные цены рынка: StarsUnits звёзд = NanotonUnits нанотон
                 // (по умолчанию официальный курс 1457 звёзд = 18 TON).
                 StarGiftResellRateStars:     envInt64Or("TELESRV_STARGIFT_RESELL_RATE_STARS", 1457),
@@ -1211,6 +1224,11 @@ func validateStarGiftConfig(cfg Config) error {
         if cfg.StarGiftStarsCommissionPermille < 0 || cfg.StarGiftStarsCommissionPermille > 1000 ||
                 cfg.StarGiftTONCommissionPermille < 0 || cfg.StarGiftTONCommissionPermille > 1000 {
                 return fmt.Errorf("TELESRV_STARGIFT_*_COMMISSION_PERMILLE must be 0..1000")
+        }
+        // Доля получателя платного сообщения (раунд 42): 0 допустим на уровне
+        // конфига — stores трактуют его как «не настроено» и берут дефолт 850.
+        if cfg.StarsPaidMessageCommissionPermille < 0 || cfg.StarsPaidMessageCommissionPermille > 1000 {
+                return fmt.Errorf("TELESRV_STARS_PAID_MESSAGE_COMMISSION_PERMILLE must be 0..1000")
         }
         if cfg.StarGiftResellRateStars <= 0 || cfg.StarGiftResellRateNanoton <= 0 {
                 return fmt.Errorf("TELESRV_STARGIFT_RESELL_RATE_STARS and TELESRV_STARGIFT_RESELL_RATE_NANOTON must be positive")

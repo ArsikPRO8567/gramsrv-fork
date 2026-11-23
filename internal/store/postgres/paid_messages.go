@@ -10,19 +10,25 @@ import (
         "telesrv/internal/domain"
 )
 
-// paidMessageCommissionPermille — доля от платы за сообщение, которая доходит
-// до получателя. Совпадает с моноканальной комиссией monoforum
-// (paidMessageChannelCommissionPermille) и официальной
-// stars_paid_message_commission_permille.
-const paidMessageCommissionPermille = 850
+// paidMessageRecipientShare — доля получателя платного сообщения
+// (amount * permille / 1000). Пермилль приходит из .env
+// (TELESRV_STARS_PAID_MESSAGE_COMMISSION_PERMILLE, раунд 42); 0/вне диапазона
+// означает «не настроено» → серверный дефолт 850 (официальная
+// stars_paid_message_commission_permille).
+func paidMessageRecipientShare(permille, amount int64) int64 {
+        if permille <= 0 || permille > 1000 {
+                permille = domain.DefaultPaidMessageCommissionPermille
+        }
+        return amount * permille / 1000
+}
 
 // chargePaidMessageStarsTx списывает платное сообщение атомарно внутри транзакции
 // отправки: дебет отправителя на stars, кредит получателя на net-выручку
-// (stars × 850‰, комиссия не возвращается), обе проводки reason=paid_message.
+// (stars × permille, комиссия не возвращается), обе проводки reason=paid_message.
 // Достаточность баланса проверяется под FOR UPDATE; недостаток →
 // domain.ErrStarsInsufficient. Вызывается только когда сообщение реально
 // доставляется получателю (не self и не в блоклисте).
-func chargePaidMessageStarsTx(ctx context.Context, tx pgx.Tx, senderUserID, recipientUserID, stars int64, date int) error {
+func (s *MessageStore) chargePaidMessageStarsTx(ctx context.Context, tx pgx.Tx, senderUserID, recipientUserID, stars int64, date int) error {
         if stars <= 0 || senderUserID == recipientUserID {
                 return nil
         }
@@ -62,7 +68,7 @@ RETURNING balance`, senderUserID, stars).Scan(&senderBalance); err != nil {
                 domain.Peer{Type: domain.PeerTypeUser, ID: recipientUserID}, date, transactionID); err != nil {
                 return err
         }
-        net := stars * paidMessageCommissionPermille / 1000
+        net := paidMessageRecipientShare(s.paidMessageCommissionPermille, stars)
         if net > 0 {
                 if _, err := tx.Exec(ctx, `
 INSERT INTO stars_balances (user_id, balance, updated_at)

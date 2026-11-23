@@ -203,19 +203,23 @@ func (s *StarGiftLifecycleStore) ConvertStarGift(ctx context.Context, req domain
         return result, nil
 }
 
-// releaseUpgradeSlotOnConvertTx (раунд 41) — конвертация редкого подарка,
+// releaseUpgradeSlotOnConvertTx (раунд 41/42) — конвертация редкого подарка,
 // имеющего улучшения (у каталога есть активная опубликованная коллекционная
-// ревизия), уменьшает общее число выпущенных улучшений
-// (star_gift_collectible_revisions.issued) на 1: слот улучшения освобождается,
-// последующие покупки снова могут улучшать подарок (гейт issued < supply_total).
-// Счётчик не уходит в минус (guard issued > 0) и не превышает supply_total —
-// это застраховано констрейнтом star_gift_collectible_supply_check. У каталога
-// без пула улучшений (или с черновой ревизией) конвертация ничего не меняет.
+// ревизия), уменьшает САПЛАЙ УЛУЧШЕНИЙ (star_gift_collectible_revisions.
+// supply_total) на 1: экземпляр подарка уничтожен и никогда не станет
+// уникальным коллекционным, поэтому пул возможных улучшений сжимается.
+// Клиенты и админка читают supply_total как «supply» пула улучшений
+// (gift.upgrade_total / collectibles preview supply_total), поэтому раунд 41
+// с декрементом issued (освобождавший слот, но не менявший видимый supply)
+// проблему не закрывал — теперь уменьшается именно supply_total.
 //
-// Охрана 0191/0196 запрещает уменьшение issued вне конвертации: транзакция
+// Гварды: уменьшаем только пока supply_total > issued (нельзя сжать пул ниже
+// уже выпущенных коллекционных — CHECK issued <= supply_total), транзакция
 // помечается локальной настройкой gramsrv.star_gift_release_slot = 'on'
 // (set_config с is_local=true действует до конца транзакции и автоматически
-// сбрасывается при фиксации/откате).
+// сбрасывается при фиксации/откате; миграция 0199 разрешает supply_total = 0).
+// У каталога без пула улучшений (или с черновой ревизией) конвертация ничего
+// не меняет.
 func releaseUpgradeSlotOnConvertTx(ctx context.Context, tx pgx.Tx, giftID int64) error {
         if giftID <= 0 {
                 return nil
@@ -225,12 +229,12 @@ func releaseUpgradeSlotOnConvertTx(ctx context.Context, tx pgx.Tx, giftID int64)
         }
         if _, err := tx.Exec(ctx, `
 UPDATE star_gift_collectible_revisions r
-SET issued = r.issued - 1
+SET supply_total = r.supply_total - 1
 FROM star_gift_catalog c
 WHERE c.gift_id = $1
   AND r.id = c.collectible_revision_id
   AND r.status = 'published'
-  AND r.issued > 0`, giftID); err != nil {
+  AND r.supply_total > r.issued`, giftID); err != nil {
                 return fmt.Errorf("release collectible upgrade slot on convert: %w", err)
         }
         return nil
@@ -298,6 +302,14 @@ FOR UPDATE`, saved.Owner.ID, saved.MsgID).Scan(&peerType, &peerID)
                 }
                 action.Converted = true
                 action.ConvertStars = convertStars
+                // Раунд 42: подарок уничтожен — кнопка «Улучшить» в сервисном
+                // сообщении больше не имеет смысла (официальный сервер снимает
+                // can_upgrade при конвертации, иначе клиент рисует неработающую
+                // кнопку апгрейда), хэш предоплаты тоже снимается. Клиент по
+                // converted=true + convert_stars перерисовывает подпись в
+                // «Вы обменяли подарок на N звёзд».
+                action.CanUpgrade = false
+                action.PrepaidUpgradeHash = ""
                 mediaJSON, err := encodeMessageMedia(media)
                 if err != nil {
                         return fmt.Errorf("encode converted star gift message media: %w", err)
@@ -430,6 +442,10 @@ FOR UPDATE`, ref.ownerUserID, ref.msgID).Scan(&peerType, &peerID)
                 action.Converted = true
                 action.Saved = false
                 action.ConvertStars = convertStars
+                // Раунд 42: канал — кнопка апгрейда у уничтоженного подарка тоже
+                // снимается (иначе «Telegram»-уведомление рисует мёртвую кнопку).
+                action.CanUpgrade = false
+                action.PrepaidUpgradeHash = ""
                 mediaJSON, err := encodeMessageMedia(media)
                 if err != nil {
                         return fmt.Errorf("encode converted channel star gift notification: %w", err)

@@ -12,8 +12,6 @@ import (
 	"telesrv/internal/store"
 )
 
-const paidMessageChannelCommissionPermille int64 = 850
-
 // SendMonoforumMessage 向 monoforum(频道私信)虚拟频道发一条消息,按 saved_peer 分订阅者子会话。
 // 私信消息存进 channel_messages(复用 channel pts/事件/difference);store 在写边界再次强制：订阅者
 // 无需成员记录但只能写自己的 saved_peer，母频道管理员可以回复任意订阅者。
@@ -132,7 +130,9 @@ RETURNING balance`, req.SenderUserID, paidMessageStars).Scan(&balance.Balance); 
 			domain.Peer{Type: domain.PeerTypeChannel, ID: parent.ID}, req.Date, "", ""); err != nil {
 			return domain.SendChannelMessageResult{}, err
 		}
-		channelCredit := paidMessageStars * paidMessageChannelCommissionPermille / 1000
+		// Доля канала (раунд 42): TELESRV_STARS_PAID_MESSAGE_COMMISSION_PERMILLE,
+		// 0/вне диапазона → серверный дефолт 850.
+		channelCredit := paidMessageRecipientShare(s.paidMessageCommissionPermille, paidMessageStars)
 		if channelCredit > 0 {
 			if _, err := tx.Exec(ctx, `
 INSERT INTO channel_stars_balances(channel_id, balance)

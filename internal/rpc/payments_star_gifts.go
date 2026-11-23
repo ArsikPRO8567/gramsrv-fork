@@ -1434,6 +1434,33 @@ func (r *Router) onPaymentsSaveStarGift(ctx context.Context, req *tg.PaymentsSav
 	if err := r.ensureCanManageStarGiftOwner(ctx, userID, ref.Owner); err != nil {
 		return false, err
 	}
+	// Продакшн-путь (раунд 42): агрегат синхронно переписывает флаг saved во
+	// всех сервисных сообщениях о подарке — кнопки «показать/скрыть» в чате
+	// отражают состояние сразу (и обычный, и уникальный подарок).
+	// Изолированные memory-адаптеры без lifecycle-хранилища продолжают
+	// работать через ToggleSaved: агрегатный метод есть у того же
+	// stargifts.Service, поэтому ветку выбирает проверка конфигурации
+	// (AtomicPurchaseConfigured = lifecycle-хранилище подключено).
+	if aggregator, ok := r.deps.Gifts.(interface {
+		AtomicPurchaseConfigured() bool
+		ToggleSavedAggregate(context.Context, domain.StarGiftSavedToggleRequest) (domain.SavedStarGift, bool, error)
+	}); ok && aggregator != nil && aggregator.AtomicPurchaseConfigured() {
+		_, toggled, aggErr := aggregator.ToggleSavedAggregate(ctx, domain.StarGiftSavedToggleRequest{
+			ActorUserID: userID,
+			Ref:         ref,
+			Unsaved:     req.Unsave,
+			Date:        int(r.clock.Now().Unix()),
+		})
+		if aggErr != nil {
+			return false, internalErr()
+		}
+		if !toggled {
+			return false, starGiftInvalidErr()
+		}
+		// 隐藏/展示切换改变展示礼物数 → 失效 owner full 投影。
+		r.invalidateStarGiftOwnerProjection(ref.Owner)
+		return true, nil
+	}
 	updated, err := r.deps.Gifts.ToggleSaved(ctx, ref, req.Unsave)
 	if err != nil {
 		return false, internalErr()

@@ -611,7 +611,7 @@ func (s *ChannelStore) processSuggestedPostLifecycleOne(ctx context.Context, mon
 			row.state, row.finalServiceID, result.State = domain.SuggestedPostStateRefunded, service.ID, domain.SuggestedPostStateRefunded
 			changed = true
 		} else if row.settlementDue <= now {
-			if err := settleSuggestedPostPaymentTx(ctx, tx, row.actorID, row.payerID, row.parentID, row.price, now); err != nil {
+			if err := settleSuggestedPostPaymentTx(ctx, tx, row.actorID, row.payerID, row.parentID, row.price, now, s.paidMessageCommissionPermille); err != nil {
 				return result, false, err
 			}
 			service, event, err := s.insertSuggestedPostServiceTx(ctx, tx, mono, parent, row.actorID, true, row.savedPeer(), row.messageID, now, domain.ChannelMessageAction{Type: domain.ChannelActionSuggestedPostSuccess, SuggestedPostPrice: cloneSuggestedPricePG(row.price)})
@@ -681,11 +681,13 @@ func refundSuggestedPostPaymentTx(ctx context.Context, tx pgx.Tx, payerID, paren
 	}
 }
 
-func settleSuggestedPostPaymentTx(ctx context.Context, tx pgx.Tx, actorID, payerID, parentID int64, price *domain.SuggestedPostPrice, date int) error {
+func settleSuggestedPostPaymentTx(ctx context.Context, tx pgx.Tx, actorID, payerID, parentID int64, price *domain.SuggestedPostPrice, date int, commissionPermille int64) error {
 	if price == nil {
 		return nil
 	}
-	credit := price.Amount * paidMessageChannelCommissionPermille / 1000
+	// Доля канала от платежа за предложенный пост — та же промилле, что и у
+	// платных сообщений (раунд 42, TELESRV_STARS_PAID_MESSAGE_COMMISSION_PERMILLE).
+	credit := paidMessageRecipientShare(commissionPermille, price.Amount)
 	if credit <= 0 {
 		return nil
 	}

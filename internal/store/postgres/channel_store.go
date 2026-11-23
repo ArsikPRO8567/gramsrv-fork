@@ -25,6 +25,10 @@ type ChannelStore struct {
 	memberCache *ChannelMemberCache
 	dialogCache *ChannelDialogCache
 	boostCache  *ChannelBoostCache
+	// paidMessageCommissionPermille — доля канала от платного сообщения
+	// (monoforum Direct Messages / suggested post) в промилле, раунд 42.
+	// 0 = не настроено → серверный дефолт 850.
+	paidMessageCommissionPermille int64
 }
 
 // ChannelStoreOption 调整 PostgreSQL ChannelStore 依赖。
@@ -74,6 +78,17 @@ func WithChannelDialogCache(cache *ChannelDialogCache) ChannelStoreOption {
 func WithChannelBoostCache(cache *ChannelBoostCache) ChannelStoreOption {
 	return func(s *ChannelStore) {
 		s.boostCache = cache
+	}
+}
+
+// WithChannelPaidMessageCommissionPermille 配置频道付费消息接收者份额
+// (промилле): .env 变量 TELESRV_STARS_PAID_MESSAGE_COMMISSION_PERMILLE；
+// 0/越界保留默认 850（раунд 42）。
+func WithChannelPaidMessageCommissionPermille(permille int64) ChannelStoreOption {
+	return func(s *ChannelStore) {
+		if permille > 0 && permille <= 1000 {
+			s.paidMessageCommissionPermille = permille
+		}
 	}
 }
 

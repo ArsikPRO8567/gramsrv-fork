@@ -265,7 +265,7 @@ func (s *MessageStore) sendPrivateTextOnce(ctx context.Context, req domain.SendP
         // самой отправкой — откат транзакции откатывает и платёж; недостаток звёзд
         // возвращает ErrStarsInsufficient (rpc → BALANCE_TOO_LOW).
         if req.PaidMessageStars > 0 && deliverRecipient {
-                if err := chargePaidMessageStarsTx(ctx, tx, req.SenderUserID, req.RecipientUserID, req.PaidMessageStars, req.Date); err != nil {
+                if err := s.chargePaidMessageStarsTx(ctx, tx, req.SenderUserID, req.RecipientUserID, req.PaidMessageStars, req.Date); err != nil {
                         return domain.SendPrivateTextResult{}, err
                 }
         }

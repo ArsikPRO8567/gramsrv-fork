@@ -119,6 +119,10 @@ type StarGiftLifecycleStore interface {
 	ValidateStarGiftPurchaseForm(ctx context.Context, req domain.StarGiftPurchaseRequest) error
 	PurchaseStarGift(ctx context.Context, req domain.StarGiftPurchaseRequest) (domain.StarGiftPurchaseResult, error)
 	ConvertStarGift(ctx context.Context, req domain.StarGiftConvertRequest) (domain.StarGiftConvertResult, error)
+	// ToggleStarGiftSaved (раунд 42) — агрегат payments.saveStarGift:
+	// unsaved/pinned_order агрегата и флаг saved во всех сервисных
+	// сообщениях переписываются одной транзакцией.
+	ToggleStarGiftSaved(ctx context.Context, req domain.StarGiftSavedToggleRequest) (domain.SavedStarGift, bool, error)
 	ListResaleStarGifts(ctx context.Context, filter domain.StarGiftResaleFilter) (domain.StarGiftResalePage, error)
 	UniqueStarGiftValueInfo(ctx context.Context, uniqueGiftID int64) (domain.StarGiftValueInfo, error)
 	SetStarGiftListing(ctx context.Context, req domain.StarGiftListingRequest) (domain.UniqueStarGift, error)
