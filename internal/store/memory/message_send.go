@@ -67,10 +67,12 @@ func (s *MessageStore) SendPrivateText(_ context.Context, req domain.SendPrivate
         }
         // Платные сообщения: атомарное (под общим mu) списание до создания сообщений.
         // Отказ (недостаток звёзд) прерывает отправку без побочных эффектов.
+        chargedPaidMessageStars := int64(0)
         if req.PaidMessageStars > 0 && req.SenderUserID != req.RecipientUserID && !req.RecipientBlocked && s.stars != nil {
                 if err := s.chargePaidMessageLocked(req); err != nil {
                         return domain.SendPrivateTextResult{}, err
                 }
+                chargedPaidMessageStars = req.PaidMessageStars
         }
         senderReply, recipientReply, err := s.resolveMemoryReplyLocked(req)
         if err != nil {
@@ -95,8 +97,11 @@ func (s *MessageStore) SendPrivateText(_ context.Context, req domain.SendPrivate
                 ViaBotID:    req.ViaBotID,
                 GroupedID:   req.GroupedID,
                 Effect:      req.Effect,
-                ReplyMarkup: cloneReplyMarkup(req.ReplyMarkup),
-                RichMessage: cloneRichMessage(req.RichMessage),
+                // Бейдж платного сообщения ставится только когда плата реально взята;
+                // обе стороны диалога видят одно значение (message.paid_message_stars).
+                PaidMessageStars: chargedPaidMessageStars,
+                ReplyMarkup:      cloneReplyMarkup(req.ReplyMarkup),
+                RichMessage:      cloneRichMessage(req.RichMessage),
                 ReplyTo:     cloneMessageReply(senderReply),
                 Forward:     cloneMessageForward(req.Forward),
                 Pts:         s.nextPtsLocked(req.SenderUserID),
@@ -337,20 +342,20 @@ func (s *MessageStore) privateUnreadCountLocked(ownerUserID int64, peer domain.P
 // (850‰, комиссия не возвращается — зеркально postgres-реализации). Проводки
 // reason=paid_message; недостаток звёзд → domain.ErrStarsInsufficient.
 func (s *MessageStore) chargePaidMessageLocked(req domain.SendPrivateTextRequest) error {
-	if s.stars == nil || req.PaidMessageStars <= 0 || req.SenderUserID == req.RecipientUserID {
-		return nil
-	}
-	stars := req.PaidMessageStars
-	if _, err := s.stars.Debit(context.Background(), req.SenderUserID, stars, domain.StarsReasonPaidMessage,
-		domain.Peer{Type: domain.PeerTypeUser, ID: req.RecipientUserID}, req.Date, "", ""); err != nil {
-		return err
-	}
-	net := stars * paidMessageChannelCommissionPermille / 1000
-	if net > 0 {
-		if _, err := s.stars.Credit(context.Background(), req.RecipientUserID, net, domain.StarsReasonPaidMessage,
-			domain.Peer{Type: domain.PeerTypeUser, ID: req.SenderUserID}, req.Date, "", ""); err != nil {
-			return err
-		}
-	}
-	return nil
+        if s.stars == nil || req.PaidMessageStars <= 0 || req.SenderUserID == req.RecipientUserID {
+                return nil
+        }
+        stars := req.PaidMessageStars
+        if _, err := s.stars.Debit(context.Background(), req.SenderUserID, stars, domain.StarsReasonPaidMessage,
+                domain.Peer{Type: domain.PeerTypeUser, ID: req.RecipientUserID}, req.Date, "", ""); err != nil {
+                return err
+        }
+        net := stars * paidMessageChannelCommissionPermille / 1000
+        if net > 0 {
+                if _, err := s.stars.Credit(context.Background(), req.RecipientUserID, net, domain.StarsReasonPaidMessage,
+                        domain.Peer{Type: domain.PeerTypeUser, ID: req.SenderUserID}, req.Date, "", ""); err != nil {
+                        return err
+                }
+        }
+        return nil
 }

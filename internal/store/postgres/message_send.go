@@ -299,6 +299,13 @@ func (s *MessageStore) sendPrivateTextOnce(ctx context.Context, req domain.SendP
         if ttlPeriod > 0 {
                 expiresAt = req.Date + ttlPeriod
         }
+        // paidMessageStars — фактическая ставка бейджа message.paid_message_stars:
+        // ненулевая только когда плата реально взята (ставка > 0 и сообщение
+        // доставлено получателю). Видна обеим сторонам диалога.
+        paidMessageStars := req.PaidMessageStars
+        if !deliverRecipient {
+                paidMessageStars = 0
+        }
 
         privateArg := sqlcgen.CreatePrivateMessageParams{
                 SenderUserID:       req.SenderUserID,
@@ -317,6 +324,7 @@ func (s *MessageStore) sendPrivateTextOnce(ctx context.Context, req domain.SendP
                 ViaBotID:           req.ViaBotID,
                 GroupedID:          req.GroupedID,
                 Effect:             req.Effect,
+                PaidMessageStars:   paidMessageStars,
         }
         applyCreatePrivateMessageMetadata(&privateArg, senderMeta)
         pm, err := qtx.CreatePrivateMessage(ctx, privateArg)
@@ -415,6 +423,7 @@ WHERE sender_user_id=$1 AND id=$2`, req.SenderUserID, pm.ID, sharedMediaJSON)
                 ViaBotID:         req.ViaBotID,
                 GroupedID:        req.GroupedID,
                 Effect:           req.Effect,
+                PaidMessageStars: paidMessageStars,
                 // voice/round 在发送者自己的副本上也保持"未听"，直到对端
                 // readMessageContents 触发 sender 侧清除；发给自己无人可听，恒已读。
                 MediaUnread:    media.Sender.HasUnreadPayload() && !selfMessage,
@@ -488,6 +497,7 @@ WHERE sender_user_id=$1 AND id=$2`, req.SenderUserID, pm.ID, sharedMediaJSON)
                         ViaBotID:         req.ViaBotID,
                         GroupedID:        req.GroupedID,
                         Effect:           req.Effect,
+                        PaidMessageStars: paidMessageStars,
                         MediaUnread:      media.Recipient.HasUnreadPayload(),
                         ReactionUnread:   false,
                 }

@@ -21,11 +21,28 @@ type StarGiftStore interface {
 	CreateCatalogBundle(ctx context.Context, write domain.StarGiftCatalogBundleWrite) (domain.StarGiftCatalogBundleResult, error)
 	SetCatalogEnabled(ctx context.Context, giftID int64, enabled bool) (bool, error)
 	SetCatalogSortOrder(ctx context.Context, giftID int64, sortOrder int) (bool, error)
+	// UpdateCatalogSettings (раунд 30) публикует новую ревизию каталога без
+	// обязательной загрузки новой анимации (документ копируется).
+	UpdateCatalogSettings(ctx context.Context, write domain.StarGiftCatalogSettingsWrite) (domain.StarGiftCatalogEntry, error)
 	// AnimationJSON 返回当前版本的规范化 Lottie JSON，供管理后台安全预览。
 	AnimationJSON(ctx context.Context, giftID int64) ([]byte, bool, error)
+	// AnimationPayload (раунд 37) — payload активной ревизии вместе с форматом
+	// источника: Lottie/TGS несут JSON в payload; медиа-форматы (.webp/.webm/.png)
+	// несут исходные байты в payload (memory-адаптер) либо objectKey блоба
+	// (postgres; байты читает вызывающий через блоб-бэкенд).
+	AnimationPayload(ctx context.Context, giftID int64) (payload []byte, format domain.StarGiftAnimationFormat, objectKey string, found bool, err error)
 	// PublishCollectibleRevision validates and atomically publishes a new immutable attribute pool.
 	PublishCollectibleRevision(ctx context.Context, write domain.StarGiftCollectibleWrite) (domain.StarGiftCollectibleRevision, error)
 	ActiveCollectibleRevision(ctx context.Context, giftID int64) (domain.StarGiftCollectibleRevision, bool, error)
+	// CollectibleRevision (раунд 37) возвращает ревизию коллекции по id с
+	// полными метаданными строк атрибутов (источник копирования/правки).
+	CollectibleRevision(ctx context.Context, revisionID int64) (domain.StarGiftCollectibleRevision, error)
+	// CollectibleRevisionSummaries (раунд 34/36) перечисляет ревизии коллекции
+	// в лёгкой проекции: scope "slug"|"gift"|"all" (fallback раунда 36).
+	CollectibleRevisionSummaries(ctx context.Context, giftID int64, slug string) ([]domain.StarGiftCollectibleRevisionSummary, string, error)
+	// SetCollectibleSupplyTotal (раунд 34) правит лимит возможных улучшенных
+	// подарков опубликованной ревизии коллекции (только повышение).
+	SetCollectibleSupplyTotal(ctx context.Context, write domain.StarGiftCollectibleSupplyWrite) (domain.StarGiftCollectibleRevision, error)
 	// ActiveCollectibleProjection omits heavyweight animation bodies from read-only client/admin
 	// projections. samplePerKind=0 returns the complete attribute metadata; a positive value
 	// returns at most that many randomly selected ordinary-upgrade attributes per kind.
@@ -112,6 +129,9 @@ type StarGiftLifecycleStore interface {
 	ListCraftStarGifts(ctx context.Context, userID, giftID int64, offset string, limit int) (domain.SavedStarGiftPage, error)
 	CraftStarGift(ctx context.Context, req domain.StarGiftCraftRequest) (domain.StarGiftCraftResult, error)
 	StarGiftAuctionState(ctx context.Context, userID int64, giftID int64, slug string, now int) (domain.StarGiftAuction, error)
+	// SetStarGiftAuctionSettings (раунд 34/36) — административная правка
+	// рабочего состояния аукциона с пересчётом границ раундов.
+	SetStarGiftAuctionSettings(ctx context.Context, write domain.StarGiftAuctionRuntimeWrite) (domain.StarGiftAuction, error)
 	ActiveStarGiftAuctions(ctx context.Context, userID int64, now int) ([]domain.StarGiftAuction, error)
 	StarGiftAuctionAcquired(ctx context.Context, userID, giftID int64) ([]domain.StarGiftAuctionAcquired, error)
 	BidStarGiftAuction(ctx context.Context, req domain.StarGiftAuctionBidRequest) (domain.StarGiftAuction, domain.StarsBalance, error)

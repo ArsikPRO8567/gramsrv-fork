@@ -999,6 +999,18 @@ func (s *StarGiftStore) MarkConverted(_ context.Context, ref domain.SavedStarGif
                         s.gifts[i].LifecycleStatus = domain.StarGiftLifecycleConverted
                         s.gifts[i].Unsaved = true
                         s.gifts[i].PinnedOrder = 0
+                        // Раунд 41: конвертация редкого подарка с улучшениями
+                        // освобождает слот улучшения — счётчик выпущенных улучшений
+                        // активного пула уменьшается на 1 (не уходит в минус),
+                        // зеркально postgres-реализации.
+                        if revision, ok := s.collectibles[s.gifts[i].GiftID]; ok && revision.Published && revision.Issued > 0 {
+                                revision.Issued--
+                                s.collectibles[s.gifts[i].GiftID] = revision
+                                if gift, ok := s.catalog[s.gifts[i].GiftID]; ok {
+                                        gift.UpgradeIssued = revision.Issued
+                                        s.catalog[s.gifts[i].GiftID] = gift
+                                }
+                        }
                         for collectionIndex := range s.collections[ref.Owner] {
                                 collection := &s.collections[ref.Owner][collectionIndex]
                                 next := collection.GiftIDs[:0]

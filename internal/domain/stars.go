@@ -66,6 +66,10 @@ type StarsPurchaseForm struct {
         Amount           int64
         IssuedAt         int
         ExpiresAt        int
+        // Acquisition (раунд 31) — канал приобретения пополнения, выбирается по
+        // платформе сессии покупателя и персистится в purpose_json формы: settlement
+        // записывает транзакцию начисления с reason выбранного канала.
+        Acquisition StarsTopupAcquisition
 }
 
 // StarsPurchaseRequest is the immutable settlement command carried by
@@ -123,6 +127,12 @@ const (
         StarsReasonSuggestedPost StarsTransactionReason = "suggested_post"
         StarsReasonPremium       StarsTransactionReason = "premium"
         StarsReasonAdjust        StarsTransactionReason = "adjust" // 兜底/人工调整
+        // Раунд 31: каналы приобретения пополнения — официальный клиент
+        // локализует начисление по типу peer в starsTransaction (Fragment /
+        // App Store / Google Play / PremiumBot).
+        StarsReasonTopupAppStore   StarsTransactionReason = "topup_appstore"
+        StarsReasonTopupPlayMarket StarsTransactionReason = "topup_playmarket"
+        StarsReasonTopupBot        StarsTransactionReason = "topup_bot"
 )
 
 // StarsTransaction 是一条账本流水。amount 带符号：贷记 > 0（含收取），借记 < 0。
@@ -148,9 +158,9 @@ type StarsTransaction struct {
 // (refund_charged=true): непогашенные проводки платных сообщений помечаются
 // refunded, балансы обеих сторон корректируются в одной транзакции.
 type PaidMessagesRefund struct {
-        Refunded    int64 // возвращено плательщику (брутто — столько он заплатил)
-        ClawedBack  int64 // списано с получателя (фактически удержано; клампится к остатку)
-        Charges     int   // число погашенных платежей
+        Refunded   int64 // возвращено плательщику (брутто — столько он заплатил)
+        ClawedBack int64 // списано с получателя (фактически удержано; клампится к остатку)
+        Charges    int   // число погашенных платежей
 }
 
 // IsCredit 报告该流水是否为入账（贷记）。
@@ -171,6 +181,57 @@ type StarsLedgerFlags struct {
         GiftID       int64 // 关联礼物；0 = 无礼物载荷
         GiftIsUnique bool  // GiftID 指向 unique_star_gifts.id（否则为目录礼物）
         Refunded     bool  // starsTransaction.refund
+        // TransactionID — явно заданный публичный идентификатор транзакции
+        // (проблема C): парный перевод «аккаунт -> аккаунт» пишет дебет и кредит
+        // с ОДНИМ id, чтобы клиент показывал обе стороны как одну операцию.
+        // Пусто — идентификатор генерируется при записи.
+        TransactionID string
+}
+
+// StarsPeerTransferRequest описывает атомарный парный перевод Stars между
+// аккаунтами (платные сообщения, компенсации): списание у отправителя и
+// зачисление получателю в одной транзакции, обе строки с одним публичным
+// transaction_id.
+type StarsPeerTransferRequest struct {
+        SenderUserID    int64
+        RecipientUserID int64
+        Amount          int64 // > 0; знак строк леджера проставляет store
+        Reason          StarsTransactionReason
+        Date            int // Unix секунды
+}
+
+// StarsPeerTransferResult возвращает публичный transaction_id, общий для
+// обеих строк леджера перевода (или его компенсации).
+type StarsPeerTransferResult struct {
+        TransactionID string
+}
+
+// StarsTopupAcquisition — канал приобретения звёзд (раунд 31): официальный
+// клиент рисует counterparts StarsTransactionPeerFragment (Fragment),
+// StarsTransactionPeerAppStore / PlayMarket (магазин приложения) и
+// StarsTransactionPeerPremiumBot («бот для покупки звёзд») по типу peer.
+type StarsTopupAcquisition string
+
+const (
+        StarsTopupFragment   StarsTopupAcquisition = "fragment"
+        StarsTopupAppStore   StarsTopupAcquisition = "appstore"
+        StarsTopupPlayMarket StarsTopupAcquisition = "playmarket"
+        StarsTopupBot        StarsTopupAcquisition = "bot"
+)
+
+// StarsTopupReason — reason транзакции начисления для канала приобретения;
+// неизвестные значения откатываются к Fragment-начислению (topup).
+func (a StarsTopupAcquisition) StarsTopupReason() StarsTransactionReason {
+        switch a {
+        case StarsTopupAppStore:
+                return StarsReasonTopupAppStore
+        case StarsTopupPlayMarket:
+                return StarsReasonTopupPlayMarket
+        case StarsTopupBot:
+                return StarsReasonTopupBot
+        default:
+                return StarsReasonTopup
+        }
 }
 
 // NewStarsTransactionID 生成官方形状的公开交易 ID：前缀 + 60 位 [A-Za-z0-9]

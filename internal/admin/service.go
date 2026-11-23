@@ -55,22 +55,27 @@ const (
         ActionPublishGiftCollectibles = "gifts.collectibles.publish"
         ActionSetStarGiftEnabled      = "gifts.set_enabled"
         ActionSetStarGiftSortOrder    = "gifts.set_sort_order"
-        ActionGiveGift                = "gifts.give"
-        ActionCreateBot               = "bot.create"
-        ActionCreateBroadcast         = "broadcast.create"
-        ActionSetStickerSetArchived   = "stickers.set_archived"
-        ActionSetStickerSetSortOrder  = "stickers.set_sort_order"
-        ActionRenameStickerSet        = "stickers.rename"
-        ActionDeleteStickerSet        = "stickers.delete"
-        ActionCreateStickerSet        = "stickers.create"
-        ActionAddStickerToSet         = "stickers.add_sticker"
-        ActionRemoveStickerFromSet    = "stickers.remove_sticker"
-        ActionCreateGifCatalogEntry   = "gif_catalog.create"
-        ActionSetGifCatalogEnabled    = "gif_catalog.set_enabled"
-        ActionSetGifCatalogSortOrder  = "gif_catalog.set_sort_order"
-        ActionDeleteGifCatalogEntry   = "gif_catalog.delete"
-        ActionDeleteBot               = "bot.delete"
-        ActionExportBotToken          = "bot.export_token"
+        ActionUpdateStarGiftSettings  = "gifts.update_settings"
+        ActionSetStarGiftAuction      = "gifts.set_auction_settings"
+        // ActionSetStarGiftCollectibleSupply (раунд 34) — изменение лимита
+        // возможных улучшенных подарков опубликованной ревизии коллекции.
+        ActionSetStarGiftCollectibleSupply = "gifts.set_collectible_supply"
+        ActionGiveGift                     = "gifts.give"
+        ActionCreateBot                    = "bot.create"
+        ActionCreateBroadcast              = "broadcast.create"
+        ActionSetStickerSetArchived        = "stickers.set_archived"
+        ActionSetStickerSetSortOrder       = "stickers.set_sort_order"
+        ActionRenameStickerSet             = "stickers.rename"
+        ActionDeleteStickerSet             = "stickers.delete"
+        ActionCreateStickerSet             = "stickers.create"
+        ActionAddStickerToSet              = "stickers.add_sticker"
+        ActionRemoveStickerFromSet         = "stickers.remove_sticker"
+        ActionCreateGifCatalogEntry        = "gif_catalog.create"
+        ActionSetGifCatalogEnabled         = "gif_catalog.set_enabled"
+        ActionSetGifCatalogSortOrder       = "gif_catalog.set_sort_order"
+        ActionDeleteGifCatalogEntry        = "gif_catalog.delete"
+        ActionDeleteBot                    = "bot.delete"
+        ActionExportBotToken               = "bot.export_token"
         // Collectible (Fragment-style) username lifecycle.
         ActionMintCollectibleUsername     = "usernames.collectible.mint"
         ActionTransferCollectibleUsername = "usernames.collectible.transfer"
@@ -300,11 +305,28 @@ type GiftsService interface {
         PrepareOfficialAnimation(fileName string, data []byte) (domain.StarGiftAnimation, error)
         CreateCatalogRevision(ctx context.Context, write domain.StarGiftCatalogWrite) (domain.StarGiftCatalogEntry, error)
         CreateCatalogBundle(ctx context.Context, write domain.StarGiftCatalogBundleWrite) (domain.StarGiftCatalogBundleResult, error)
+        UpdateCatalogSettings(ctx context.Context, write domain.StarGiftCatalogSettingsWrite) (domain.StarGiftCatalogEntry, error)
+        SetStarGiftAuctionSettings(ctx context.Context, write domain.StarGiftAuctionRuntimeWrite) (domain.StarGiftAuction, error)
         SetCatalogEnabled(ctx context.Context, giftID int64, enabled bool) (bool, error)
         SetCatalogSortOrder(ctx context.Context, giftID int64, sortOrder int) (bool, error)
         AnimationJSON(ctx context.Context, giftID int64) ([]byte, bool, error)
+        // AnimationMedia — payload анимации вместе с mime: Lottie отдаёт JSON,
+        // медиа-форматы (.webp/.webm/.png, раунд 37) — исходные байты.
+        AnimationMedia(ctx context.Context, giftID int64) (payload []byte, mime string, found bool, err error)
         CreateCollectibleRevision(ctx context.Context, write domain.StarGiftCollectibleWrite) (domain.StarGiftCollectibleRevision, error)
+        // ActiveCollectibleRevision (раунд 37) — активная ревизия подарка с полными
+        // метаданными строк атрибутов: источник правки «на месте».
+        ActiveCollectibleRevision(ctx context.Context, giftID int64) (domain.StarGiftCollectibleRevision, bool, error)
         CollectiblePreview(ctx context.Context, giftID int64) (domain.StarGiftUpgradePreview, bool, error)
+        CollectibleRevision(ctx context.Context, revisionID int64) (domain.StarGiftCollectibleRevision, error)
+        // SetCollectibleSupplyTotal (раунд 34) правит лимит возможных улучшенных
+        // подарков опубликованной ревизии коллекции (supply каталога увеличен).
+        SetCollectibleSupplyTotal(ctx context.Context, write domain.StarGiftCollectibleSupplyWrite) (domain.StarGiftCollectibleRevision, error)
+        // CollectibleRevisionSummaries (раунд 34/36) перечисляет ревизии коллекции
+        // для выбора источника копирования атрибутов блоками: непустой slug —
+        // ревизии по slug_prefix И gift_id; пустые выборки — последние ревизии
+        // всех коллекций (scope "slug"|"gift"|"all").
+        CollectibleRevisionSummaries(ctx context.Context, giftID int64, slug string) ([]domain.StarGiftCollectibleRevisionSummary, string, error)
         CollectibleAnimationJSON(ctx context.Context, giftID int64, kind domain.StarGiftCollectibleAttributeKind, attributeID int64) ([]byte, bool, error)
 }
 
@@ -761,6 +783,18 @@ type CommandResult struct {
         transientDetails map[string]any
 }
 
+// StarGiftWhitelistSettings — блок настроек вайтлиста в запросах импорта
+// подарков (раунд 31). nil в запросе = блок не задан, существующая строка
+// gift_whitelists (в т.ч. созданная вручную через psql) не трогается.
+type StarGiftWhitelistSettings struct {
+        AllowedBuyers    []string `json:"allowed_buyers"`
+        Hidden           bool     `json:"hidden"`
+        Numbered         bool     `json:"numbered"`
+        DisallowUpgrades bool     `json:"disallow_upgrades"`
+        DisallowResell   bool     `json:"disallow_resell"`
+        Apply            bool     `json:"apply"`
+}
+
 type ImportStarGiftRequest struct {
         CommandMeta
         GiftID       int64  `json:"gift_id,omitempty"`
@@ -772,6 +806,25 @@ type ImportStarGiftRequest struct {
         FileName     string `json:"file_name"`
         ContentSHA   string `json:"content_sha256"`
         Data         []byte `json:"-"`
+        // Настройки выпуска (раунд 31): количество, «кем выпущено»,
+        // лимит-на-пользователя, birthday, премиум, дата разблокировки покупки.
+        // nil = настройка не передана (для загрузки своего подарка эквивалентно нулю).
+        AvailabilityTotal   *int   `json:"availability_total,omitempty"`
+        AvailabilityRemains *int   `json:"availability_remains,omitempty"`
+        ReleasedByType      string `json:"released_by_type,omitempty"`
+        ReleasedByID        int64  `json:"released_by_id,string,omitempty"`
+        PerUserTotal        *int   `json:"per_user_total,omitempty"`
+        Birthday            *bool  `json:"birthday,omitempty"`
+        RequirePremium      *bool  `json:"require_premium,omitempty"`
+        LockedUntilDate     *int   `json:"locked_until_date,omitempty"`
+        // Настройки аукциона (раунд 32): включение, slug, подарков на раунд,
+        // старт. nil/пустые = значения write по умолчанию (не аукцион); для
+        // включённого аукциона все три поля обязательны (зеркало констрейнта).
+        Auction          *bool                      `json:"auction,omitempty"`
+        AuctionSlug      string                     `json:"auction_slug,omitempty"`
+        GiftsPerRound    *int                       `json:"gifts_per_round,omitempty"`
+        AuctionStartDate *int                       `json:"auction_start_date,omitempty"`
+        Whitelist        *StarGiftWhitelistSettings `json:"whitelist,omitempty"`
 }
 
 type ImportOfficialStarGiftRequest struct {
@@ -789,12 +842,95 @@ type ImportOfficialStarGiftRequest struct {
         SlugPrefix         string   `json:"slug_prefix,omitempty"`
         ManifestSHA256     string   `json:"manifest_sha256,omitempty"`
         AssetSHA256        []string `json:"asset_sha256,omitempty"`
+        // Настройки выпуска (раунд 31): как в ImportStarGiftRequest, но для импорта
+        // из снимка; nil = не задано в запросе — сохраняются значения снимка
+        // (поведение до раунда 31), не-nil — значение, выбранное администратором.
+        AvailabilityTotal   *int   `json:"availability_total,omitempty"`
+        AvailabilityRemains *int   `json:"availability_remains,omitempty"`
+        ReleasedByType      string `json:"released_by_type,omitempty"`
+        ReleasedByID        int64  `json:"released_by_id,string,omitempty"`
+        PerUserTotal        *int   `json:"per_user_total,omitempty"`
+        Birthday            *bool  `json:"birthday,omitempty"`
+        RequirePremium      *bool  `json:"require_premium,omitempty"`
+        LockedUntilDate     *int   `json:"locked_until_date,omitempty"`
+        // Настройки аукциона (раунд 32): nil/пустые = значения снимка,
+        // не-nil — значение, выбранное администратором.
+        Auction          *bool                      `json:"auction,omitempty"`
+        AuctionSlug      string                     `json:"auction_slug,omitempty"`
+        GiftsPerRound    *int                       `json:"gifts_per_round,omitempty"`
+        AuctionStartDate *int                       `json:"auction_start_date,omitempty"`
+        Whitelist        *StarGiftWhitelistSettings `json:"whitelist,omitempty"`
+}
+
+// UpdateStarGiftSettingsRequest — редактирование ВСЕХ параметров существующего
+// подарка без загрузки новой анимации (раунд 32). Создаёт новую ревизию с
+// скопированной анимацией; вайтлист nil — не трогать.
+type UpdateStarGiftSettingsRequest struct {
+        CommandMeta
+        GiftID              int64                      `json:"gift_id,string"`
+        Title               string                     `json:"title"`
+        Stars               int64                      `json:"stars"`
+        ConvertStars        int64                      `json:"convert_stars"`
+        Enabled             bool                       `json:"enabled"`
+        SortOrder           int                        `json:"sort_order"`
+        AvailabilityTotal   *int                       `json:"availability_total,omitempty"`
+        AvailabilityRemains *int                       `json:"availability_remains,omitempty"`
+        ReleasedByType      string                     `json:"released_by_type,omitempty"`
+        ReleasedByID        int64                      `json:"released_by_id,string,omitempty"`
+        PerUserTotal        *int                       `json:"per_user_total,omitempty"`
+        Birthday            *bool                      `json:"birthday,omitempty"`
+        RequirePremium      *bool                      `json:"require_premium,omitempty"`
+        LockedUntilDate     *int                       `json:"locked_until_date,omitempty"`
+        Auction             *bool                      `json:"auction,omitempty"`
+        AuctionSlug         string                     `json:"auction_slug,omitempty"`
+        GiftsPerRound       *int                       `json:"gifts_per_round,omitempty"`
+        AuctionStartDate    *int                       `json:"auction_start_date,omitempty"`
+        Whitelist           *StarGiftWhitelistSettings `json:"whitelist,omitempty"`
+        // Раунд 34: опциональная замена анимации при редактировании (multipart
+        // поле "file"). Данные пусты — команда меняет только настройки, анимация
+        // копируется из активной ревизии.
+        FileName string `json:"file_name,omitempty"`
+        Data     []byte `json:"-"`
+}
+
+// SetStarGiftAuctionSettingsRequest — настройки РАБОЧЕГО аукциона
+// (star_gift_auctions): длительности раундов, режим повышения ставки,
+// продления, минимум, границы и статус. nil-поля = не менять; JSON-поля:
+// "" = не менять, "null" = сбросить, иначе валидный JSON.
+type SetStarGiftAuctionSettingsRequest struct {
+        CommandMeta
+        GiftID             int64  `json:"gift_id,string"`
+        RoundDuration      *int   `json:"round_duration,omitempty"`
+        RoundDurationsJSON string `json:"round_durations,omitempty"`
+        RaiseMinBid        *bool  `json:"raise_min_bid,omitempty"`
+        RoundExtendsJSON   string `json:"round_extends,omitempty"`
+        MinBidAmount       *int64 `json:"min_bid_amount,omitempty"`
+        StartDate          *int   `json:"start_date,omitempty"`
+        EndDate            *int   `json:"end_date,omitempty"`
+        // TotalRounds (раунд 35) — количество раундов аукциона: явное значение
+        // замещает выведенное из supply/gifts_per_round; nil = не менять.
+        // GiftsLeft / LastGiftNum (раунд 36) — остаток подарков и последний
+        // выпущенный номер (для перезапуска аукциона).
+        TotalRounds *int   `json:"total_rounds,omitempty"`
+        GiftsLeft   *int   `json:"gifts_left,omitempty"`
+        LastGiftNum *int   `json:"last_gift_num,omitempty"`
+        Status      string `json:"status,omitempty"`
 }
 
 type SetStarGiftEnabledRequest struct {
         CommandMeta
         GiftID  int64 `json:"gift_id"`
         Enabled bool  `json:"enabled"`
+}
+
+// SetStarGiftCollectibleSupplyRequest (раунд 34) — изменить лимит возможных
+// улучшенных подарков опубликованной ревизии коллекции. Нужен, когда supply
+// каталога увеличен: апгрейд блокируется при issued >= supply_total. Лимит
+// можно только повысить (или оставить равным).
+type SetStarGiftCollectibleSupplyRequest struct {
+        CommandMeta
+        GiftID      int64 `json:"gift_id,string"`
+        SupplyTotal int   `json:"supply_total"`
 }
 
 type SetStarGiftSortOrderRequest struct {
@@ -827,7 +963,25 @@ type StarGiftCollectibleAnimationUpload struct {
         FileKey        string `json:"file_key"`
         FileName       string `json:"file_name,omitempty"`
         ContentSHA     string `json:"content_sha256,omitempty"`
-        Data           []byte `json:"-"`
+        // Раунд 33: крафтовые модели — именованная редкость вместо permille.
+        // rarity_kind ∈ permille|uncommon|rare|epic|legendary; для не-permille
+        // значение rarity_permille игнорируется (в БД NULL), атрибут помечается
+        // crafted=true (модели только — констрейнт star_gift_collectible_model_rarity_check).
+        RarityKind string `json:"rarity_kind,omitempty"`
+        // Раунд 33: копия из другой ревизии — атрибут ссылается на существующий
+        // документ (файл не загружается); метаданные анимации берутся из исходной
+        // ревизии copy_from_revision_id.
+        CopyDocumentID int64 `json:"copy_document_id,string,omitempty"`
+        // Раунд 34: своя ревизия-источник для каждой записи — копирование блоками
+        // (модели/фоны/узоры) из РАЗНЫХ ревизий в одной команде; 0 = общий
+        // req.CopyFromRevisionID.
+        CopyFromRevisionID int64 `json:"copy_from_revision_id,string,omitempty"`
+        // Раунд 37: правка существующей строки атрибута активной ревизии этого
+        // подарка («на месте»). >0 — строка ОБНОВЛЯЕТСЯ (id и ссылки выпущенных
+        // подарков сохраняются); файл опционален: без файла анимация остаётся
+        // прежней. 0 = новая строка (INSERT).
+        AttributeID int64  `json:"attribute_id,string,omitempty"`
+        Data        []byte `json:"-"`
 }
 
 type StarGiftCollectibleBackdropInput struct {
@@ -839,6 +993,8 @@ type StarGiftCollectibleBackdropInput struct {
         TextColor      int    `json:"text_color"`
         RarityPermille int    `json:"rarity_permille"`
         SortOrder      int    `json:"sort_order"`
+        // Раунд 37: правка существующей строки фона активной ревизии; 0 = новая.
+        AttributeID int64 `json:"attribute_id,string,omitempty"`
 }
 
 type PublishStarGiftCollectiblesRequest struct {
@@ -850,6 +1006,9 @@ type PublishStarGiftCollectiblesRequest struct {
         Models       []StarGiftCollectibleAnimationUpload `json:"models"`
         Patterns     []StarGiftCollectibleAnimationUpload `json:"patterns"`
         Backdrops    []StarGiftCollectibleBackdropInput   `json:"backdrops"`
+        // Раунд 33: ревизия-источник копирования атрибутов (любой подарок, любой
+        // статус); 0 = копирование не используется, все анимации загружаются файлами.
+        CopyFromRevisionID int64 `json:"copy_from_revision_id,string,omitempty"`
 }
 
 type SetAccountFrozenRequest struct {
@@ -3443,6 +3602,257 @@ func (s *Service) DeletePrivateHistory(ctx context.Context, req DeletePrivateHis
         })
 }
 
+// applyStarGiftIssueSettings переносит административные настройки выпуска
+// («кем выпущено», количество, лимит-на-пользователя, birthday, премиум, дата
+// разблокировки покупки) в catalog write. nil-настройка не трогает write:
+// для загрузки своего подарка это эквивалентно нулю (поля write по умолчанию
+// пустые), для импорта из снимка сохраняет значения снимка. Валидация
+// зеркалит SQL-констрейнты star_gift_catalog_revision_supply_check /
+// released_by_check: limited и limited_per_user выводятся из положительности
+// соответствующих счётчиков.
+func applyStarGiftIssueSettings(write *domain.StarGiftCatalogWrite, total, remains, perUserTotal, lockedUntil *int,
+        releasedType string, releasedID int64, birthday, requirePremium *bool) error {
+        if total != nil && *total < 0 || remains != nil && *remains < 0 ||
+                perUserTotal != nil && *perUserTotal < 0 || lockedUntil != nil && *lockedUntil < 0 ||
+                total == nil && remains != nil && *remains > 0 {
+                return domain.ErrStarGiftInvalid
+        }
+        if total != nil && remains != nil && *remains > *total {
+                return domain.ErrStarGiftInvalid
+        }
+        if total != nil {
+                if *total > 0 {
+                        write.Limited = true
+                }
+                write.AvailabilityTotal = *total
+                if remains != nil {
+                        write.AvailabilityRemains = *remains
+                } else {
+                        write.AvailabilityRemains = *total
+                }
+        } else if remains != nil {
+                write.AvailabilityRemains = *remains
+        }
+        if perUserTotal != nil {
+                write.LimitedPerUser = *perUserTotal > 0
+                write.PerUserTotal = *perUserTotal
+        }
+        if birthday != nil {
+                write.Birthday = *birthday
+        }
+        if requirePremium != nil {
+                write.RequirePremium = *requirePremium
+        }
+        if lockedUntil != nil {
+                write.LockedUntilDate = *lockedUntil
+        }
+        if strings.TrimSpace(releasedType) != "" || releasedID != 0 {
+                peerType := domain.PeerType(strings.ToLower(strings.TrimSpace(releasedType)))
+                if releasedID <= 0 || (peerType != domain.PeerTypeUser && peerType != domain.PeerTypeChannel) {
+                        return domain.ErrStarGiftInvalid
+                }
+                write.ReleasedBy = domain.Peer{Type: peerType, ID: releasedID}
+        }
+        return nil
+}
+
+// applyStarGiftAuctionSettings переносит настройки аукциона запроса в catalog
+// write (раунд 32). nil-настройка сохраняет текущее значение write (для импорта
+// из снимка — значения снимка); auction=false обнуляет все аукционные поля
+// (зеркало второй ветки констрейнта star_gift_catalog_revision_auction_check),
+// auction=true требует slug, положительные подарки-на-раунд и дату старта.
+func applyStarGiftAuctionSettings(write *domain.StarGiftCatalogWrite, auction *bool, slug string, perRound, startDate *int) error {
+        if perRound != nil && *perRound < 0 || startDate != nil && *startDate < 0 {
+                return domain.ErrStarGiftInvalid
+        }
+        enabled := write.Auction
+        if auction != nil {
+                enabled = *auction
+        }
+        if !enabled {
+                write.Auction = false
+                write.AuctionSlug = ""
+                write.GiftsPerRound = 0
+                write.AuctionStartDate = 0
+                return nil
+        }
+        write.Auction = true
+        if trimmed := strings.ToLower(strings.TrimSpace(slug)); trimmed != "" {
+                write.AuctionSlug = trimmed
+        }
+        if perRound != nil {
+                write.GiftsPerRound = *perRound
+        }
+        if startDate != nil {
+                write.AuctionStartDate = *startDate
+        }
+        if strings.TrimSpace(write.AuctionSlug) == "" || write.GiftsPerRound <= 0 || write.AuctionStartDate <= 0 {
+                return domain.ErrStarGiftInvalid
+        }
+        return nil
+}
+
+// starGiftAuctionDetails — поля аукциона для audit-деталей команды.
+func starGiftAuctionDetails(write *domain.StarGiftCatalogWrite) map[string]any {
+        return map[string]any{
+                "auction": write.Auction, "auction_slug": write.AuctionSlug,
+                "gifts_per_round": write.GiftsPerRound, "auction_start_date": write.AuctionStartDate,
+        }
+}
+
+// applyStarGiftIssueSettingsWrite — зеркало applyStarGiftIssueSettings для
+// StarGiftCatalogSettingsWrite (команда gifts.update_settings, раунд 32).
+func applyStarGiftIssueSettingsWrite(write *domain.StarGiftCatalogSettingsWrite, total, remains, perUserTotal, lockedUntil *int,
+        releasedType string, releasedID int64, birthday, requirePremium *bool) error {
+        if total != nil && *total < 0 || remains != nil && *remains < 0 ||
+                perUserTotal != nil && *perUserTotal < 0 || lockedUntil != nil && *lockedUntil < 0 ||
+                total == nil && remains != nil && *remains > 0 {
+                return domain.ErrStarGiftInvalid
+        }
+        if total != nil && remains != nil && *remains > *total {
+                return domain.ErrStarGiftInvalid
+        }
+        if total != nil {
+                if *total > 0 {
+                        write.Limited = true
+                }
+                write.AvailabilityTotal = *total
+                if remains != nil {
+                        write.AvailabilityRemains = *remains
+                } else {
+                        write.AvailabilityRemains = *total
+                }
+        } else if remains != nil {
+                write.AvailabilityRemains = *remains
+        }
+        if perUserTotal != nil {
+                write.LimitedPerUser = *perUserTotal > 0
+                write.PerUserTotal = *perUserTotal
+        }
+        if birthday != nil {
+                write.Birthday = *birthday
+        }
+        if requirePremium != nil {
+                write.RequirePremium = *requirePremium
+        }
+        if lockedUntil != nil {
+                write.LockedUntilDate = *lockedUntil
+        }
+        if strings.TrimSpace(releasedType) != "" || releasedID != 0 {
+                peerType := domain.PeerType(strings.ToLower(strings.TrimSpace(releasedType)))
+                if releasedID <= 0 || (peerType != domain.PeerTypeUser && peerType != domain.PeerTypeChannel) {
+                        return domain.ErrStarGiftInvalid
+                }
+                write.ReleasedBy = domain.Peer{Type: peerType, ID: releasedID}
+        }
+        return nil
+}
+
+// applyStarGiftAuctionWrite — зеркало applyStarGiftAuctionSettings для
+// StarGiftCatalogSettingsWrite (команда gifts.update_settings, раунд 32).
+func applyStarGiftAuctionWrite(write *domain.StarGiftCatalogSettingsWrite, auction *bool, slug string, perRound, startDate *int) error {
+        if perRound != nil && *perRound < 0 || startDate != nil && *startDate < 0 {
+                return domain.ErrStarGiftInvalid
+        }
+        enabled := write.Auction
+        if auction != nil {
+                enabled = *auction
+        }
+        if !enabled {
+                write.Auction = false
+                write.AuctionSlug = ""
+                write.GiftsPerRound = 0
+                write.AuctionStartDate = 0
+                return nil
+        }
+        write.Auction = true
+        if trimmed := strings.ToLower(strings.TrimSpace(slug)); trimmed != "" {
+                write.AuctionSlug = trimmed
+        }
+        if perRound != nil {
+                write.GiftsPerRound = *perRound
+        }
+        if startDate != nil {
+                write.AuctionStartDate = *startDate
+        }
+        if strings.TrimSpace(write.AuctionSlug) == "" || write.GiftsPerRound <= 0 || write.AuctionStartDate <= 0 {
+                return domain.ErrStarGiftInvalid
+        }
+        return nil
+}
+
+// starGiftIssueSettingsDetails — поля настроек выпуска write для audit-деталей.
+func starGiftIssueSettingsDetails(write *domain.StarGiftCatalogSettingsWrite) map[string]any {
+        details := map[string]any{
+                "availability_total": write.AvailabilityTotal, "availability_remains": write.AvailabilityRemains,
+                "per_user_total": write.PerUserTotal, "birthday": write.Birthday,
+                "require_premium": write.RequirePremium, "locked_until_date": write.LockedUntilDate,
+        }
+        if write.ReleasedBy.ID > 0 {
+                details["released_by"] = string(write.ReleasedBy.Type) + ":" + strconv.FormatInt(write.ReleasedBy.ID, 10)
+        }
+        return details
+}
+
+// starGiftAuctionWriteDetails — поля аукциона write для audit-деталей.
+func starGiftAuctionWriteDetails(write *domain.StarGiftCatalogSettingsWrite) map[string]any {
+        return map[string]any{
+                "auction": write.Auction, "auction_slug": write.AuctionSlug,
+                "gifts_per_round": write.GiftsPerRound, "auction_start_date": write.AuctionStartDate,
+        }
+}
+
+// starGiftWhitelistWrite конвертирует настройки вайтлиста запроса в доменную
+// запись для апсерта в транзакции ревизии.
+func starGiftWhitelistWrite(settings *StarGiftWhitelistSettings) *domain.GiftWhitelistWrite {
+        if settings == nil {
+                return nil
+        }
+        // allowed_buyers нормализуются сразу (trim/пустые/дубликаты), чтобы write
+        // нёс канонический список и в unit-тестах, и в audit-детали; апсерт в
+        // postgres-адаптере выполняет ту же нормализацию повторно (идемпотентно).
+        return &domain.GiftWhitelistWrite{
+                AllowedBuyers:    normalizeStarGiftBuyerList(settings.AllowedBuyers),
+                Hidden:           settings.Hidden,
+                Numbered:         settings.Numbered,
+                DisallowUpgrades: settings.DisallowUpgrades,
+                DisallowResell:   settings.DisallowResell,
+                Apply:            settings.Apply,
+        }
+}
+
+// normalizeStarGiftBuyerList — общая канонизация allowed_buyers: строки
+// обрезаются, пустые и дубликаты отбрасываются, порядок — первый вход.
+func normalizeStarGiftBuyerList(values []string) []string {
+        out := make([]string, 0, len(values))
+        seen := make(map[string]struct{}, len(values))
+        for _, value := range values {
+                value = strings.TrimSpace(value)
+                if value == "" {
+                        continue
+                }
+                if _, duplicate := seen[value]; duplicate {
+                        continue
+                }
+                seen[value] = struct{}{}
+                out = append(out, value)
+        }
+        return out
+}
+
+// starGiftIssueDetails — поля настроек выпуска для audit-деталей команды.
+func starGiftIssueDetails(write *domain.StarGiftCatalogWrite) map[string]any {
+        details := map[string]any{
+                "availability_total": write.AvailabilityTotal, "availability_remains": write.AvailabilityRemains,
+                "per_user_total": write.PerUserTotal, "birthday": write.Birthday,
+                "require_premium": write.RequirePremium, "locked_until_date": write.LockedUntilDate,
+        }
+        if write.ReleasedBy.ID > 0 {
+                details["released_by"] = string(write.ReleasedBy.Type) + ":" + strconv.FormatInt(write.ReleasedBy.ID, 10)
+        }
+        return details
+}
+
 func (s *Service) ImportStarGift(ctx context.Context, req ImportStarGiftRequest) (CommandResult, error) {
         if s == nil || s.gifts == nil {
                 return CommandResult{}, fmt.Errorf("star gift service is not configured")
@@ -3457,6 +3867,22 @@ func (s *Service) ImportStarGift(ctx context.Context, req ImportStarGiftRequest)
                 return CommandResult{}, err
         }
         req.ContentSHA = hex.EncodeToString(animation.SHA256)
+        write := domain.StarGiftCatalogWrite{
+                GiftID: req.GiftID, Title: req.Title, Stars: req.Stars, ConvertStars: req.ConvertStars,
+                Enabled: req.Enabled, SortOrder: req.SortOrder, Animation: animation,
+                Actor: req.Actor, CommandID: req.CommandID,
+        }
+        // Раунд 31: настройки выпуска и вайтлиста из админки.
+        if err := applyStarGiftIssueSettings(&write, req.AvailabilityTotal, req.AvailabilityRemains,
+                req.PerUserTotal, req.LockedUntilDate, req.ReleasedByType, req.ReleasedByID,
+                req.Birthday, req.RequirePremium); err != nil {
+                return CommandResult{}, err
+        }
+        // Раунд 32: настройки аукциона (включение, slug, подарки-на-раунд, старт).
+        if err := applyStarGiftAuctionSettings(&write, req.Auction, req.AuctionSlug, req.GiftsPerRound, req.AuctionStartDate); err != nil {
+                return CommandResult{}, err
+        }
+        write.Whitelist = starGiftWhitelistWrite(req.Whitelist)
         return s.runCommand(ctx, req.CommandMeta, ActionImportStarGift, 0, domain.Peer{}, req, func() (CommandResult, error) {
                 details := map[string]any{
                         "gift_id": strconv.FormatInt(req.GiftID, 10), "title": strings.TrimSpace(req.Title),
@@ -3466,14 +3892,23 @@ func (s *Service) ImportStarGift(ctx context.Context, req ImportStarGiftRequest)
                         "sha256": req.ContentSHA, "width": animation.Width, "height": animation.Height,
                         "frame_rate": animation.FrameRate, "compressed_bytes": len(animation.TGS), "json_bytes": len(animation.JSON),
                 }
+                for key, value := range starGiftIssueDetails(&write) {
+                        details[key] = value
+                }
+                for key, value := range starGiftAuctionDetails(&write) {
+                        details[key] = value
+                }
+                if write.Whitelist != nil {
+                        details["whitelist"] = map[string]any{
+                                "apply": write.Whitelist.Apply, "allowed_buyers": len(write.Whitelist.AllowedBuyers),
+                                "hidden": write.Whitelist.Hidden, "numbered": write.Whitelist.Numbered,
+                                "disallow_upgrades": write.Whitelist.DisallowUpgrades, "disallow_resell": write.Whitelist.DisallowResell,
+                        }
+                }
                 if req.DryRun {
                         return CommandResult{Message: "star gift import validated", Details: details}, nil
                 }
-                entry, err := s.gifts.CreateCatalogRevision(ctx, domain.StarGiftCatalogWrite{
-                        GiftID: req.GiftID, Title: req.Title, Stars: req.Stars, ConvertStars: req.ConvertStars,
-                        Enabled: req.Enabled, SortOrder: req.SortOrder, Animation: animation,
-                        Actor: req.Actor, CommandID: req.CommandID,
-                })
+                entry, err := s.gifts.CreateCatalogRevision(ctx, write)
                 if err != nil {
                         return CommandResult{Details: details}, err
                 }
@@ -3525,6 +3960,17 @@ func (s *Service) ImportOfficialStarGift(ctx context.Context, req ImportOfficial
         if err != nil {
                 return CommandResult{}, err
         }
+        // Раунд 32: аукционные подарки импортируются СО СВОИМ пулом атрибутов
+        // всегда (модели/узоры/фоны обязаны попасть в базу, и должна создаваться
+        // ревизия коллекции), даже если галочка «включить коллектив» снята —
+        // у аукционных подарков upgrade_stars=0 (бесплатное улучшение), и раньше
+        // CanUpgrade=false прятал галочку, оставляя импорт без ревизии коллекции.
+        if bundle.Gift.Auction && !req.IncludeCollectible {
+                if full, bundleErr := s.officialGifts.Bundle(ctx, sourceID, true); bundleErr == nil && full.Collectible != nil {
+                        bundle = full
+                }
+        }
+        includeCollectible := req.IncludeCollectible || (bundle.Gift.Auction && bundle.Collectible != nil)
         if req.Title = strings.TrimSpace(req.Title); req.Title == "" {
                 req.Title = strings.TrimSpace(bundle.Gift.Title)
                 if req.Title == "" {
@@ -3570,7 +4016,7 @@ func (s *Service) ImportOfficialStarGift(ctx context.Context, req ImportOfficial
                 }
         }
         var collectible *domain.StarGiftCollectibleWrite
-        if req.IncludeCollectible {
+        if includeCollectible {
                 if bundle.Collectible == nil {
                         return CommandResult{}, domain.ErrStarGiftCollectibleInvalid
                 }
@@ -3653,10 +4099,66 @@ func (s *Service) ImportOfficialStarGift(ctx context.Context, req ImportOfficial
                 AuctionStartDate: bundle.Gift.AuctionStartDate, UpgradeVariants: bundle.Gift.UpgradeVariants,
                 Background: background,
         }, Collectible: collectible}
+        // Раунд 31: настройки выпуска из админки (количество, «кем выпущено»,
+        // лимит-на-пользователя, birthday, премиум, дата разблокировки). Значения
+        // запроса замещают данные снимка; нулевые счётчики = без ограничений.
+        catalog := &write.Catalog
+        if err := applyStarGiftIssueSettings(catalog, req.AvailabilityTotal, req.AvailabilityRemains,
+                req.PerUserTotal, req.LockedUntilDate, req.ReleasedByType, req.ReleasedByID,
+                req.Birthday, req.RequirePremium); err != nil {
+                return CommandResult{}, err
+        }
+        // Раунд 31 (фикс SQLSTATE 23514): аукционные подарки из снимка падали на
+        // констрейнте star_gift_catalog_revision_auction_check — импорт жёстко
+        // публиковал Limited:false и нулевые счётчики, а констрейнт требует
+        // auction => limited AND slug<>'' AND gifts_per_round>0 AND
+        // auction_start_date>0 AND availability_total>0 (supply_check). Достраиваем
+        // аукционные атрибуты: значения снимка приоритетны, недостающие —
+        // безопасные дефолты (поставка = минимум один раунд, старт = сейчас).
+        if bundle.Gift.Auction {
+                catalog.Limited = true
+                if catalog.AvailabilityTotal <= 0 {
+                        supply := bundle.Gift.AvailabilityTotal
+                        if supply <= 0 {
+                                supply = bundle.Gift.GiftsPerRound
+                        }
+                        if supply <= 0 {
+                                supply = 1
+                        }
+                        catalog.AvailabilityTotal = supply
+                }
+                if catalog.AvailabilityRemains <= 0 {
+                        catalog.AvailabilityRemains = catalog.AvailabilityTotal
+                }
+                if strings.TrimSpace(catalog.AuctionSlug) == "" {
+                        catalog.AuctionSlug = bundle.Gift.AuctionSlug
+                }
+                if strings.TrimSpace(catalog.AuctionSlug) == "" {
+                        catalog.AuctionSlug = "official-" + req.SourceGiftID
+                }
+                if catalog.GiftsPerRound <= 0 {
+                        catalog.GiftsPerRound = bundle.Gift.GiftsPerRound
+                }
+                if catalog.GiftsPerRound <= 0 {
+                        catalog.GiftsPerRound = 1
+                }
+                if catalog.AuctionStartDate <= 0 {
+                        catalog.AuctionStartDate = bundle.Gift.AuctionStartDate
+                }
+                if catalog.AuctionStartDate <= 0 {
+                        catalog.AuctionStartDate = int(s.now().Unix())
+                }
+        }
+        // Раунд 32: явные настройки аукциона из запроса — финальный авторитет;
+        // nil/пустые сохраняют значения снимка (достроенные блоком выше).
+        if err := applyStarGiftAuctionSettings(catalog, req.Auction, req.AuctionSlug, req.GiftsPerRound, req.AuctionStartDate); err != nil {
+                return CommandResult{}, err
+        }
+        catalog.Whitelist = starGiftWhitelistWrite(req.Whitelist)
         return s.runCommand(ctx, req.CommandMeta, ActionImportOfficialStarGift, 0, domain.Peer{}, req, func() (CommandResult, error) {
                 details := map[string]any{"source_gift_id": req.SourceGiftID, "gift_id": strconv.FormatInt(req.GiftID, 10),
                         "manifest_sha256": req.ManifestSHA256, "title": req.Title, "stars": strconv.FormatInt(req.Stars, 10),
-                        "convert_stars": strconv.FormatInt(req.ConvertStars, 10), "include_collectible": req.IncludeCollectible,
+                        "convert_stars": strconv.FormatInt(req.ConvertStars, 10), "include_collectible": includeCollectible,
                         "verified_asset_count": len(assetHashes), "rarity_counts": rarityCounts,
                         "official_limited": bundle.Gift.Limited, "official_sold_out": bundle.Gift.SoldOut,
                         "official_auction": bundle.Gift.Auction, "official_birthday": bundle.Gift.Birthday,
@@ -3664,6 +4166,19 @@ func (s *Service) ImportOfficialStarGift(ctx context.Context, req ImportOfficial
                         "official_availability_remains": bundle.Gift.AvailabilityRemains,
                         "official_availability_total":   bundle.Gift.AvailabilityTotal,
                         "official_availability_resale":  bundle.Gift.AvailabilityResale,
+                }
+                for key, value := range starGiftIssueDetails(catalog) {
+                        details[key] = value
+                }
+                for key, value := range starGiftAuctionDetails(catalog) {
+                        details[key] = value
+                }
+                if catalog.Whitelist != nil {
+                        details["whitelist"] = map[string]any{
+                                "apply": catalog.Whitelist.Apply, "allowed_buyers": len(catalog.Whitelist.AllowedBuyers),
+                                "hidden": catalog.Whitelist.Hidden, "numbered": catalog.Whitelist.Numbered,
+                                "disallow_upgrades": catalog.Whitelist.DisallowUpgrades, "disallow_resell": catalog.Whitelist.DisallowResell,
+                        }
                 }
                 if bundle.Collectible != nil {
                         details["models"] = len(bundle.Collectible.Models)
@@ -3694,6 +4209,170 @@ func (s *Service) ImportOfficialStarGift(ctx context.Context, req ImportOfficial
         })
 }
 
+// UpdateStarGiftSettings — редактирование ВСЕХ параметров существующего подарка
+// без загрузки новой анимации (раунд 32): название/цены/сортировка/включение,
+// настройки выпуска, аукцион и вайтлист. Анимационные столбцы копируются из
+// текущей активной ревизии, параметры публикуются как НОВАЯ ревизия (release
+// facts неизменяемы по дизайну каталога), агрегат star_gift_catalog обновляется.
+func (s *Service) UpdateStarGiftSettings(ctx context.Context, req UpdateStarGiftSettingsRequest) (CommandResult, error) {
+        if s == nil || s.gifts == nil {
+                return CommandResult{}, fmt.Errorf("star gift service is not configured")
+        }
+        if req.GiftID <= 0 || req.Stars <= 0 || req.ConvertStars < 0 || req.ConvertStars > req.Stars ||
+                req.SortOrder < math.MinInt32 || req.SortOrder > math.MaxInt32 ||
+                len([]rune(strings.TrimSpace(req.Title))) > domain.MaxStarGiftTitleRunes {
+                return CommandResult{}, domain.ErrStarGiftInvalid
+        }
+        write := domain.StarGiftCatalogSettingsWrite{
+                GiftID: req.GiftID, Title: strings.TrimSpace(req.Title), Stars: req.Stars, ConvertStars: req.ConvertStars,
+                Enabled: req.Enabled, SortOrder: req.SortOrder, Actor: req.Actor, CommandID: req.CommandID,
+        }
+        if err := applyStarGiftIssueSettingsWrite(&write, req.AvailabilityTotal, req.AvailabilityRemains,
+                req.PerUserTotal, req.LockedUntilDate, req.ReleasedByType, req.ReleasedByID,
+                req.Birthday, req.RequirePremium); err != nil {
+                return CommandResult{}, err
+        }
+        // Раунд 32: аукцион — из запроса. Поля write по умолчанию нулевые, поэтому
+        // nil-настройки = «не аукцион»; включённый аукцион требует все три поля.
+        if err := applyStarGiftAuctionWrite(&write, req.Auction, req.AuctionSlug, req.GiftsPerRound, req.AuctionStartDate); err != nil {
+                return CommandResult{}, err
+        }
+        write.Whitelist = starGiftWhitelistWrite(req.Whitelist)
+        // Раунд 34: в окне редактирования можно загрузить новую анимацию с
+        // предпросмотром; без файла команда меняет только настройки (анимация
+        // копируется из активной ревизии внутри postgres-адаптера).
+        if len(req.Data) > 0 {
+                animation, err := s.gifts.PrepareAnimation(req.FileName, req.Data)
+                if err != nil {
+                        return CommandResult{}, err
+                }
+                write.Animation = &animation
+        }
+        return s.runCommand(ctx, req.CommandMeta, ActionUpdateStarGiftSettings, req.GiftID, domain.Peer{}, req, func() (CommandResult, error) {
+                details := map[string]any{"gift_id": strconv.FormatInt(req.GiftID, 10), "title": write.Title,
+                        "stars": strconv.FormatInt(req.Stars, 10), "convert_stars": strconv.FormatInt(req.ConvertStars, 10),
+                        "enabled": req.Enabled, "sort_order": req.SortOrder,
+                }
+                for key, value := range starGiftIssueSettingsDetails(&write) {
+                        details[key] = value
+                }
+                for key, value := range starGiftAuctionWriteDetails(&write) {
+                        details[key] = value
+                }
+                if write.Whitelist != nil {
+                        details["whitelist"] = map[string]any{
+                                "apply": write.Whitelist.Apply, "allowed_buyers": len(write.Whitelist.AllowedBuyers),
+                                "hidden": write.Whitelist.Hidden, "numbered": write.Whitelist.Numbered,
+                                "disallow_upgrades": write.Whitelist.DisallowUpgrades, "disallow_resell": write.Whitelist.DisallowResell,
+                        }
+                }
+                if req.DryRun {
+                        return CommandResult{Message: "star gift settings validated", Details: details}, nil
+                }
+                if write.Animation != nil {
+                        details["animation_replaced"] = true
+                        details["animation_sha256"] = hex.EncodeToString(write.Animation.SHA256)
+                }
+                entry, err := s.gifts.UpdateCatalogSettings(ctx, write)
+                if err != nil {
+                        return CommandResult{Details: details}, err
+                }
+                details["gift_id"] = strconv.FormatInt(entry.Gift.ID, 10)
+                details["revision_id"] = strconv.FormatInt(entry.Gift.RevisionID, 10)
+                details["revision"] = entry.Revision
+                return CommandResult{Message: "star gift settings updated", Details: details}, nil
+        })
+}
+
+// SetStarGiftAuctionSettings — настройки рабочего аукциона (star_gift_auctions):
+// длительности раундов, режим повышения ставки, продления, минимум, границы,
+// статус. Отсутствующая строка создаётся из активной ревизии автоматически.
+func (s *Service) SetStarGiftAuctionSettings(ctx context.Context, req SetStarGiftAuctionSettingsRequest) (CommandResult, error) {
+        if s == nil || s.gifts == nil {
+                return CommandResult{}, fmt.Errorf("star gift service is not configured")
+        }
+        if req.GiftID <= 0 {
+                return CommandResult{}, domain.ErrStarGiftInvalid
+        }
+        write := domain.StarGiftAuctionRuntimeWrite{
+                GiftID: req.GiftID, RoundDuration: req.RoundDuration, RoundDurationsJSON: req.RoundDurationsJSON,
+                RaiseMinBid: req.RaiseMinBid, RoundExtendsJSON: req.RoundExtendsJSON, MinBidAmount: req.MinBidAmount,
+                StartDate: req.StartDate, EndDate: req.EndDate, TotalRounds: req.TotalRounds,
+                GiftsLeft: req.GiftsLeft, LastGiftNum: req.LastGiftNum, Status: req.Status,
+                Actor: req.Actor, CommandID: req.CommandID,
+        }
+        // Валидация до runCommand (включая dry-run) зеркалит проверки в
+        // postgres-адаптере: статус и JSON-поля отклоняются до записи.
+        if status := strings.ToLower(strings.TrimSpace(write.Status)); status != "" &&
+                status != "pending" && status != "active" && status != "completed" && status != "cancelled" {
+                return CommandResult{}, domain.ErrStarGiftInvalid
+        }
+        for _, raw := range []string{write.RoundDurationsJSON, write.RoundExtendsJSON} {
+                trimmed := strings.TrimSpace(raw)
+                if trimmed == "" || trimmed == "null" {
+                        continue
+                }
+                if !json.Valid([]byte(trimmed)) {
+                        return CommandResult{}, domain.ErrStarGiftInvalid
+                }
+        }
+        if write.RoundDuration != nil && *write.RoundDuration <= 0 ||
+                write.MinBidAmount != nil && *write.MinBidAmount <= 0 ||
+                write.StartDate != nil && *write.StartDate <= 0 ||
+                write.EndDate != nil && *write.EndDate <= 0 ||
+                write.TotalRounds != nil && *write.TotalRounds <= 0 ||
+                write.GiftsLeft != nil && *write.GiftsLeft < 0 ||
+                write.LastGiftNum != nil && *write.LastGiftNum < 0 {
+                return CommandResult{}, domain.ErrStarGiftInvalid
+        }
+        return s.runCommand(ctx, req.CommandMeta, ActionSetStarGiftAuction, req.GiftID, domain.Peer{}, req, func() (CommandResult, error) {
+                details := map[string]any{"gift_id": strconv.FormatInt(req.GiftID, 10)}
+                if req.RoundDuration != nil {
+                        details["round_duration"] = *req.RoundDuration
+                }
+                if raw := strings.TrimSpace(req.RoundDurationsJSON); raw != "" {
+                        details["round_durations"] = raw
+                }
+                if req.RaiseMinBid != nil {
+                        details["raise_min_bid"] = *req.RaiseMinBid
+                }
+                if raw := strings.TrimSpace(req.RoundExtendsJSON); raw != "" {
+                        details["round_extends"] = raw
+                }
+                if req.MinBidAmount != nil {
+                        details["min_bid_amount"] = strconv.FormatInt(*req.MinBidAmount, 10)
+                }
+                if req.StartDate != nil {
+                        details["start_date"] = *req.StartDate
+                }
+                if req.EndDate != nil {
+                        details["end_date"] = *req.EndDate
+                }
+                if req.TotalRounds != nil {
+                        details["total_rounds"] = *req.TotalRounds
+                }
+                if req.GiftsLeft != nil {
+                        details["gifts_left"] = *req.GiftsLeft
+                }
+                if req.LastGiftNum != nil {
+                        details["last_gift_num"] = *req.LastGiftNum
+                }
+                if status := strings.TrimSpace(req.Status); status != "" {
+                        details["status"] = strings.ToLower(status)
+                }
+                if req.DryRun {
+                        return CommandResult{Message: "star gift auction settings validated", Details: details}, nil
+                }
+                state, err := s.gifts.SetStarGiftAuctionSettings(ctx, write)
+                if err != nil {
+                        return CommandResult{Details: details}, err
+                }
+                details["version"] = state.Version
+                details["status"] = map[string]any{"current_round": state.CurrentRound, "total_rounds": state.TotalRounds}
+                return CommandResult{Message: "star gift auction settings applied", Details: details}, nil
+        })
+}
+
 func officialRarity(value officialgifts.Rarity) (domain.StarGiftAttributeRarityKind, int, error) {
         kind := domain.StarGiftAttributeRarityKind(strings.ToLower(strings.TrimSpace(value.Kind)))
         if !kind.Valid() {
@@ -3715,38 +4394,261 @@ func (s *Service) PublishStarGiftCollectibles(ctx context.Context, req PublishSt
         if s == nil || s.gifts == nil {
                 return CommandResult{}, fmt.Errorf("star gift service is not configured")
         }
-        toAttributes := func(kind domain.StarGiftCollectibleAttributeKind, uploads []StarGiftCollectibleAnimationUpload) ([]domain.StarGiftCollectibleAttribute, error) {
-                attributes := make([]domain.StarGiftCollectibleAttribute, len(uploads))
+        // Раунд 33: именованная редкость (крафтовые модели). Разрешена только для
+        // моделей — констрейнт star_gift_collectible_model_rarity_check требует
+        // для не-permille видов rarity_permille IS NULL и crafted=true; узоры и
+        // фоны остаются permille-весами обычного апгрейда.
+        resolveRarity := func(kind domain.StarGiftCollectibleAttributeKind, rarityKind string, permille int) (domain.StarGiftAttributeRarityKind, int, bool, error) {
+                normalized := strings.ToLower(strings.TrimSpace(rarityKind))
+                if normalized == "" || normalized == string(domain.StarGiftRarityPermille) {
+                        if permille <= 0 {
+                                return "", 0, false, fmt.Errorf("%w: %s rarity_permille is required", domain.ErrStarGiftCollectibleInvalid, kind)
+                        }
+                        return domain.StarGiftRarityPermille, permille, false, nil
+                }
+                named := domain.StarGiftAttributeRarityKind(normalized)
+                if !named.Valid() || named == domain.StarGiftRarityPermille {
+                        return "", 0, false, fmt.Errorf("%w: unknown rarity_kind %q", domain.ErrStarGiftCollectibleInvalid, rarityKind)
+                }
+                if kind != domain.StarGiftCollectibleModel {
+                        return "", 0, false, fmt.Errorf("%w: rarity_kind %q is only allowed for models", domain.ErrStarGiftCollectibleInvalid, rarityKind)
+                }
+                return named, 0, true, nil
+        }
+        // Раунд 37: активная ревизия подарка (если есть) — источник правки строк
+        // «на месте»: записи с attribute_id обновляются в тех же строках, что
+        // сохраняет ссылки выпущенных подарков.
+        activeRevision, hasActive, activeErr := s.gifts.ActiveCollectibleRevision(ctx, req.GiftID)
+        if activeErr != nil {
+                return CommandResult{}, activeErr
+        }
+        // Раунд 33: копирование атрибутов из другой ревизии (та же ревизия этого
+        // подарка — «правка существующей ревизии», или любой другой подарок).
+        // Копированная запись ссылается на существующий документ: файл не
+        // загружается, метаданные анимации (JSON/SHA-256/габариты/источник)
+        // переносятся из ревизии-источника, документ и blob переиспользуются
+        // (ReuseDocument). Название/редкость/порядок берутся из запроса — их
+        // можно править поверх копии.
+        // Раунд 34: источники копирования кэшируются по id — каждая запись может
+        // ссылаться на СВОЮ ревизию (копирование блоками из разных ревизий).
+        sources := map[int64]domain.StarGiftCollectibleRevision{}
+        loadCopySource := func(revisionID int64) (domain.StarGiftCollectibleRevision, error) {
+                if revision, ok := sources[revisionID]; ok {
+                        return revision, nil
+                }
+                revision, err := s.gifts.CollectibleRevision(ctx, revisionID)
+                if err != nil {
+                        return domain.StarGiftCollectibleRevision{}, fmt.Errorf("load copy source revision: %w", err)
+                }
+                sources[revisionID] = revision
+                return revision, nil
+        }
+        resolveCopy := func(kind domain.StarGiftCollectibleAttributeKind, upload StarGiftCollectibleAnimationUpload) (domain.StarGiftCollectibleAttribute, bool, error) {
+                if upload.CopyDocumentID <= 0 {
+                        return domain.StarGiftCollectibleAttribute{}, false, nil
+                }
+                sourceRevisionID := upload.CopyFromRevisionID
+                if sourceRevisionID <= 0 {
+                        sourceRevisionID = req.CopyFromRevisionID
+                }
+                if sourceRevisionID <= 0 {
+                        return domain.StarGiftCollectibleAttribute{}, false, fmt.Errorf("%w: copy_document_id requires copy_from_revision_id", domain.ErrStarGiftCollectibleInvalid)
+                }
+                source, err := loadCopySource(sourceRevisionID)
+                if err != nil {
+                        return domain.StarGiftCollectibleAttribute{}, false, err
+                }
+                var pool []domain.StarGiftCollectibleAttribute
+                switch kind {
+                case domain.StarGiftCollectibleModel:
+                        pool = source.Models
+                case domain.StarGiftCollectiblePattern:
+                        pool = source.Patterns
+                default:
+                        return domain.StarGiftCollectibleAttribute{}, false, domain.ErrStarGiftCollectibleInvalid
+                }
+                for _, candidate := range pool {
+                        if candidate.Document == nil || candidate.Document.ID != upload.CopyDocumentID {
+                                continue
+                        }
+                        rarity, permille, crafted, err := resolveRarity(kind, upload.RarityKind, upload.RarityPermille)
+                        if err != nil {
+                                // Копия без явной редкости наследует значения источника.
+                                if upload.RarityKind == "" && upload.RarityPermille <= 0 {
+                                        rarity, permille, crafted = candidate.RarityKind, candidate.RarityPermille, candidate.Crafted
+                                } else {
+                                        return domain.StarGiftCollectibleAttribute{}, false, err
+                                }
+                        }
+                        name := strings.TrimSpace(upload.Name)
+                        if name == "" {
+                                name = candidate.Name
+                        }
+                        copied := candidate
+                        copied.ID = 0
+                        copied.CollectibleRevisionID = 0
+                        copied.Kind = kind
+                        copied.Name = name
+                        copied.RarityKind = rarity
+                        copied.RarityPermille = permille
+                        copied.Crafted = crafted
+                        copied.SortOrder = upload.SortOrder
+                        copied.OfficialDocumentID = 0
+                        copied.ReuseDocument = true
+                        copied.Blob = nil
+                        return copied, true, nil
+                }
+                return domain.StarGiftCollectibleAttribute{}, false, fmt.Errorf("%w: copy source %s document %d not found in revision %d",
+                        domain.ErrStarGiftCollectibleInvalid, kind, upload.CopyDocumentID, sourceRevisionID)
+        }
+        // Раунд 37: правка строки активной ревизии. Запись с attribute_id>0
+        // обязана ссылаться на строку АКТИВНОЙ ревизии этого подарка; файл
+        // опционален — без него документ и метаданные анимации берутся из
+        // существующей строки (ReuseDocument), с файлом анимация заменяется
+        // (документ перезаписывается на новый в материализации).
+        resolveUpdate := func(kind domain.StarGiftCollectibleAttributeKind, upload StarGiftCollectibleAnimationUpload) (domain.StarGiftCollectibleAttribute, error) {
+                if !hasActive {
+                        return domain.StarGiftCollectibleAttribute{}, fmt.Errorf(
+                                "%w: attribute_id %d without an active revision of gift %d",
+                                domain.ErrStarGiftCollectibleInvalid, upload.AttributeID, req.GiftID)
+                }
+                var pool []domain.StarGiftCollectibleAttribute
+                switch kind {
+                case domain.StarGiftCollectibleModel:
+                        pool = activeRevision.Models
+                case domain.StarGiftCollectiblePattern:
+                        pool = activeRevision.Patterns
+                default:
+                        return domain.StarGiftCollectibleAttribute{}, domain.ErrStarGiftCollectibleInvalid
+                }
+                for _, candidate := range pool {
+                        if candidate.ID != upload.AttributeID {
+                                continue
+                        }
+                        rarity, permille, crafted, err := resolveRarity(kind, upload.RarityKind, upload.RarityPermille)
+                        if err != nil {
+                                // Без явной редкости строка сохраняет текущую.
+                                if upload.RarityKind == "" && upload.RarityPermille <= 0 {
+                                        rarity, permille, crafted = candidate.RarityKind, candidate.RarityPermille, candidate.Crafted
+                                } else {
+                                        return domain.StarGiftCollectibleAttribute{}, err
+                                }
+                        }
+                        name := strings.TrimSpace(upload.Name)
+                        if name == "" {
+                                name = candidate.Name
+                        }
+                        updated := candidate
+                        updated.Kind = kind
+                        updated.Name = name
+                        updated.RarityKind = rarity
+                        updated.RarityPermille = permille
+                        updated.Crafted = crafted
+                        updated.SortOrder = upload.SortOrder
+                        if strings.TrimSpace(upload.FileKey) == "" || len(upload.Data) == 0 {
+                                // Анимация не меняется: документ/blob/метаданные из строки.
+                                updated.ReuseDocument = true
+                                updated.Blob = nil
+                                return updated, nil
+                        }
+                        animation, err := s.gifts.PrepareAnimation(upload.FileName, upload.Data)
+                        if err != nil {
+                                return domain.StarGiftCollectibleAttribute{}, fmt.Errorf("prepare %s %q: %w", kind, upload.Name, err)
+                        }
+                        upload.ContentSHA = hex.EncodeToString(animation.SHA256)
+                        updated.Animation = &animation
+                        updated.Document = nil
+                        updated.Blob = nil
+                        updated.ReuseDocument = false
+                        return updated, nil
+                }
+                return domain.StarGiftCollectibleAttribute{}, fmt.Errorf(
+                        "%w: %s attribute %d not found in active revision %d of gift %d",
+                        domain.ErrStarGiftCollectibleInvalid, kind, upload.AttributeID, activeRevision.ID, req.GiftID)
+        }
+        buildAttributes := func(kind domain.StarGiftCollectibleAttributeKind, uploads []StarGiftCollectibleAnimationUpload) ([]domain.StarGiftCollectibleAttribute, error) {
+                attributes := make([]domain.StarGiftCollectibleAttribute, 0, len(uploads))
                 for i := range uploads {
+                        if uploads[i].AttributeID > 0 {
+                                updated, err := resolveUpdate(kind, uploads[i])
+                                if err != nil {
+                                        return nil, err
+                                }
+                                attributes = append(attributes, updated)
+                                continue
+                        }
+                        copied, isCopy, err := resolveCopy(kind, uploads[i])
+                        if err != nil {
+                                return nil, err
+                        }
+                        if isCopy {
+                                attributes = append(attributes, copied)
+                                continue
+                        }
                         animation, err := s.gifts.PrepareAnimation(uploads[i].FileName, uploads[i].Data)
                         if err != nil {
                                 return nil, fmt.Errorf("prepare %s %q: %w", kind, uploads[i].Name, err)
                         }
                         uploads[i].ContentSHA = hex.EncodeToString(animation.SHA256)
-                        attributes[i] = domain.StarGiftCollectibleAttribute{
-                                Kind: kind, Name: strings.TrimSpace(uploads[i].Name), RarityKind: domain.StarGiftRarityPermille,
-                                RarityPermille: uploads[i].RarityPermille,
-                                SortOrder:      uploads[i].SortOrder, Animation: &animation,
+                        rarity, permille, crafted, err := resolveRarity(kind, uploads[i].RarityKind, uploads[i].RarityPermille)
+                        if err != nil {
+                                return nil, err
                         }
+                        attributes = append(attributes, domain.StarGiftCollectibleAttribute{
+                                Kind: kind, Name: strings.TrimSpace(uploads[i].Name), RarityKind: rarity,
+                                RarityPermille: permille, Crafted: crafted,
+                                SortOrder: uploads[i].SortOrder, Animation: &animation,
+                        })
                 }
                 return attributes, nil
         }
-        models, err := toAttributes(domain.StarGiftCollectibleModel, req.Models)
+        models, err := buildAttributes(domain.StarGiftCollectibleModel, req.Models)
         if err != nil {
                 return CommandResult{}, err
         }
-        patterns, err := toAttributes(domain.StarGiftCollectiblePattern, req.Patterns)
+        patterns, err := buildAttributes(domain.StarGiftCollectiblePattern, req.Patterns)
         if err != nil {
                 return CommandResult{}, err
         }
         backdrops := make([]domain.StarGiftCollectibleAttribute, len(req.Backdrops))
         for i, backdrop := range req.Backdrops {
-                backdrops[i] = domain.StarGiftCollectibleAttribute{
+                rarity, permille, crafted, err := resolveRarity(domain.StarGiftCollectibleBackdrop, "", backdrop.RarityPermille)
+                if err != nil {
+                        return CommandResult{}, err
+                }
+                _ = crafted
+                row := domain.StarGiftCollectibleAttribute{
                         Kind: domain.StarGiftCollectibleBackdrop, Name: strings.TrimSpace(backdrop.Name), BackdropID: backdrop.BackdropID,
                         CenterColor: backdrop.CenterColor, EdgeColor: backdrop.EdgeColor, PatternColor: backdrop.PatternColor,
-                        TextColor: backdrop.TextColor, RarityKind: domain.StarGiftRarityPermille,
-                        RarityPermille: backdrop.RarityPermille, SortOrder: backdrop.SortOrder,
+                        TextColor: backdrop.TextColor, RarityKind: rarity,
+                        RarityPermille: permille, SortOrder: backdrop.SortOrder,
                 }
+                // Раунд 37: правка строки фона активной ревизии «на месте».
+                if backdrop.AttributeID > 0 {
+                        if !hasActive {
+                                return CommandResult{}, fmt.Errorf(
+                                        "%w: backdrop attribute_id %d without an active revision of gift %d",
+                                        domain.ErrStarGiftCollectibleInvalid, backdrop.AttributeID, req.GiftID)
+                        }
+                        matched := false
+                        for _, candidate := range activeRevision.Backdrops {
+                                if candidate.ID != backdrop.AttributeID {
+                                        continue
+                                }
+                                matched = true
+                                if row.Name == "" {
+                                        row.Name = candidate.Name
+                                }
+                                break
+                        }
+                        if !matched {
+                                return CommandResult{}, fmt.Errorf(
+                                        "%w: backdrop attribute %d not found in active revision %d of gift %d",
+                                        domain.ErrStarGiftCollectibleInvalid, backdrop.AttributeID, activeRevision.ID, req.GiftID)
+                        }
+                        row.ID = backdrop.AttributeID
+                }
+                backdrops[i] = row
         }
         write := domain.StarGiftCollectibleWrite{
                 GiftID: req.GiftID, UpgradeStars: req.UpgradeStars, SupplyTotal: req.SupplyTotal,
@@ -3758,18 +4660,65 @@ func (s *Service) PublishStarGiftCollectibles(ctx context.Context, req PublishSt
         }
         // Persist normalized content hashes in the command payload so retries with changed files are
         // rejected by the shared idempotency boundary even though raw file bytes are not audit-logged.
+        // Скопированные записи не несут анимации — их ContentSHA остаётся пустым.
         for i := range req.Models {
+                if req.Models[i].CopyDocumentID > 0 || req.Models[i].AttributeID > 0 && req.Models[i].FileKey == "" || models[i].Animation == nil {
+                        continue
+                }
                 req.Models[i].ContentSHA = hex.EncodeToString(models[i].Animation.SHA256)
         }
         for i := range req.Patterns {
+                if req.Patterns[i].CopyDocumentID > 0 || req.Patterns[i].AttributeID > 0 && req.Patterns[i].FileKey == "" || patterns[i].Animation == nil {
+                        continue
+                }
                 req.Patterns[i].ContentSHA = hex.EncodeToString(patterns[i].Animation.SHA256)
         }
+        copiedModels, craftedModels := 0, 0
+        for _, attribute := range models {
+                if attribute.ReuseDocument {
+                        copiedModels++
+                }
+                if attribute.Crafted {
+                        craftedModels++
+                }
+        }
+        copiedPatterns := 0
+        for _, attribute := range patterns {
+                if attribute.ReuseDocument {
+                        copiedPatterns++
+                }
+        }
         return s.runCommand(ctx, req.CommandMeta, ActionPublishGiftCollectibles, 0, domain.Peer{}, req, func() (CommandResult, error) {
+                updatedModels, updatedPatterns, updatedBackdrops := 0, 0, 0
+                for i := range req.Models {
+                        if req.Models[i].AttributeID > 0 {
+                                updatedModels++
+                        }
+                }
+                for i := range req.Patterns {
+                        if req.Patterns[i].AttributeID > 0 {
+                                updatedPatterns++
+                        }
+                }
+                for i := range req.Backdrops {
+                        if req.Backdrops[i].AttributeID > 0 {
+                                updatedBackdrops++
+                        }
+                }
                 details := map[string]any{
                         "gift_id": strconv.FormatInt(req.GiftID, 10), "upgrade_stars": strconv.FormatInt(req.UpgradeStars, 10),
                         "supply_total": req.SupplyTotal,
                         "slug_prefix":  write.SlugPrefix, "models": collectibleUploadDetails(req.Models),
                         "patterns": collectibleUploadDetails(req.Patterns), "backdrops": len(req.Backdrops),
+                        "copied_models": copiedModels, "copied_patterns": copiedPatterns, "crafted_models": craftedModels,
+                        "updated_models": updatedModels, "updated_patterns": updatedPatterns, "updated_backdrops": updatedBackdrops,
+                }
+                if hasActive {
+                        details["sync_revision_id"] = strconv.FormatInt(activeRevision.ID, 10)
+                        details["sync_revision"] = activeRevision.Revision
+                }
+                if req.CopyFromRevisionID > 0 {
+                        details["copy_from_revision_id"] = strconv.FormatInt(req.CopyFromRevisionID, 10)
                 }
                 if req.DryRun {
                         return CommandResult{Message: "star gift collectible pool validated", Details: details}, nil
@@ -3781,6 +4730,9 @@ func (s *Service) PublishStarGiftCollectibles(ctx context.Context, req PublishSt
                 details["revision_id"] = strconv.FormatInt(revision.ID, 10)
                 details["revision"] = revision.Revision
                 details["published"] = revision.Published
+                // Раунд 37: произведение количеств атрибутов (модели × узоры × фоны),
+                // записанное в ревизию для отображения количества вариантов NFT.
+                details["upgrade_variants"] = revision.UpgradeVariants
                 return CommandResult{Message: "star gift collectible pool published", Details: details}, nil
         })
 }
@@ -3788,10 +4740,18 @@ func (s *Service) PublishStarGiftCollectibles(ctx context.Context, req PublishSt
 func collectibleUploadDetails(uploads []StarGiftCollectibleAnimationUpload) []map[string]any {
         details := make([]map[string]any, 0, len(uploads))
         for _, upload := range uploads {
-                details = append(details, map[string]any{
+                entry := map[string]any{
                         "name": strings.TrimSpace(upload.Name), "rarity_permille": upload.RarityPermille,
                         "sort_order": upload.SortOrder, "source_name": upload.FileName, "sha256": upload.ContentSHA,
-                })
+                }
+                if kind := strings.ToLower(strings.TrimSpace(upload.RarityKind)); kind != "" && kind != "permille" {
+                        entry["rarity_kind"] = kind
+                        entry["crafted"] = true
+                }
+                if upload.CopyDocumentID > 0 {
+                        entry["copy_document_id"] = strconv.FormatInt(upload.CopyDocumentID, 10)
+                }
+                details = append(details, entry)
         }
         return details
 }
@@ -3826,11 +4786,11 @@ func (s *Service) SetStarGiftSortOrder(ctx context.Context, req SetStarGiftSortO
         })
 }
 
-func (s *Service) StarGiftAnimation(ctx context.Context, giftID int64) ([]byte, bool, error) {
+func (s *Service) StarGiftAnimation(ctx context.Context, giftID int64) ([]byte, string, bool, error) {
         if s == nil || s.gifts == nil || giftID <= 0 {
-                return nil, false, nil
+                return nil, "", false, nil
         }
-        return s.gifts.AnimationJSON(ctx, giftID)
+        return s.gifts.AnimationMedia(ctx, giftID)
 }
 
 // EmojiAnimation returns the Lottie JSON for a custom-emoji document (admin emoji browser preview).
@@ -4286,6 +5246,59 @@ func (s *Service) StarGiftCollectibles(ctx context.Context, giftID int64) (domai
                 return domain.StarGiftUpgradePreview{}, false, nil
         }
         return s.gifts.CollectiblePreview(ctx, giftID)
+}
+
+// StarGiftCollectibleRevision (раунд 32) читает ЛЮБУЮ ревизию коллекции по id —
+// источник копирования моделей/узоров/фонов для новой ревизии («правка»
+// существующей ревизии или перенос пула с другого подарка).
+func (s *Service) StarGiftCollectibleRevision(ctx context.Context, revisionID int64) (domain.StarGiftCollectibleRevision, error) {
+        if s == nil || s.gifts == nil || revisionID <= 0 {
+                return domain.StarGiftCollectibleRevision{}, domain.ErrStarGiftCollectibleInvalid
+        }
+        return s.gifts.CollectibleRevision(ctx, revisionID)
+}
+
+// StarGiftCollectibleRevisionSummaries (раунд 34/36) — список ревизий коллекции
+// в лёгкой проекции: выбор источника копирования атрибутов блоками
+// (модели/фоны/узоры) в админке без загрузки полных метаданных. Непустой slug
+// отбирает ревизии по slug_prefix И gift_id (slug мог смениться между
+// публикациями); пустые выборки замещаются последними ревизиями всех
+// коллекций (scope "all"), чтобы выбор источника оставался доступным.
+func (s *Service) StarGiftCollectibleRevisionSummaries(ctx context.Context, giftID int64, slug string) ([]domain.StarGiftCollectibleRevisionSummary, string, error) {
+        if s == nil || s.gifts == nil || giftID <= 0 {
+                return nil, "", domain.ErrStarGiftCollectibleInvalid
+        }
+        return s.gifts.CollectibleRevisionSummaries(ctx, giftID, slug)
+}
+
+// SetStarGiftCollectibleSupply (раунд 34) — правит лимит возможных улучшенных
+// подарков (supply_total) опубликованной ревизии коллекции. Ревизия неизменяема
+// по атрибутам; лимит только повышается (ниже issued — отказ), issued/slug не
+// трогаются.
+func (s *Service) SetStarGiftCollectibleSupply(ctx context.Context, req SetStarGiftCollectibleSupplyRequest) (CommandResult, error) {
+        if s == nil || s.gifts == nil {
+                return CommandResult{}, fmt.Errorf("star gift service is not configured")
+        }
+        if req.GiftID <= 0 || req.SupplyTotal <= 0 {
+                return CommandResult{}, domain.ErrStarGiftCollectibleInvalid
+        }
+        return s.runCommand(ctx, req.CommandMeta, ActionSetStarGiftCollectibleSupply, req.GiftID, domain.Peer{}, req, func() (CommandResult, error) {
+                details := map[string]any{"gift_id": strconv.FormatInt(req.GiftID, 10), "supply_total": req.SupplyTotal}
+                if req.DryRun {
+                        return CommandResult{Message: "collectible supply validated", Details: details}, nil
+                }
+                revision, err := s.gifts.SetCollectibleSupplyTotal(ctx, domain.StarGiftCollectibleSupplyWrite{
+                        GiftID: req.GiftID, SupplyTotal: req.SupplyTotal, Actor: req.Actor, CommandID: req.CommandID,
+                })
+                if err != nil {
+                        return CommandResult{Details: details}, err
+                }
+                details["revision_id"] = strconv.FormatInt(revision.ID, 10)
+                details["revision"] = revision.Revision
+                details["issued"] = revision.Issued
+                details["supply_total"] = revision.SupplyTotal
+                return CommandResult{Message: "collectible supply updated", Details: details}, nil
+        })
 }
 
 func (s *Service) StarGiftCollectibleAnimation(ctx context.Context, giftID int64, kind domain.StarGiftCollectibleAttributeKind, attributeID int64) ([]byte, bool, error) {

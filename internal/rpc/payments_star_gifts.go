@@ -1015,7 +1015,9 @@ func (r *Router) starsTopupPaymentForm(ctx context.Context, userID int64, purpos
 		Kind: domain.StarsPurchaseTopup, BuyerUserID: userID,
 		SpendPurposePeer: peer,
 		Stars:            purpose.Stars, Currency: purpose.Currency, Amount: purpose.Amount,
-		IssuedAt: now, ExpiresAt: now + 600,
+		// Раунд 31: канал приобретения — по платформе сессии покупателя.
+		Acquisition: starsTopupAcquisitionForClient(r, ctx),
+		IssuedAt:    now, ExpiresAt: now + 600,
 	})
 	if err != nil {
 		return nil, starsPurchaseErr(err)
@@ -1046,6 +1048,8 @@ func (r *Router) sendStarsTopupForm(ctx context.Context, userID, formID int64, i
 			FormID: formID, Kind: domain.StarsPurchaseTopup, BuyerUserID: userID,
 			SpendPurposePeer: peer,
 			Stars:            purpose.Stars, Currency: purpose.Currency, Amount: purpose.Amount,
+			// Раунд 31: канал приобретения — по платформе сессии покупателя.
+			Acquisition: starsTopupAcquisitionForClient(r, ctx),
 		},
 		Date: int(r.clock.Now().Unix()), OriginAuthKeyID: rawAuthKeyIDForOrigin(ctx),
 		OriginSessionID: sessionIDOrZero(ctx),
@@ -1054,6 +1058,24 @@ func (r *Router) sendStarsTopupForm(ctx context.Context, userID, formID int64, i
 		return nil, starsPurchaseErr(err)
 	}
 	return &tg.PaymentsPaymentResult{Updates: starsBalanceUpdates(result.Balance.Balance, r.clock.Now().Unix())}, nil
+}
+
+// starsTopupAcquisitionForClient выбирает канал приобретения пополнения по
+// платформе сессии покупателя (раунд 31): iOS -> App Store, Android ->
+// Google Play, desktop/web/неизвестная платформа -> Fragment.
+func starsTopupAcquisitionForClient(r *Router, ctx context.Context) domain.StarsTopupAcquisition {
+	info, ok := ClientInfoFrom(ctx)
+	if !ok || !info.typeResolved {
+		return domain.StarsTopupFragment
+	}
+	switch info.Type {
+	case ClientTypeIOS:
+		return domain.StarsTopupAppStore
+	case ClientTypeAndroid:
+		return domain.StarsTopupPlayMarket
+	default:
+		return domain.StarsTopupFragment
+	}
 }
 
 func (r *Router) sendStarGiftToUser(ctx context.Context, senderID, recipientID int64, gift domain.StarGift, hideName bool,

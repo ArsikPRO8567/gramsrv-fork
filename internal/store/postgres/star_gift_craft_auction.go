@@ -10,6 +10,7 @@ import (
 	"math/big"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 
@@ -396,7 +397,7 @@ func (s *StarGiftLifecycleStore) ListCraftStarGifts(ctx context.Context, userID,
 	}
 	args = append(args, limit+1)
 	rows, err := s.db.Query(ctx, `SELECT p.id,p.owner_peer_type,p.owner_peer_id,p.from_user_id,p.gift_id,p.catalog_revision_id,
-p.msg_id,p.saved_id,p.gift_date,p.name_hidden,p.unsaved,p.converted,p.convert_stars,p.prepaid_upgrade_stars,p.prepaid_upgrade_hash,p.gift_num,
+p.msg_id,p.saved_id,p.gift_date,p.name_hidden,p.unsaved,p.converted,p.convert_stars,p.prepaid_upgrade_stars,p.prepaid_upgrade_hash,p.gift_num,COALESCE(p.paid_stars, 0),
 p.lifecycle_status,p.transfer_stars,p.can_export_at,p.can_transfer_at,p.can_resell_at,p.drop_original_details_stars,p.can_craft_at,
 p.message,COALESCE(p.message_entities,'[]'::jsonb)::text,COALESCE(p.unique_gift_id,0),p.upgrade_msg_id,p.pinned_order,
 COALESCE((SELECT array_agg(i.collection_id ORDER BY c.sort_order,i.collection_id) FROM star_gift_collection_items i
@@ -1111,10 +1112,10 @@ WHERE gift_id=$1 AND saved_gift_id IS NULL ORDER BY id LIMIT 100`, giftID)
 			//    что у Lime нет улучшений вовсе (upgrade_variants=null).
 			//
 			//    Раунд 24: при наличии улучшений (бесплатная ревизия либо
-			//    платная с неисчерпанным пулом) копия победителя несёт
-			//    can_upgrade — клиент рисует кнопку улучшения с описанием из
-			//    gift.upgrade_stars (бесплатно / «за N звёзд»). released_by
-			//    («кем выпущено») проецируется fillStarGiftSnapshot из каталога.
+			//    платная с неисчерпанным пулом) копия победителя несла
+			//    can_upgrade. Раунд 33 (проверка на дампах): кнопка улучшения
+			//    на копии 777000 НЕ ставится вовсе — клиент показывает кнопку
+			//    только на копии получателя и в профиле.
 			sticker := gift.Sticker
 			winAction := fillStarGiftSnapshot(&domain.MessageStarGiftAction{GiftID: gift.ID,
 				// item.amount — выигрышная ставка победителя: цена в блоке
@@ -1129,9 +1130,6 @@ WHERE gift_id=$1 AND saved_gift_id IS NULL ORDER BY id LIMIT 100`, giftID)
 			// Платные улучшения ставит fillStarGiftSnapshot (gift.upgrade_stars>0
 			// при issued<total); prepaid_upgrade не ставится никогда — клиент
 			// рендерил бы строку «Вы отправили улучшение стоимостью 0 звёзд».
-			if freeUpgrade {
-				winAction.CanUpgrade = true
-			}
 			if _, err := s.messages.SendPrivateText(ctx, domain.SendPrivateTextRequest{SenderUserID: domain.OfficialSystemUserID,
 				RecipientUserID: item.bidder, RandomID: lifecycleCommandRandomID("auction-win", giftID, item.round, item.pos),
 				Date: item.date, Media: &domain.MessageMedia{Kind: domain.MessageMediaKindService, ServiceAction: &domain.MessageServiceAction{
@@ -1156,7 +1154,16 @@ WHERE gift_id=$1 AND saved_gift_id IS NULL ORDER BY id LIMIT 100`, giftID)
 					// вместо подсказки об улучшении.
 					Saved: false}, gift)
 				if freeUpgrade {
+					// Раунд 36 (официальная формула стоимости Gift2Value):
+					// клиент считает стоимость как gift.stars + upgrade_stars.
+					// Бесплатное улучшение делит выигрышную ставку на доли:
+					// база = ставка − 1, внешняя доля = 1 — сумма ровно равна
+					// ставке, кнопка «Улучшить бесплатно» рендерится от
+					// положительной внешней доли.
 					action.CanUpgrade = true
+					action.UpgradeStars = 1
+					action.UpgradePriceStars = 1
+					action.Stars = item.amount - 1
 				}
 				sent, err := s.messages.SendPrivateText(ctx, domain.SendPrivateTextRequest{SenderUserID: item.bidder,
 					RecipientUserID: owner.ID, RandomID: lifecycleCommandRandomID("auction-award", giftID, item.round, item.pos),
@@ -1181,7 +1188,11 @@ WHERE gift_id=$1 AND saved_gift_id IS NULL ORDER BY id LIMIT 100`, giftID)
 				}
 				id, err := NewStarGiftStore(tx).Create(ctx, domain.SavedStarGift{Owner: owner, FromUserID: item.bidder,
 					GiftID: gift.ID, RevisionID: gift.RevisionID, MsgID: msgID, Date: item.date, NameHidden: item.hide,
-					ConvertStars: 0, Message: item.message, GiftNum: item.giftNum})
+					ConvertStars: 0, Message: item.message, GiftNum: item.giftNum,
+					// Раунд 31/0188: paid_stars — цена, фактически уплаченная
+					// за экземпляр (выигрышная ставка): карточка профиля
+					// показывает её вместо цены каталога.
+					PaidStars: item.amount})
 				if err != nil {
 					return err
 				}
@@ -1237,6 +1248,141 @@ func (s *StarGiftLifecycleStore) StarGiftAuctionState(ctx context.Context, userI
 		return domain.StarGiftAuction{}, err
 	}
 	return s.loadStarGiftAuction(ctx, userID, resolvedGiftID)
+}
+
+// SetStarGiftAuctionSettings (раунд 34/36) применяет административные правки
+// рабочего состояния аукциона: длительность раундов (общая и индивидуальные
+// jsonb), минимальную ставку, режим повышения, даты, количество раундов,
+// остаток подарков и последний выпущенный номер. Строка создаётся лениво,
+// как в StarGiftAuctionState. После правки границы next_round_at/end_date
+// ПЕРЕСЧИТЫВАЮТСЯ (исправление «время раундов не влияет на итоговый
+// вариант»): next_round_at — граница конца текущего раунда (start + сумма
+// индивидуальных длительностей 1..current_round + продления), end_date —
+// ручное значение из той же команды либо производное (граница текущего
+// раунда + оставшиеся раунды). version растёт ровно на 1 за вызов.
+// Валидация (статус, jsonb, неположительные/отрицательные значения)
+// выполняется до любых записей — чистая domain.ErrStarGiftInvalid.
+func (s *StarGiftLifecycleStore) SetStarGiftAuctionSettings(ctx context.Context, write domain.StarGiftAuctionRuntimeWrite) (domain.StarGiftAuction, error) {
+	if s == nil || s.db == nil || write.GiftID <= 0 {
+		return domain.StarGiftAuction{}, domain.ErrStarGiftInvalid
+	}
+	status := strings.ToLower(strings.TrimSpace(write.Status))
+	if status != "" && status != "pending" && status != "active" && status != "completed" && status != "cancelled" {
+		return domain.StarGiftAuction{}, domain.ErrStarGiftInvalid
+	}
+	for _, raw := range []string{write.RoundDurationsJSON, write.RoundExtendsJSON} {
+		trimmed := strings.TrimSpace(raw)
+		if trimmed == "" || trimmed == "null" {
+			continue
+		}
+		if !json.Valid([]byte(trimmed)) {
+			return domain.StarGiftAuction{}, domain.ErrStarGiftInvalid
+		}
+	}
+	if write.RoundDuration != nil && *write.RoundDuration <= 0 ||
+		write.MinBidAmount != nil && *write.MinBidAmount <= 0 ||
+		write.StartDate != nil && *write.StartDate <= 0 ||
+		write.EndDate != nil && *write.EndDate <= 0 ||
+		write.TotalRounds != nil && *write.TotalRounds <= 0 ||
+		write.GiftsLeft != nil && *write.GiftsLeft < 0 ||
+		write.LastGiftNum != nil && *write.LastGiftNum < 0 {
+		return domain.StarGiftAuction{}, domain.ErrStarGiftInvalid
+	}
+	now := int(time.Now().Unix())
+	if _, err := s.ensureStarGiftAuction(ctx, write.GiftID, "", now); err != nil {
+		return domain.StarGiftAuction{}, err
+	}
+	err := withTx(ctx, s.db, "set star gift auction settings", func(tx pgx.Tx) error {
+		var startDate, endDate, currentRound, nextRoundAt, totalRounds, roundDuration, roundExtendSeconds, giftsLeft int
+		var lastGiftNum int64
+		var minBidAmount int64
+		var statusText string
+		var raiseMinBid bool
+		var roundDurationsRaw, roundExtendsRaw []byte
+		if err := tx.QueryRow(ctx, `SELECT start_date,end_date,min_bid_amount,status,current_round,next_round_at,
+raise_min_bid,round_extends,round_extend_seconds,total_rounds,round_duration,round_durations,gifts_left,last_gift_num
+FROM star_gift_auctions WHERE gift_id=$1 FOR UPDATE`, write.GiftID).
+			Scan(&startDate, &endDate, &minBidAmount, &statusText, &currentRound, &nextRoundAt,
+				&raiseMinBid, &roundExtendsRaw, &roundExtendSeconds, &totalRounds, &roundDuration, &roundDurationsRaw,
+				&giftsLeft, &lastGiftNum); err != nil {
+			return err
+		}
+		if write.RoundDuration != nil {
+			roundDuration = *write.RoundDuration
+		}
+		if write.MinBidAmount != nil {
+			minBidAmount = *write.MinBidAmount
+		}
+		if write.RaiseMinBid != nil {
+			raiseMinBid = *write.RaiseMinBid
+		}
+		if write.StartDate != nil {
+			startDate = *write.StartDate
+		}
+		if write.TotalRounds != nil {
+			totalRounds = *write.TotalRounds
+		}
+		if write.GiftsLeft != nil {
+			giftsLeft = *write.GiftsLeft
+		}
+		if write.LastGiftNum != nil {
+			lastGiftNum = int64(*write.LastGiftNum)
+		}
+		if status != "" {
+			statusText = status
+		}
+		// jsonb-поля: пустая строка = не менять (оставить сохранённое),
+		// "null" = NULL (отключить), иначе валидный json-объект.
+		roundDurationsChanged, roundExtendsChanged := false, false
+		var roundDurationsParam, roundExtendsParam any
+		if raw := strings.TrimSpace(write.RoundDurationsJSON); raw != "" {
+			roundDurationsChanged = true
+			if raw != "null" {
+				roundDurationsParam = []byte(raw)
+			}
+		}
+		if raw := strings.TrimSpace(write.RoundExtendsJSON); raw != "" {
+			roundExtendsChanged = true
+			if raw != "null" {
+				roundExtendsParam = []byte(raw)
+			}
+		}
+		if roundDurationsChanged {
+			if bytes, ok := roundDurationsParam.([]byte); ok {
+				roundDurationsRaw = bytes
+			} else {
+				roundDurationsRaw = nil
+			}
+		}
+		// Пересчёт границ под новые длительности (раунд 34).
+		durations := parseAuctionRoundDurations(roundDurationsRaw)
+		boundaryRound := currentRound
+		if boundaryRound < 1 {
+			boundaryRound = 1
+		}
+		nextRoundAt = auctionRoundBoundary(startDate, durations, boundaryRound, roundDuration, roundExtendSeconds)
+		if write.EndDate != nil {
+			// Ручной end_date той же команды приоритетнее производного.
+			endDate = *write.EndDate
+		} else {
+			endDate = derivedAuctionEnd(durations, boundaryRound, totalRounds, roundDuration, nextRoundAt)
+		}
+		if _, err := tx.Exec(ctx, `UPDATE star_gift_auctions SET start_date=$2, end_date=$3, min_bid_amount=$4,
+raise_min_bid=$5, total_rounds=$6, round_duration=$7, gifts_left=$8, last_gift_num=$9, status=$10,
+round_durations = CASE WHEN $11 THEN $12::jsonb ELSE round_durations END,
+round_extends = CASE WHEN $13 THEN $14::jsonb ELSE round_extends END,
+next_round_at=$15, version=version+1, updated_at=now()
+WHERE gift_id=$1`, write.GiftID, startDate, endDate, minBidAmount, raiseMinBid, totalRounds, roundDuration,
+			giftsLeft, lastGiftNum, statusText, roundDurationsChanged, roundDurationsParam,
+			roundExtendsChanged, roundExtendsParam, nextRoundAt); err != nil {
+			return err
+		}
+		return nil
+	})
+	if err != nil {
+		return domain.StarGiftAuction{}, err
+	}
+	return s.loadStarGiftAuction(ctx, 0, write.GiftID)
 }
 
 func (s *StarGiftLifecycleStore) ActiveStarGiftAuctions(ctx context.Context, userID int64, now int) ([]domain.StarGiftAuction, error) {

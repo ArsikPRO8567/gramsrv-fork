@@ -54,8 +54,12 @@ WHERE user_id = $1
 RETURNING balance`, senderUserID, stars).Scan(&senderBalance); err != nil {
                 return fmt.Errorf("debit paid-message sender balance: %w", err)
         }
-        if err := insertStarsTxn(ctx, tx, senderUserID, -stars, domain.StarsReasonPaidMessage,
-                domain.Peer{Type: domain.PeerTypeUser, ID: recipientUserID}, date, "", ""); err != nil {
+        // Обе проводки (дебет отправителя + кредит получателя) пишутся с ОДНИМ
+        // публичным transaction_id (миграция 0190, раунд 30/37): клиент показывает
+        // обе стороны как одну операцию перевода.
+        transactionID := domain.NewStarsTransactionID(false)
+        if err := insertStarsTxnWithID(ctx, tx, senderUserID, -stars, domain.StarsReasonPaidMessage,
+                domain.Peer{Type: domain.PeerTypeUser, ID: recipientUserID}, date, transactionID); err != nil {
                 return err
         }
         net := stars * paidMessageCommissionPermille / 1000
@@ -67,8 +71,8 @@ ON CONFLICT (user_id) DO UPDATE
 SET balance = stars_balances.balance + EXCLUDED.balance, updated_at = now()`, recipientUserID, net); err != nil {
                         return fmt.Errorf("credit paid-message recipient balance: %w", err)
                 }
-                if err := insertStarsTxn(ctx, tx, recipientUserID, net, domain.StarsReasonPaidMessage,
-                        domain.Peer{Type: domain.PeerTypeUser, ID: senderUserID}, date, "", ""); err != nil {
+                if err := insertStarsTxnWithID(ctx, tx, recipientUserID, net, domain.StarsReasonPaidMessage,
+                        domain.Peer{Type: domain.PeerTypeUser, ID: senderUserID}, date, transactionID); err != nil {
                         return err
                 }
         }

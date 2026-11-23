@@ -255,8 +255,26 @@ func insertStarsTxn(ctx context.Context, tx pgx.Tx, userID, amount int64, reason
 
 // insertStarsTxnFull 在事务内写一条带官方投影属性的流水，返回账本行 id
 // （礼物在写入点尚未定型时，调用方可随后 UPDATE gift_id/gift_is_unique —
-// 升级流就是这样把目录礼物替换为产出的唯一礼物的）。公开交易 ID 在此生成。
+// 升级流就是这样把目录礼物替换为产出的唯一礼物的）。公开交易 ID 取自
+// flags.TransactionID（配对转账 problem C），未指定时在此生成。
 func insertStarsTxnFull(ctx context.Context, tx pgx.Tx, userID, amount int64, reason domain.StarsTransactionReason, peer domain.Peer, date int, title, desc string, flags domain.StarsLedgerFlags) (int64, error) {
+	transactionID := flags.TransactionID
+	if transactionID == "" {
+		transactionID = domain.NewStarsTransactionID(false)
+	}
+	return insertStarsTxnRow(ctx, tx, userID, amount, reason, peer, date, title, desc, transactionID, flags)
+}
+
+// insertStarsTxnWithID 在事务内写一条显式公开交易 ID 的流水（problem C）：
+// 账户对账户转账（付费消息、礼物转售）的借记行与贷记行共用同一个 ID，
+// 客户端据此把两端渲染为同一笔操作。无礼物载荷、无退款标志。
+func insertStarsTxnWithID(ctx context.Context, tx pgx.Tx, userID, amount int64, reason domain.StarsTransactionReason, peer domain.Peer, date int, transactionID string) error {
+	_, err := insertStarsTxnRow(ctx, tx, userID, amount, reason, peer, date, "", "", transactionID, domain.StarsLedgerFlags{})
+	return err
+}
+
+// insertStarsTxnRow 是流水写入的统一实现：transactionID 由调用方决定。
+func insertStarsTxnRow(ctx context.Context, tx pgx.Tx, userID, amount int64, reason domain.StarsTransactionReason, peer domain.Peer, date int, title, desc, transactionID string, flags domain.StarsLedgerFlags) (int64, error) {
 	var giftID any
 	if flags.GiftID > 0 {
 		giftID = flags.GiftID
@@ -268,7 +286,7 @@ INSERT INTO stars_transactions (user_id, peer_type, peer_id, amount, reason, tit
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
 RETURNING id`,
 		userID, string(peer.Type), peer.ID, amount, string(reason), title, desc, date,
-		domain.NewStarsTransactionID(false), flags.Refunded, giftID, flags.GiftIsUnique).Scan(&rowID); err != nil {
+		transactionID, flags.Refunded, giftID, flags.GiftIsUnique).Scan(&rowID); err != nil {
 		return 0, fmt.Errorf("insert stars transaction: %w", err)
 	}
 	return rowID, nil
@@ -320,4 +338,95 @@ WHERE user_id = $1 AND transaction_id = ANY($2)`, userID, ids)
 		}
 	}
 	return out, nil
+}
+
+// TransferToUser атомарно переводит Stars между аккаунтами (раунд 37,
+// проблема C): списание отправителю и зачисление получателю в одной
+// транзакции, обе строки леджера несут ОДИН публичный transaction_id —
+// клиент сопоставляет перевод между аккаунтами по этому полю. Самоперевод,
+// неположительная сумма и недостаток средств отклоняются до любых записей.
+func (s *StarsStore) TransferToUser(ctx context.Context, req domain.StarsPeerTransferRequest) (domain.StarsPeerTransferResult, error) {
+	if req.SenderUserID <= 0 || req.RecipientUserID <= 0 || req.SenderUserID == req.RecipientUserID || req.Amount <= 0 {
+		return domain.StarsPeerTransferResult{}, domain.ErrStarsInvalidAmount
+	}
+	transactionID := domain.NewStarsTransactionID(false)
+	err := withTx(ctx, s.db, "stars peer transfer", func(tx pgx.Tx) error {
+		var balance int64
+		if err := tx.QueryRow(ctx, `SELECT balance FROM stars_balances WHERE user_id=$1 FOR UPDATE`, req.SenderUserID).
+			Scan(&balance); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return domain.ErrStarsInsufficient
+			}
+			return fmt.Errorf("lock transfer sender balance: %w", err)
+		}
+		if balance < req.Amount {
+			return domain.ErrStarsInsufficient
+		}
+		if _, err := tx.Exec(ctx, `UPDATE stars_balances SET balance=balance-$2,updated_at=now() WHERE user_id=$1`,
+			req.SenderUserID, req.Amount); err != nil {
+			return fmt.Errorf("debit transfer sender: %w", err)
+		}
+		if _, err := tx.Exec(ctx, `INSERT INTO stars_balances(user_id,balance,updated_at) VALUES($1,$2,now())
+ON CONFLICT(user_id) DO UPDATE SET balance=stars_balances.balance+EXCLUDED.balance,updated_at=now()`,
+			req.RecipientUserID, req.Amount); err != nil {
+			return fmt.Errorf("credit transfer recipient: %w", err)
+		}
+		senderPeer := domain.Peer{Type: domain.PeerTypeUser, ID: req.RecipientUserID}
+		recipientPeer := domain.Peer{Type: domain.PeerTypeUser, ID: req.SenderUserID}
+		if err := insertStarsTxnWithID(ctx, tx, req.SenderUserID, -req.Amount, req.Reason, senderPeer, req.Date, transactionID); err != nil {
+			return err
+		}
+		return insertStarsTxnWithID(ctx, tx, req.RecipientUserID, req.Amount, req.Reason, recipientPeer, req.Date, transactionID)
+	})
+	if err != nil {
+		return domain.StarsPeerTransferResult{}, err
+	}
+	return domain.StarsPeerTransferResult{TransactionID: transactionID}, nil
+}
+
+// RefundPeerTransfer выполняет компенсационный возврат парного перевода:
+// строки с обратными знаками и флагом refunded, с НОВЫМ общим публичным
+// transaction_id (официальный клиент показывает возврат как отдельную
+// операцию). Получатель должен иметь достаточно средств: таблица хранит
+// неотрицательный баланс (CHECK stars_balances_balance_nonneg).
+func (s *StarsStore) RefundPeerTransfer(ctx context.Context, req domain.StarsPeerTransferRequest) (domain.StarsPeerTransferResult, error) {
+	if req.SenderUserID <= 0 || req.RecipientUserID <= 0 || req.SenderUserID == req.RecipientUserID || req.Amount <= 0 {
+		return domain.StarsPeerTransferResult{}, domain.ErrStarsInvalidAmount
+	}
+	transactionID := domain.NewStarsTransactionID(false)
+	err := withTx(ctx, s.db, "stars peer transfer refund", func(tx pgx.Tx) error {
+		var balance int64
+		if err := tx.QueryRow(ctx, `SELECT balance FROM stars_balances WHERE user_id=$1 FOR UPDATE`, req.RecipientUserID).
+			Scan(&balance); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return domain.ErrStarsInsufficient
+			}
+			return fmt.Errorf("lock refund recipient balance: %w", err)
+		}
+		if balance < req.Amount {
+			return domain.ErrStarsInsufficient
+		}
+		if _, err := tx.Exec(ctx, `UPDATE stars_balances SET balance=balance-$2,updated_at=now() WHERE user_id=$1`,
+			req.RecipientUserID, req.Amount); err != nil {
+			return fmt.Errorf("debit refund recipient: %w", err)
+		}
+		if _, err := tx.Exec(ctx, `UPDATE stars_balances SET balance=balance+$2,updated_at=now() WHERE user_id=$1`,
+			req.SenderUserID, req.Amount); err != nil {
+			return fmt.Errorf("credit refund sender: %w", err)
+		}
+		refundFlags := domain.StarsLedgerFlags{Refunded: true}
+		senderPeer := domain.Peer{Type: domain.PeerTypeUser, ID: req.RecipientUserID}
+		recipientPeer := domain.Peer{Type: domain.PeerTypeUser, ID: req.SenderUserID}
+		if _, err := insertStarsTxnRow(ctx, tx, req.SenderUserID, req.Amount, req.Reason, senderPeer, req.Date,
+			"", "", transactionID, refundFlags); err != nil {
+			return err
+		}
+		_, err := insertStarsTxnRow(ctx, tx, req.RecipientUserID, -req.Amount, req.Reason, recipientPeer, req.Date,
+			"", "", transactionID, refundFlags)
+		return err
+	})
+	if err != nil {
+		return domain.StarsPeerTransferResult{}, err
+	}
+	return domain.StarsPeerTransferResult{TransactionID: transactionID}, nil
 }
