@@ -341,15 +341,30 @@ WHERE owner_peer_type=$1 AND owner_peer_id=$2 AND pinned_order=$3`, string(req.R
 
 // markStarGiftSourcePrepaidUpgradeTx переписывает ИСХОДНОЕ сервисное сообщение
 // о подарке после отдельной предоплаты улучшения другим пользователем
-// (payments.sendStarsForm с InputInvoiceStarGiftPrepaidUpgrade):
+// (payments.sendStarsForm с InputInvoiceStarGiftPrepaidUpgrade).
 //
+// Раунд 43 — калибровка по логике официального клиента (MessageObject +
+// StarGiftSheet, дамп 183490). Флаг prepaid_upgrade на messageActionStarGift
+// клиенты читают как «это сообщение — уведомление об улучшении»: подпись
+// становится «{from} отправил улучшение стоимостью {upgrade_stars}», а не
+// «отправил подарок». Поэтому исходное сообщение предоплату выражает БЕЗ
+// этого флага, в официальном wire-формате предоплаты (как при покупке с
+// включённым улучшением, раунды 25/26):
+//
+//   - prepaid_upgrade НЕ выставляется — подпись остаётся
+//     «Вы (или {user}) отправил(а) подарок…»;
+//   - upgrade_separate=true — клиент НЕ прибавляет upgrade_stars к
+//     gift.stars в подписи: цена в сообщении остаётся исходной ценой подарка;
+//   - upgrade_stars=сумма предоплаты (>0) — включает у владельца кнопку
+//     «Улучшить бесплатно» (StarGiftSheet: !out && can_upgrade &&
+//     upgrade_stars > 0 → Gift2UpgradeButtonFree), а у отправителя — подпись
+//     «{user} может сделать этот подарок уникальным коллекционным»
+//     (Gift2InfoFreeUpgrade);
 //   - convert_stars убирается — конвертация предоплаченного подарка запрещена
 //     (ConvertStarGift → STARGIFT_INVALID), клиент не должен показывать кнопку
 //     «Обменять на N звёзд» (официальный дамп 183490);
-//   - prepaid_upgrade=true + upgrade_stars=сумма предоплаты — подпись
-//     «{user} может сделать этот подарок уникальным коллекционным»
-//     (tdesktop: lng_action_gift_sent_upgradable по upgrade_stars) и кнопка
-//     бесплатного улучшения (Gift2UpgradeButtonFree) у владельца.
+//   - prepaid_upgrade_hash снимается — инвойс «оплатить улучшение» больше
+//     недоступен, улучшение уже оплачено.
 //
 // can_upgrade сохраняется на обеих копиях: официальные серверы отдают его
 // отправителю тоже, а действие апгрейда остаётся доступным только владельцу.
@@ -371,9 +386,137 @@ func (s *StarGiftLifecycleStore) markStarGiftSourcePrepaidUpgradeTx(
 			if starGift == nil {
 				return
 			}
-			starGift.PrepaidUpgrade = true
+			starGift.PrepaidUpgrade = false
+			starGift.UpgradeSeparate = true
 			starGift.UpgradeStars = price
 			starGift.ConvertStars = 0
 			starGift.PrepaidUpgradeHash = ""
 		}, req.PayerUserID)
+}
+
+// editUpgradedChannelStarGiftNotificationsTx переписывает старые
+// «Telegram»-уведомления о подарке канала (kind star_gift) после улучшения
+// подарка до уникального (раунд 43). Подарок уже стал уникальным: кнопки
+// «улучшить» и «обменять» в старом уведомлении не работают — клиенты рисуют
+// их из can_upgrade/convert_stars/prepaid_upgrade, поэтому все три снимаются
+// (тот же приём, что у конвертации — editConvertedChannelStarGiftNotificationsTx).
+// Уникальные уведомления (star_gift_unique / star_gift_unique_upgrade) —
+// отдельные сообщения с messageActionStarGiftUnique: privateStarGiftAction
+// возвращает для них nil, и они остаются без изменений. Каждый переписанный
+// бокс получает собственный pts и durable edit-событие.
+func editUpgradedChannelStarGiftNotificationsTx(
+	ctx context.Context,
+	tx pgx.Tx,
+	messages *MessageStore,
+	saved domain.SavedStarGift,
+	date int,
+) error {
+	if messages == nil || date <= 0 || saved.ID <= 0 ||
+		saved.Owner.Type != domain.PeerTypeChannel || saved.Owner.ID <= 0 {
+		return nil
+	}
+	refs, err := starGiftRefViewers(ctx, tx, saved.ID)
+	if err != nil {
+		return err
+	}
+	if len(refs) == 0 {
+		return nil
+	}
+	q := sqlcgen.New(tx)
+	for _, ref := range refs {
+		var peerType string
+		var peerID int64
+		err := tx.QueryRow(ctx, `
+SELECT peer_type,peer_id FROM message_boxes
+WHERE owner_user_id=$1 AND box_id=$2 AND NOT deleted
+FOR UPDATE`, ref.userID, ref.msgID).Scan(&peerType, &peerID)
+		if errors.Is(err, pgx.ErrNoRows) {
+			continue
+		}
+		if err != nil {
+			return fmt.Errorf("lock upgraded channel star gift notification: %w", err)
+		}
+		if peerType != string(domain.PeerTypeUser) || peerID <= 0 {
+			continue
+		}
+		target, err := q.GetMessageBoxForEdit(ctx, sqlcgen.GetMessageBoxForEditParams{
+			OwnerUserID: ref.userID, BoxID: int32(ref.msgID), PeerType: peerType, PeerID: peerID,
+		})
+		if err != nil {
+			return fmt.Errorf("load upgraded channel star gift notification: %w", err)
+		}
+		media, err := decodeMessageMedia(target.MediaJson)
+		if err != nil {
+			return fmt.Errorf("decode upgraded channel star gift notification: %w", err)
+		}
+		action := privateStarGiftAction(media)
+		if action == nil || action.GiftID != saved.GiftID || action.Converted {
+			continue
+		}
+		if !action.CanUpgrade && action.ConvertStars == 0 && !action.PrepaidUpgrade &&
+			!action.UpgradeSeparate && action.UpgradeStars == 0 && action.PrepaidUpgradeHash == "" {
+			// Кнопки уже сняты — повторная правка не нужна.
+			continue
+		}
+		action.CanUpgrade = false
+		action.ConvertStars = 0
+		action.PrepaidUpgrade = false
+		action.UpgradeSeparate = false
+		action.UpgradeStars = 0
+		action.PrepaidUpgradeHash = ""
+		mediaJSON, err := encodeMessageMedia(media)
+		if err != nil {
+			return fmt.Errorf("encode upgraded channel star gift notification: %w", err)
+		}
+		pts, err := messages.reservePts(ctx, tx, ref.userID)
+		if err != nil {
+			return fmt.Errorf("allocate upgraded channel star gift pts: %w", err)
+		}
+		tag, err := tx.Exec(ctx, `
+UPDATE message_boxes SET media=$3,pts=$4
+WHERE owner_user_id=$1 AND box_id=$2 AND NOT deleted`, ref.userID, ref.msgID, mediaJSON, int32(pts))
+		if err != nil {
+			return fmt.Errorf("update upgraded channel star gift notification box: %w", err)
+		}
+		if tag.RowsAffected() != 1 {
+			return fmt.Errorf("update upgraded channel star gift notification box lost row")
+		}
+		if _, err := tx.Exec(ctx, `
+UPDATE private_messages SET media=$3
+WHERE sender_user_id=$1 AND id=$2`, target.MessageSenderID, target.PrivateMessageID, mediaJSON); err != nil {
+			return fmt.Errorf("update upgraded channel star gift notification private media: %w", err)
+		}
+		boxes, err := q.ListVisibleMessageBoxesByPrivateMessage(ctx, sqlcgen.ListVisibleMessageBoxesByPrivateMessageParams{
+			OwnerUserIds:    privateMessageOwnerIDs(ref.userID, peerID),
+			MessageSenderID: target.MessageSenderID, PrivateMessageID: target.PrivateMessageID,
+		})
+		if err != nil {
+			return fmt.Errorf("list upgraded channel star gift notification boxes: %w", err)
+		}
+		for _, box := range boxes {
+			if box.OwnerUserID != ref.userID {
+				continue
+			}
+			msg, err := messageFromVisibleBoxRow(box)
+			if err != nil {
+				return err
+			}
+			msg.Media = media
+			msg.Pts = pts
+			if err := replaceMessageBoxMediaIndexTx(ctx, tx, msg.OwnerUserID, msg.Peer.ID, msg.ID, msg.Date, msg.Media, msg.Entities); err != nil {
+				return err
+			}
+			event := domain.UpdateEvent{UserID: msg.OwnerUserID, Type: domain.UpdateEventEditMessage,
+				Pts: pts, PtsCount: 1, Date: date, Message: msg}
+			if err := appendUserUpdateEvent(ctx, tx, q, msg.OwnerUserID, event); err != nil {
+				return fmt.Errorf("append upgraded channel star gift edit event: %w", err)
+			}
+			if err := enqueueDispatch(ctx, q, sqlcgen.EnqueueDispatchParams{
+				TargetUserID: msg.OwnerUserID, Pts: int32(pts), EventType: string(domain.UpdateEventEditMessage),
+			}); err != nil {
+				return fmt.Errorf("enqueue upgraded channel star gift edit: %w", err)
+			}
+		}
+	}
+	return nil
 }

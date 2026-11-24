@@ -1255,6 +1255,65 @@ func TestStarGiftCollectiblePreviewUpgradeFormUniqueAndServiceProjection(t *test
         }
 }
 
+// Раунд 43: захваченная предоплата улучшения (prepaid_upgrade_stars > 0) —
+// право владельца. Форма улучшения (payments.getPaymentForm с
+// inputInvoiceStarGiftUpgrade) обязана приходить с нулевой ценой: StarGiftSheet
+// суммирует invoice prices и рисует «Upgrade for ⭐️N» вместо бесплатного
+// подтверждения, если сервер отдаёт полную цену ревизии.
+func TestStarGiftUpgradePaymentFormFreeForCapturedPrepaidUpgrade(t *testing.T) {
+        r, sender, owner, gift := starGiftTestRouter(t)
+        ctx := context.Background()
+        ownerCtx := WithUserID(ctx, owner.ID)
+        giftService, ok := r.deps.Gifts.(*appstargifts.Service)
+        if !ok {
+                t.Fatalf("gift service = %T", r.deps.Gifts)
+        }
+        if _, err := giftService.PublishCollectibleRevision(ctx, domain.StarGiftCollectibleWrite{
+                GiftID: gift.ID, UpgradeStars: 75, SupplyTotal: 500, SlugPrefix: "prepaid-form",
+                Models:     []domain.StarGiftCollectibleAttribute{collectibleRPCAttribute(domain.StarGiftCollectibleModel, 8301, "Nova"), collectibleRPCAttribute(domain.StarGiftCollectibleModel, 8304, "Nova Two")},
+                Patterns:   []domain.StarGiftCollectibleAttribute{collectibleRPCAttribute(domain.StarGiftCollectiblePattern, 8302, "Nova Orbit"), collectibleRPCAttribute(domain.StarGiftCollectiblePattern, 8305, "Nova Orbit Two")},
+                Backdrops:  []domain.StarGiftCollectibleAttribute{collectibleRPCAttribute(domain.StarGiftCollectibleBackdrop, 3, "Nova Sky"), collectibleRPCAttribute(domain.StarGiftCollectibleBackdrop, 6, "Nova Night")},
+                Actor:      "test", CommandID: "collectible-prepaid-form",
+        }); err != nil {
+                t.Fatalf("publish collectible pool: %v", err)
+        }
+        if _, err := r.deps.Gifts.RecordSavedGift(ctx, domain.SavedStarGift{
+                Owner: domain.Peer{Type: domain.PeerTypeUser, ID: owner.ID}, FromUserID: sender.ID,
+                GiftID: gift.ID, RevisionID: gift.RevisionID, MsgID: 555, Date: 1700000000,
+                PrepaidUpgradeStars: 75,
+        }); err != nil {
+                t.Fatalf("record prepaid upgrade target: %v", err)
+        }
+        formClass, err := r.onPaymentsGetPaymentForm(ownerCtx, &tg.PaymentsGetPaymentFormRequest{
+                Invoice: &tg.InputInvoiceStarGiftUpgrade{Stargift: &tg.InputSavedStarGiftUser{MsgID: 555}},
+        })
+        if err != nil {
+                t.Fatalf("get prepaid upgrade payment form: %v", err)
+        }
+        form, ok := formClass.(*tg.PaymentsPaymentFormStarGift)
+        if !ok || form.FormID == 0 || form.Invoice.Currency != "XTR" || len(form.Invoice.Prices) != 1 || form.Invoice.Prices[0].Amount != 0 {
+                t.Fatalf("prepaid upgrade payment form = %T %#v, want zero price", formClass, formClass)
+        }
+        // Для сравнения: без предоплаты та же форма несёт цену ревизии
+        // (в основных сценариях покрыт TestStarGiftCollectiblePreview…).
+        if _, err := r.deps.Gifts.RecordSavedGift(ctx, domain.SavedStarGift{
+                Owner: domain.Peer{Type: domain.PeerTypeUser, ID: owner.ID}, FromUserID: sender.ID,
+                GiftID: gift.ID, RevisionID: gift.RevisionID, MsgID: 556, Date: 1700000001,
+        }); err != nil {
+                t.Fatalf("record paid upgrade target: %v", err)
+        }
+        paidFormClass, err := r.onPaymentsGetPaymentForm(ownerCtx, &tg.PaymentsGetPaymentFormRequest{
+                Invoice: &tg.InputInvoiceStarGiftUpgrade{Stargift: &tg.InputSavedStarGiftUser{MsgID: 556}},
+        })
+        if err != nil {
+                t.Fatalf("get paid upgrade payment form: %v", err)
+        }
+        paidForm, ok := paidFormClass.(*tg.PaymentsPaymentFormStarGift)
+        if !ok || len(paidForm.Invoice.Prices) != 1 || paidForm.Invoice.Prices[0].Amount != 75 {
+                t.Fatalf("paid upgrade payment form = %T %#v, want 75", paidFormClass, paidFormClass)
+        }
+}
+
 func TestStarGiftUpgradePreviewBoundsRandomSampleWithoutShrinkingFullAttributes(t *testing.T) {
         r, _, owner, gift := starGiftTestRouter(t)
         ctx := WithUserID(context.Background(), owner.ID)
@@ -2206,9 +2265,11 @@ func TestSavedStarGiftOriginalDetailsAreManageScoped(t *testing.T) {
         if !savedStarGiftOriginalDetailsVisible(stranger, userGift) {
                 t.Fatal("stranger must see sender caption of a non-hidden user gift (round 28)")
         }
-        // Профиль канала: право управления проставляется RPC-хендлером.
-        if savedStarGiftOriginalDetailsVisible(stranger, channelGift) {
-                t.Fatal("non-admin must not see original details of a channel gift")
+        // Профиль канала (раунд 43): отправитель НЕанонимного подарка публичен —
+        // любой зритель видит подпись, как и на личных профилях. Право
+        // управления (ViewerCanManage) открывает и скрытых отправителей.
+        if !savedStarGiftOriginalDetailsVisible(stranger, channelGift) {
+                t.Fatal("non-admin must see sender caption of a non-hidden channel gift (round 43)")
         }
         adminGift := channelGift
         adminGift.ViewerCanManage = true
@@ -2224,6 +2285,19 @@ func TestSavedStarGiftOriginalDetailsAreManageScoped(t *testing.T) {
         }
         if savedStarGiftOriginalDetailsVisible(stranger, anonymous) {
                 t.Fatal("hidden original details leaked to stranger")
+        }
+        // Канальные анонимные подарки: отправителя видит только администрация.
+        anonymousChannel := channelGift
+        anonymousChannel.NameHidden = true
+        if savedStarGiftOriginalDetailsVisible(stranger, anonymousChannel) {
+                t.Fatal("hidden channel sender leaked to member (round 43)")
+        }
+        if !savedStarGiftOriginalDetailsVisible(stranger, func() domain.SavedStarGift {
+                gift := anonymousChannel
+                gift.ViewerCanManage = true
+                return gift
+        }()) {
+                t.Fatal("channel admin must see hidden channel sender (round 43)")
         }
 
         catalog := map[int64]domain.StarGift{8101: {ID: 7101, RevisionID: 8101}}
@@ -2249,26 +2323,41 @@ func TestSavedStarGiftOriginalDetailsAreManageScoped(t *testing.T) {
         if ids := savedStarGiftUserIDs(ownerID, []domain.SavedStarGift{userGift}); !reflect.DeepEqual(ids, []int64{senderID}) {
                 t.Fatalf("owner user ids = %v, want sender %d", ids, senderID)
         }
-        // Канальный подарок: admin видит, обычный зритель нет — и в users[]
-        // отправитель уезжает вместе с подписью.
+        // Канальный подарок (раунд 43): неанонимный отправитель публичен —
+        // member видит from_id и подпись; admin-флаг открывает скрытых.
         adminProjection := tgSavedStarGifts(stranger, []domain.SavedStarGift{adminGift}, catalog, nil)[0]
         if _, ok := adminProjection.GetFromID(); !ok {
                 t.Fatal("admin projection lost channel gift from_id")
         }
         memberProjection := tgSavedStarGifts(stranger, []domain.SavedStarGift{channelGift}, catalog, nil)[0]
-        if _, ok := memberProjection.GetFromID(); ok {
-                t.Fatal("member projection leaked channel gift from_id")
+        if _, ok := memberProjection.GetFromID(); !ok {
+                t.Fatal("member projection lost from_id of a non-hidden channel gift (round 43)")
         }
-        if ids := savedStarGiftUserIDs(stranger, []domain.SavedStarGift{channelGift}); len(ids) != 0 {
-                t.Fatalf("member channel sender ids = %v, want empty", ids)
+        if _, ok := memberProjection.GetMessage(); !ok {
+                t.Fatal("member projection lost gift note of a non-hidden channel gift (round 43)")
+        }
+        if ids := savedStarGiftUserIDs(stranger, []domain.SavedStarGift{channelGift}); !reflect.DeepEqual(ids, []int64{senderID}) {
+                t.Fatalf("member channel sender ids = %v, want sender %d (round 43)", ids, senderID)
         }
         if ids := savedStarGiftUserIDs(stranger, []domain.SavedStarGift{adminGift}); !reflect.DeepEqual(ids, []int64{senderID}) {
                 t.Fatalf("admin channel sender ids = %v, want sender %d", ids, senderID)
         }
+        // Скрытый канальный отправитель: member не видит, admin видит.
+        if ids := savedStarGiftUserIDs(stranger, []domain.SavedStarGift{anonymousChannel}); len(ids) != 0 {
+                t.Fatalf("member hidden channel sender ids = %v, want empty", ids)
+        }
+        if ids := savedStarGiftUserIDs(stranger, []domain.SavedStarGift{func() domain.SavedStarGift {
+                gift := anonymousChannel
+                gift.ViewerCanManage = true
+                return gift
+        }()}); !reflect.DeepEqual(ids, []int64{senderID}) {
+                t.Fatalf("admin hidden channel sender ids = %v, want sender %d", ids, senderID)
+        }
 }
 
-// Раунд 25: в списке подарков канала подпись отправителя и附言 видит только
-// администрация; обычный подписчик получает подарок без from_id/message.
+// Раунд 43: в списке подарков канала отправитель НЕанонимного подарка виден
+// любому зрителю (from_id + подпись + users[]), как на официальных серверах;
+// анонимные (name_hidden) подарки раскрывают отправителя только администрации.
 func TestStarGiftChannelSenderCaptionAdminOnly(t *testing.T) {
         r, sender, owner, gift := starGiftTestRouter(t)
         ctx := context.Background()
@@ -2291,34 +2380,67 @@ func TestStarGiftChannelSenderCaptionAdminOnly(t *testing.T) {
         }); err != nil {
                 t.Fatalf("record channel gift: %v", err)
         }
+        // Анонимный подарок того же отправителя — подпись только у администрации.
+        if _, err := r.deps.Gifts.RecordSavedGift(ctx, domain.SavedStarGift{
+                Owner: domain.Peer{Type: domain.PeerTypeChannel, ID: channel.ID}, FromUserID: sender.ID,
+                GiftID: gift.ID, RevisionID: gift.RevisionID, SavedID: 72, Date: 1700002002,
+                NameHidden: true,
+        }); err != nil {
+                t.Fatalf("record anonymous channel gift: %v", err)
+        }
 
         memberView, err := r.onPaymentsGetSavedStarGifts(senderCtx, &tg.PaymentsGetSavedStarGiftsRequest{Peer: channelPeer})
-        if err != nil || memberView.Count != 1 || len(memberView.Gifts) != 1 {
+        if err != nil || memberView.Count != 2 || len(memberView.Gifts) != 2 {
                 t.Fatalf("member channel gifts = %+v err %v", memberView, err)
         }
-        if _, ok := memberView.Gifts[0].GetFromID(); ok {
-                t.Fatal("member view leaked gift sender (from_id)")
+        bySavedID := map[int64]tg.SavedStarGift{}
+        for _, item := range memberView.Gifts {
+                bySavedID[item.SavedID] = item
         }
-        if _, ok := memberView.Gifts[0].GetMessage(); ok {
-                t.Fatal("member view leaked gift note (message)")
+        open, ok := bySavedID[71]
+        if !ok {
+                t.Fatalf("member view lost non-hidden channel gift 71: %+v", memberView.Gifts)
         }
-        if len(memberView.Users) != 0 {
-                t.Fatalf("member view users = %+v, want empty", memberView.Users)
+        if from, ok := open.GetFromID(); !ok {
+                t.Fatal("member view lost sender of a non-hidden channel gift (round 43)")
+        } else if peer, ok := from.(*tg.PeerUser); !ok || peer.UserID != sender.ID {
+                t.Fatalf("member view from_id = %#v, want sender %d", from, sender.ID)
+        }
+        if note, ok := open.GetMessage(); !ok || note.Text != "channel note" {
+                t.Fatalf("member view message = %#v, want channel note (round 43)", note)
+        }
+        foundSender := false
+        for _, user := range memberView.Users {
+                if u, ok := user.(*tg.User); ok && u.ID == sender.ID {
+                        foundSender = true
+                }
+        }
+        if !foundSender {
+                t.Fatalf("member view users = %+v, want sender %d (round 43)", memberView.Users, sender.ID)
+        }
+        hidden, ok := bySavedID[72]
+        if !ok {
+                t.Fatalf("member view lost anonymous channel gift 72: %+v", memberView.Gifts)
+        }
+        if _, ok := hidden.GetFromID(); ok {
+                t.Fatal("member view leaked sender of a hidden channel gift")
+        }
+        if _, ok := hidden.GetMessage(); ok {
+                t.Fatal("member view leaked note of a hidden channel gift")
         }
 
         ownerView, err := r.onPaymentsGetSavedStarGifts(ownerCtx, &tg.PaymentsGetSavedStarGiftsRequest{Peer: channelPeer})
-        if err != nil || ownerView.Count != 1 || len(ownerView.Gifts) != 1 {
+        if err != nil || ownerView.Count != 2 || len(ownerView.Gifts) != 2 {
                 t.Fatalf("owner channel gifts = %+v err %v", ownerView, err)
         }
-        if from, ok := ownerView.Gifts[0].GetFromID(); !ok {
-                t.Fatal("owner view lost gift sender (from_id)")
-        } else if peer, ok := from.(*tg.PeerUser); !ok || peer.UserID != sender.ID {
-                t.Fatalf("owner view from_id = %#v, want sender %d", from, sender.ID)
+        for _, item := range ownerView.Gifts {
+                if from, ok := item.GetFromID(); !ok {
+                        t.Fatal("owner view lost gift sender (from_id)")
+                } else if peer, ok := from.(*tg.PeerUser); !ok || peer.UserID != sender.ID {
+                        t.Fatalf("owner view from_id = %#v, want sender %d", from, sender.ID)
+                }
         }
-        if note, ok := ownerView.Gifts[0].GetMessage(); !ok || note.Text != "channel note" {
-                t.Fatalf("owner view message = %#v, want channel note", note)
-        }
-        foundSender := false
+        foundSender = false
         for _, user := range ownerView.Users {
                 if u, ok := user.(*tg.User); ok && u.ID == sender.ID {
                         foundSender = true

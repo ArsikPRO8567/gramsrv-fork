@@ -675,6 +675,13 @@ WHERE user_id=$1 AND command_key=$2`, req.UserID, commandKey, ownerEditPts)
                                         &notification, req.UserID); err != nil {
                                         return err
                                 }
+                                // Раунд 43: старые «Telegram»-уведомления о покупке
+                                // (kind star_gift) продолжают рисовать кнопки «улучшить»/
+                                // «обменять» у уже уникального подарка — снимаем их edit-
+                                // событиями (convert-путь делает то же при конвертации).
+                                if err := editUpgradedChannelStarGiftNotificationsTx(ctx, tx, s.messages, result.Saved, req.Date); err != nil {
+                                        return err
+                                }
                         }
                         return nil
                 },

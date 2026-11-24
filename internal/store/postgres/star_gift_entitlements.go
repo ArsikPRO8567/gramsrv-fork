@@ -111,15 +111,16 @@ func (s *StarGiftLifecycleStore) PrepayStarGiftUpgrade(ctx context.Context, req 
 		if _, err := tx.Exec(ctx, `UPDATE peer_star_gifts SET prepaid_upgrade_stars=$2,prepaid_upgrade_hash='' WHERE id=$1`, locked.ID, req.ChargeStars); err != nil {
 			return err
 		}
-		// Раунд 42: переписываем исходное сервисное сообщение о подарке (обе
-		// копии — владелец и отправитель): конвертация предоплаченного подарка
-		// запрещена (convert_stars=0 — кнопки «обменять» больше нет), кнопка
-		// улучшения становится бесплатной (prepaid_upgrade=true +
-		// upgrade_stars=сумма предоплаты). Официальные клиенты читают оба
-		// флага прямо из messageActionStarGift (StarGiftSheet /
-		// PremiumGift::subtitle): владелец видит «Улучшить бесплатно», а
-		// отправитель — «{user} может сделать этот подарок уникальным
-		// коллекционным» вместо «может показывать подарок в профиле».
+		// Раунд 43: переписываем исходное сервисное сообщение о подарке (обе
+		// копии — владелец и отправитель) в официальном wire-формате
+		// предоплаты (раунды 25/26): подпись остаётся «отправил подарок» с
+		// исходной ценой (prepaid_upgrade НЕ выставляется,
+		// upgrade_separate=true не даёт клиенту сложить цены), конвертация
+		// блокируется (convert_stars=0), кнопка улучшения становится
+		// бесплатной (upgrade_stars=сумма предоплаты; StarGiftSheet:
+		// !out && can_upgrade && upgrade_stars > 0 → «Улучшить бесплатно»,
+		// отправитель видит «{user} может сделать этот подарок уникальным
+		// коллекционным» / Gift2InfoFreeUpgrade).
 		if err := s.markStarGiftSourcePrepaidUpgradeTx(ctx, tx, req, locked, req.ChargeStars); err != nil {
 			return err
 		}
@@ -134,15 +135,18 @@ VALUES($1,$2,$3,$4,$5,$6,$7)`, req.PayerUserID, req.CommandKey, locked.ID, req.F
 		sticker := gift.Sticker
 		// Полный снимок каталога обязателен: клиенты рисуют стоимость и бейдж
 		// «N из M» из этого payload, а без released_by блок неполон.
-		// Stars несёт цену улучшения: отдельная отправка улучшения — это
-		// сообщение об апгрейде, и цена в объекте должна равняться цене
-		// улучшения, а не цене самого подарка.
+		// Раунд 43 (калибровка по требованиям раунда и логике клиента):
+		// gift.stars несёт ЦЕНУ ПОДАРКА + стоимость улучшения — это суммарная
+		// стоимость подарка после предоплаты улучшения (в блоке «улучшение
+		// стоимостью X» цена объекта = подарок + улучшение, а не только
+		// улучшение). Подпись сообщения считается отдельно от
+		// action.upgrade_stars = сумме предоплаты.
 		action := fillStarGiftSnapshot(&domain.MessageStarGiftAction{
 			// ConvertStars = 0: у предоплаченного улучшения конвертация
 			// запрещена, и на официальном сервере action такого сообщения
 			// не несёт convert_stars (дамп 183490: prepaid_upgrade=true,
 			// convert_stars отсутствует, can_upgrade=true).
-			GiftID: gift.ID, Stars: req.ChargeStars, ConvertStars: 0, Title: gift.Title, Sticker: &sticker,
+			GiftID: gift.ID, Stars: gift.Stars + req.ChargeStars, ConvertStars: 0, Title: gift.Title, Sticker: &sticker,
 			FromUserID: req.PayerUserID, To: req.Owner, SavedID: locked.SavedID, Saved: true, CanUpgrade: true,
 			PrepaidUpgrade: true, UpgradeSeparate: true, UpgradePriceStars: req.ChargeStars,
 			UpgradeStars: req.ChargeStars, GiftMsgID: locked.MsgID,

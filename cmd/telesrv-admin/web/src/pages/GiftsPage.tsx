@@ -686,7 +686,7 @@ export function GiftsPage() {
                 <div className="gift-edit-animation-grid">
                   <div className="gift-edit-animation-current">
                     <span className="gift-edit-animation-label">{t("gifts.editAnimationCurrent")}</span>
-                    <LottiePreview giftID={editGift.GiftID} revision={editGift.Revision} />
+                    <LottiePreview giftID={editGift.GiftID} revision={editGift.Revision} format={editGift.SourceFormat} />
                   </div>
                   <div className="gift-edit-animation-new">
                     <span className="gift-edit-animation-label">{t("gifts.editAnimationNew")}</span>

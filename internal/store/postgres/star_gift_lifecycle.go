@@ -976,6 +976,14 @@ func (s *StarGiftLifecycleStore) SetStarGiftListing(ctx context.Context, req dom
                         if _, err := tx.Exec(ctx, `DELETE FROM star_gift_listings WHERE unique_gift_id=$1`, unique.ID); err != nil {
                                 return err
                         }
+                        // Раунд 43: снятие с продажи сбрасывает и resale_ton_only —
+                        // флаг описывает АКТИВНЫЙ листинг «только за TON». Без сброса
+                        // уникальный подарок навсегда оставался resale_ton_only=true
+                        // без листинга (клиенты рисовали «оплату только в TON»),
+                        // пока владелец не перевыпустит листинг в звёздах.
+                        if _, err := tx.Exec(ctx, `UPDATE unique_star_gifts SET resale_ton_only=false,updated_at=now() WHERE id=$1`, unique.ID); err != nil {
+                                return err
+                        }
                 } else {
                         // catalog.resell_min_stars — ТОЛЬКО отображаемая метка «цены от N
                         // звёзд» для типа подарка (проекция MIN(star_gift_listings.amount),
@@ -1307,12 +1315,16 @@ func (s *StarGiftLifecycleStore) PurchaseResaleStarGift(ctx context.Context, req
                                 return err
                         }
                         if _, err := tx.Exec(ctx, `UPDATE unique_star_gifts SET owner_peer_type=$2,owner_peer_id=$3,
-                         last_sale_date=$4,last_sale_currency=$5,last_sale_amount=$6,updated_at=now() WHERE id=$1`,
+                         last_sale_date=$4,last_sale_currency=$5,last_sale_amount=$6,resale_ton_only=false,updated_at=now() WHERE id=$1`,
                                 uniqueID, string(req.To.Type), req.To.ID, req.Date, listingCurrency, listingAmount); err != nil {
                                 return err
                         }
                         gift.Owner = req.To
                         gift.ResellAmount = nil
+                        // Раунд 43: листинг закрыт покупкой — «только TON» больше не
+                        // описывает подарок; иначе флаг переезжает к новому владельцу
+                        // вместе со снимком в transferUniqueAction.
+                        gift.ResaleTonOnly = false
                         gift.LastSaleDate = req.Date
                         gift.LastSaleAmount = &domain.StarGiftAmount{Currency: req.Amount.Currency, Amount: req.Amount.Amount}
                         sourceSaved = saved
@@ -1498,12 +1510,14 @@ WHERE actor_user_id=$1 AND command_key=$2`, req.BuyerUserID, strings.TrimSpace(r
                         return err
                 }
                 if _, err := tx.Exec(ctx, `UPDATE unique_star_gifts SET owner_peer_type=$2,owner_peer_id=$3,
-                 last_sale_date=$4,last_sale_currency=$5,last_sale_amount=$6,updated_at=now() WHERE id=$1`,
+                 last_sale_date=$4,last_sale_currency=$5,last_sale_amount=$6,resale_ton_only=false,updated_at=now() WHERE id=$1`,
                         uniqueID, string(req.To.Type), req.To.ID, req.Date, listingCurrency, listingAmount); err != nil {
                         return err
                 }
                 gift.Owner = req.To
                 gift.ResellAmount = nil
+                // Раунд 43: сброс «только TON» при покупке в канал — как в user-ветке.
+                gift.ResaleTonOnly = false
                 gift.LastSaleDate = req.Date
                 gift.LastSaleAmount = &domain.StarGiftAmount{Currency: req.Amount.Currency, Amount: req.Amount.Amount}
                 sourceSaved := saved

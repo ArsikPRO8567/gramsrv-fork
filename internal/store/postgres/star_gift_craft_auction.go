@@ -544,6 +544,11 @@ WHERE collectible_revision_id=$1 AND crafted
 		if _, err := tx.Exec(ctx, `DELETE FROM star_gift_listings WHERE unique_gift_id=ANY($1::bigint[])`, uniqueIDs); err != nil {
 			return err
 		}
+		// Раунд 43: у потреблённых крафтом подарков больше нет листинга — сбрасываем
+		// и «только TON» (тот же класс бага, что сброс при снятии с продажи).
+		if _, err := tx.Exec(ctx, `UPDATE unique_star_gifts SET resale_ton_only=false,updated_at=now() WHERE id=ANY($1::bigint[])`, uniqueIDs); err != nil {
+			return err
+		}
 		if err := updateStarGiftResaleProjection(ctx, tx, giftID); err != nil {
 			return err
 		}

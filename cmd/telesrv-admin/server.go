@@ -557,7 +557,12 @@ func (s *server) handleStarGiftAnimationAPI(w http.ResponseWriter, r *http.Reque
 		writeAPIError(w, resp.StatusCode, string(raw))
 		return
 	}
-	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	// Раунд 43: проксируем реальный Content-Type апстрима. Медиа-анимации
+	// (.webp/.video webm/.png, раунд 37) приходят как image/webp и т.п., а не
+	// JSON: захардкоженный application/json ломал клиентскую ветку
+	// giftAnimationMedia() (blob с неверным mime) и не давал отличить
+	// Lottie-ответ от бинарного по типу содержимого.
+	w.Header().Set("Content-Type", resp.Header.Get("Content-Type"))
 	w.Header().Set("Cache-Control", "private, max-age=60")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(raw)

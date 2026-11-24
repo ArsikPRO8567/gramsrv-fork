@@ -13,6 +13,18 @@ import (
         "telesrv/internal/compat/tdesktop"
 )
 
+// starGiftUpgradeEffectiveStars — цена улучшения для формы оплаты. Захваченная
+// предоплата (prepaid_upgrade_stars > 0) — право владельца: форма бесплатна,
+// иначе клиент (StarGiftSheet) рисует на второй странице «Upgrade for
+// ⭐️price» вместо бесплатного подтверждения. Нулевая форма уводит
+// sendPaymentForm в prepaid-ветку (раунд 21) без списания звёзд.
+func starGiftUpgradeEffectiveStars(saved domain.SavedStarGift, preview domain.StarGiftUpgradePreview) int64 {
+        if saved.PrepaidUpgradeStars > 0 {
+                return 0
+        }
+        return preview.UpgradeStars
+}
+
 func (r *Router) starGiftUpgradePaymentForm(ctx context.Context, userID int64, inv *tg.InputInvoiceStarGiftUpgrade) (tg.PaymentsPaymentFormClass, error) {
         saved, preview, err := r.starGiftUpgradeTarget(ctx, userID, inv.Stargift)
         if err != nil {
@@ -21,11 +33,12 @@ func (r *Router) starGiftUpgradePaymentForm(ctx context.Context, userID int64, i
         if err := r.checkGiftWhitelistUpgrade(ctx, userID, saved.GiftID); err != nil {
                 return nil, err
         }
+        stars := starGiftUpgradeEffectiveStars(saved, preview)
         return &tg.PaymentsPaymentFormStarGift{
-                FormID: starGiftUpgradeFormID(userID, saved.ID, preview.UpgradeStars, inv.KeepOriginalDetails),
+                FormID: starGiftUpgradeFormID(userID, saved.ID, stars, inv.KeepOriginalDetails),
                 Invoice: tg.Invoice{
                         Currency: "XTR",
-                        Prices:   []tg.LabeledPrice{{Label: "Star gift upgrade", Amount: preview.UpgradeStars}},
+                        Prices:   []tg.LabeledPrice{{Label: "Star gift upgrade", Amount: stars}},
                 },
         }, nil
 }
@@ -68,15 +81,20 @@ func (r *Router) sendStarGiftUpgradeForm(ctx context.Context, userID, formID int
                 if err != nil {
                         return nil, err
                 }
-                wantFormID := starGiftUpgradeFormID(userID, saved.ID, preview.UpgradeStars, inv.KeepOriginalDetails)
+                // Раунд 43: захваченная предоплата делает форму бесплатной — formID
+                // и списание считаются от той же эффективной цены, что и в форме.
+                chargeStars = starGiftUpgradeEffectiveStars(saved, preview)
+                wantFormID := starGiftUpgradeFormID(userID, saved.ID, chargeStars, inv.KeepOriginalDetails)
                 if formID == 0 || formID != wantFormID {
                         return nil, starsFormAmountMismatchErr()
                 }
-                chargeStars = preview.UpgradeStars
                 if chargeStars == 0 {
                         // Раунд 21: ревизия улучшений с нулевой ценой — форма бесплатная;
                         // исполнение уходит в prepaid-форме (ChargeStars 0, FormID 0),
                         // под детерминированным ключом free:.
+                        // Раунд 43: тот же путь обслуживает захваченную предоплату
+                        // (улучшение, оплаченное другим пользователем) — владелец не
+                        // платит второй раз.
                         commandKey = fmt.Sprintf("free:%d:%t", saved.ID, inv.KeepOriginalDetails)
                         requirePrepaid = true
                 }

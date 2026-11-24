@@ -137,6 +137,18 @@ func TestStarGiftResaleTonEquivalentPostgres(t *testing.T) {
 	if boughtTon.Unique.ResellAmount != nil {
 		t.Fatalf("listing must be removed after sale: %+v", boughtTon.Unique)
 	}
+	// Раунд 43: покупка закрывает листинг — «только TON» сбрасывается и в базе,
+	// иначе флаг переезжает к новому владельцу в снимке service-сообщения.
+	if boughtTon.Unique.ResaleTonOnly {
+		t.Fatalf("ton purchase must clear resale_ton_only in the returned snapshot: %+v", boughtTon.Unique)
+	}
+	var boughtTonFlag bool
+	if err := pool.QueryRow(ctx, `SELECT resale_ton_only FROM unique_star_gifts WHERE id=$1`, boughtTon.Unique.ID).Scan(&boughtTonFlag); err != nil {
+		t.Fatalf("load bought ton flag: %v", err)
+	}
+	if boughtTonFlag {
+		t.Fatalf("ton purchase must clear resale_ton_only in unique_star_gifts")
+	}
 	// Продавец получил TON-поступление: 2 TON * 900/1000 = 1.8 TON.
 	var sellerTon int64
 	if err := pool.QueryRow(ctx, `SELECT balance_nanoton FROM ton_balances WHERE user_id=$1`, seller.ID).Scan(&sellerTon); err != nil {
@@ -216,5 +228,34 @@ func TestStarGiftResaleTonEquivalentPostgres(t *testing.T) {
 		FormID: 93213, CommandKey: "stars-listing-ton-bad-" + suffix, Date: now + 62,
 	}); !errors.Is(err, domain.ErrStarGiftResaleUnavailable) {
 		t.Fatalf("wrong ton equivalent err = %v, want ErrStarGiftResaleUnavailable", err)
+	}
+
+	// --- Раунд 43: снятие с продажи сбрасывает resale_ton_only ---
+	listedTonAgain, err := lifecycle.SetStarGiftListing(ctx, domain.StarGiftListingRequest{
+		ActorUserID: seller.ID, Ref: domain.SavedStarGiftRef{Owner: sellerPeer, MsgID: third.Saved.MsgID},
+		Amount: &domain.StarGiftAmount{Currency: domain.StarGiftCurrencyTON, Amount: tonAmount}, Date: now + 70,
+	})
+	if err != nil {
+		t.Fatalf("relist third in ton: %v", err)
+	}
+	if !listedTonAgain.ResaleTonOnly {
+		t.Fatalf("relisted ton gift must set resale_ton_only: %+v", listedTonAgain)
+	}
+	unlisted, err := lifecycle.SetStarGiftListing(ctx, domain.StarGiftListingRequest{
+		ActorUserID: seller.ID, Ref: domain.SavedStarGiftRef{Owner: sellerPeer, MsgID: third.Saved.MsgID},
+		Date: now + 71,
+	})
+	if err != nil {
+		t.Fatalf("unlist third: %v", err)
+	}
+	if unlisted.ResaleTonOnly {
+		t.Fatalf("unlist must clear resale_ton_only in the returned snapshot: %+v", unlisted)
+	}
+	var unlistedFlag bool
+	if err := pool.QueryRow(ctx, `SELECT resale_ton_only FROM unique_star_gifts WHERE id=$1`, unlisted.ID).Scan(&unlistedFlag); err != nil {
+		t.Fatalf("load unlisted flag: %v", err)
+	}
+	if unlistedFlag {
+		t.Fatalf("unlist must clear resale_ton_only in unique_star_gifts")
 	}
 }

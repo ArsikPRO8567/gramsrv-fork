@@ -2270,19 +2270,24 @@ func tgSavedStarGiftGift(g domain.SavedStarGift, viewerUserID int64, catalog map
 // «оригинальные детали» подарка в профиле: отправитель (savedStarGift.from_id,
 // подпись «{отправитель} отправил(а) Вам этот подарок {дата}») и 附言.
 //
-// Раунд 25: в канальных списках подарков подпись отправителя и附言 видит
-// только администрация канала — право проставляют RPC-хендлеры в
-// SavedStarGift.ViewerCanManage (см. tgSavedStarGiftsResponse).
-//
 // Раунд 28: на личных профилях отправитель НЕанонимных подарков публичен —
 // официальная сетка профиля рисует имя/иконку отправителя у каждого зрителя
 // (фикс «на чужом профиле все подарки от анонима»). Анонимные подарки
 // (name_hidden) как и раньше раскрывают отправителя только
 // получателю-пользователю: iOS строит InputSavedStarGiftUser по msg_id из
 // этого peer (см. тест миграции 0181).
+//
+// Раунд 43: в канальных списках подарков отправитель НЕанонимного подарка
+// виден любому зрителю, а не только администрации канала (официальные
+// клиенты рисуют «{user} отправил(а) этот подарок» в сетке профиля канала
+// у всех). Отправителей СКРЫТЫХ подарков по-прежнему видит только тот, кто
+// управляет профилем канала — ViewerCanManage проставляют RPC-хендлеры,
+// см. tgSavedStarGiftsResponse, раунд 25.
 func savedStarGiftOriginalDetailsVisible(viewerUserID int64, gift domain.SavedStarGift) bool {
 	if gift.Owner.Type == domain.PeerTypeChannel {
-		return gift.ViewerCanManage
+		// Канал: админ видит даже скрытых отправителей, остальные — только
+		// неанонимных (name_hidden=false).
+		return gift.ViewerCanManage || !gift.NameHidden
 	}
 	if gift.NameHidden {
 		return gift.Owner.ID == viewerUserID

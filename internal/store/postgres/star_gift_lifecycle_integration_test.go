@@ -166,6 +166,41 @@ WHERE owner_user_id=$1 AND msg_id=$2`, prepayPayer.ID, prepaid.Send.SenderMessag
 	if ownerPrepayAlias != 1 || payerPrepayAlias != 0 {
 		t.Fatalf("prepay aliases owner=%d payer=%d, want owner-only", ownerPrepayAlias, payerPrepayAlias)
 	}
+	// Раунд 43: официальная wire-форма предоплаты. ИСХОДНОЕ сообщение о подарке
+	// (обе копии) после предоплаты: подпись «отправил подарок» с исходной ценой
+	// (prepaid_upgrade НЕ выставляется, upgrade_separate=true не даёт клиенту
+	// сложить цены), конвертация заблокирована (convert_stars=0), улучшение
+	// бесплатно (upgrade_stars=сумма предоплаты). Отдельное уведомление
+	// об улучшении несёт суммарную цену (подарок + улучшение) в gift.stars.
+	for _, box := range []struct {
+		name string
+		uid  int64
+		msg  int
+	}{ {"owner", owner.ID, purchased.Send.RecipientMessage.ID}, {"sender", buyer.ID, purchased.Send.SenderMessage.ID} } {
+		var sourceMediaJSON string
+		if err := pool.QueryRow(ctx, `SELECT media::text FROM message_boxes
+WHERE owner_user_id=$1 AND box_id=$2 AND NOT deleted`, box.uid, box.msg).Scan(&sourceMediaJSON); err != nil {
+			t.Fatalf("load prepaid source media (%s): %v", box.name, err)
+		}
+		sourceMedia, err := decodeMessageMedia(sourceMediaJSON)
+		if err != nil || sourceMedia == nil || sourceMedia.ServiceAction == nil || sourceMedia.ServiceAction.StarGift == nil {
+			t.Fatalf("decode prepaid source media (%s): media=%+v err=%v", box.name, sourceMedia, err)
+		}
+		action := sourceMedia.ServiceAction.StarGift
+		if action.PrepaidUpgrade || !action.UpgradeSeparate || action.UpgradeStars != 100 ||
+			action.ConvertStars != 0 || action.PrepaidUpgradeHash != "" || !action.CanUpgrade {
+			t.Fatalf("prepaid source action (%s) = %+v, want {no prepaid_upgrade, upgrade_separate, upgrade_stars=100, convert_stars=0}", box.name, action)
+		}
+		if action.Stars != 50 {
+			t.Fatalf("prepaid source gift price (%s) = %d, want original 50", box.name, action.Stars)
+		}
+	}
+	prepayNotificationMedia := prepaid.Send.RecipientMessage.Media.ServiceAction.StarGift
+	if prepayNotificationMedia == nil || !prepayNotificationMedia.PrepaidUpgrade || !prepayNotificationMedia.UpgradeSeparate ||
+		prepayNotificationMedia.UpgradeStars != 100 || prepayNotificationMedia.ConvertStars != 0 ||
+		prepayNotificationMedia.Stars != 150 {
+		t.Fatalf("prepay notification action = %+v, want prepaid upgrade caption with gift+upgrade price 150", prepayNotificationMedia)
+	}
 	upgradeReq := domain.StarGiftUpgradeRequest{
 		UserID: owner.ID, Ref: domain.SavedStarGiftRef{Owner: ownerPeer, MsgID: prepaid.Send.RecipientMessage.ID},
 		RequirePrepaid: true, KeepOriginalDetails: true, CommandKey: "upgrade-" + suffix, Date: now + 2,
@@ -1936,6 +1971,21 @@ WHERE j.saved_gift_id=$1 AND j.action_kind='star_gift' AND j.delivered_at>0`, pr
 		CommandKey: "round25-upgrade-" + suffix, Date: now + 2})
 	if err != nil || upgraded.Unique.Owner != channelPeer {
 		t.Fatalf("round25 prepaid upgrade = %+v err %v", upgraded, err)
+	}
+	// Раунд 43: после улучшения старое «Telegram»-уведомление о покупке
+	// перестаёт рисовать кнопки «улучшить»/«обменять» — подарок уже
+	// уникальный, обе кнопки не работают. Ключи JSON omitempty: снятые
+	// флаги/цены отсутствуют (NULL через #>>).
+	var upgradedNotificationCanUpgrade any
+	var upgradedNotificationConvertStars any
+	var upgradedNotificationUpgradeStars any
+	if err := pool.QueryRow(ctx, `SELECT m.media #>> '{service_action,star_gift,can_upgrade}', m.media #>> '{service_action,star_gift,convert_stars}', m.media #>> '{service_action,star_gift,upgrade_stars}'
+FROM star_gift_channel_notification_jobs j JOIN message_boxes m ON m.owner_user_id=j.target_user_id AND m.box_id=j.message_id
+WHERE j.saved_gift_id=$1 AND j.action_kind='star_gift' AND j.delivered_at>0`, prepaid.Saved.SavedID).
+		Scan(&upgradedNotificationCanUpgrade, &upgradedNotificationConvertStars, &upgradedNotificationUpgradeStars); err != nil ||
+		upgradedNotificationCanUpgrade != nil || upgradedNotificationConvertStars != nil || upgradedNotificationUpgradeStars != nil {
+		t.Fatalf("round25 upgraded notification buttons can_upgrade=%v convert_stars=%v upgrade_stars=%v err=%v (want all removed)",
+			upgradedNotificationCanUpgrade, upgradedNotificationConvertStars, upgradedNotificationUpgradeStars, err)
 	}
 	actorPeer := domain.Peer{Type: domain.PeerTypeUser, ID: actor.ID}
 	toActor, err := lifecycle.TransferStarGift(ctx, domain.StarGiftTransferRequest{

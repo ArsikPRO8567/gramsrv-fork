@@ -7,6 +7,40 @@ import { useI18n } from "../i18n";
 import type { StarGiftRow } from "../types";
 import { GiveGiftForm } from "./GiveGiftForm";
 
+// Раунд 43: миниатюра подарка в меню выдачи. Медиа-анимации (.webp/.webm/.png,
+// раунд 37) сервер отдаёт исходными байтами — JSON-обёртка giftAnimation() на
+// них падает («invalid server response (HTTP 200): RIFF…»), поэтому такие
+// подарки рендерим <img>/<video> из blob по giftAnimationMedia().
+function GiveGiftThumb({ gift }: { gift: StarGiftRow }) {
+  const [media, setMedia] = useState<{ url: string; webm: boolean } | null>(null);
+  const isMedia = gift.SourceFormat === "webp" || gift.SourceFormat === "webm" || gift.SourceFormat === "png";
+  useEffect(() => {
+    if (!isMedia) return;
+    let objectURL = "";
+    let cancelled = false;
+    api.giftAnimationMedia(gift.GiftID).then((value) => {
+      const url = URL.createObjectURL(value.blob);
+      if (cancelled) {
+        URL.revokeObjectURL(url);
+        return;
+      }
+      objectURL = url;
+      setMedia({ url, webm: gift.SourceFormat === "webm" });
+    }).catch(() => undefined);
+    return () => {
+      cancelled = true;
+      if (objectURL) URL.revokeObjectURL(objectURL);
+    };
+  }, [gift.GiftID, gift.SourceFormat, isMedia]);
+  if (isMedia) {
+    return <div className="give-gift-thumb">
+      {media?.webm && <video className="give-gift-thumb-media" src={media.url} autoPlay loop muted playsInline />}
+      {media && !media.webm && <img className="give-gift-thumb-media" src={media.url} alt="" />}
+    </div>;
+  }
+  return <StaticLottie className="give-gift-thumb" cacheKey={`${gift.GiftID}:${gift.Revision}`} loader={() => api.giftAnimation(gift.GiftID)} />;
+}
+
 export function GiveGiftsPage() {
   const { t } = useI18n();
   const [gifts, setGifts] = useState<StarGiftRow[]>([]);
@@ -58,7 +92,7 @@ export function GiveGiftsPage() {
                 <button key={gift.GiftID} type="button" role="option" aria-selected={active}
                   className={`give-gift-option ${active ? "selected" : ""} ${gift.Enabled ? "" : "gift-row-disabled"}`}
                   onClick={() => setSelected(gift)}>
-                  <StaticLottie className="give-gift-thumb" cacheKey={`${gift.GiftID}:${gift.Revision}`} loader={() => api.giftAnimation(gift.GiftID)} />
+                  <GiveGiftThumb gift={gift} />
                   <span className="give-gift-option-info">
                     <strong>{gift.Title || `Gift #${gift.GiftID}`}</strong>
                     <span className="mono">#{gift.GiftID}</span>
