@@ -2112,7 +2112,10 @@ func tgSavedStarGifts(viewerUserID int64, gifts []domain.SavedStarGift, catalog 
 		if g.Unsaved {
 			item.Unsaved = true
 		}
-		if g.FromUserID != 0 && savedStarGiftOriginalDetailsVisible(viewerUserID, g) {
+		// Раунд 44: отправитель обёртки (иконка/имя над подарком в сетке
+		// профиля и строка «From» в шторке) гейтится отдельно от 附言 — у
+		// уникальных подарков он виден только владельцу NFT.
+		if g.FromUserID != 0 && savedStarGiftSenderVisible(viewerUserID, g) {
 			item.SetFromID(&tg.PeerUser{UserID: g.FromUserID})
 		}
 		if g.Owner.Type == domain.PeerTypeUser && g.MsgID > 0 {
@@ -2266,16 +2269,16 @@ func tgSavedStarGiftGift(g domain.SavedStarGift, viewerUserID int64, catalog map
 	}
 }
 
-// savedStarGiftOriginalDetailsVisible — видны ли получателю-зрителю
-// «оригинальные детали» подарка в профиле: отправитель (savedStarGift.from_id,
-// подпись «{отправитель} отправил(а) Вам этот подарок {дата}») и 附言.
+// savedStarGiftSenderVisible — виден ли зрителю ОТПРАВИТЕЛЬ подарка
+// (обёрточный savedStarGift.from_id): иконка/имя над подарком в сетке профиля
+// и строка «From» в шторке (Android GiftCell рисует их из обёртки, iOS — для
+// обычных подарков тоже).
 //
-// Раунд 28: на личных профилях отправитель НЕанонимных подарков публичен —
-// официальная сетка профиля рисует имя/иконку отправителя у каждого зрителя
-// (фикс «на чужом профиле все подарки от анонима»). Анонимные подарки
-// (name_hidden) как и раньше раскрывают отправителя только
-// получателю-пользователю: iOS строит InputSavedStarGiftUser по msg_id из
-// этого peer (см. тест миграции 0181).
+// Раунд 28: на личных профилях отправитель НЕанонимных ОБЫЧНЫХ подарков
+// публичен — официальная сетка профиля рисует имя/иконку отправителя у каждого
+// зрителя (фикс «на чужом профиле все подарки от анонима»). Анонимные подарки
+// (name_hidden) раскрывают отправителя только получателю-пользователю: iOS
+// строит InputSavedStarGiftUser по msg_id из этого peer (тест миграции 0181).
 //
 // Раунд 43: в канальных списках подарков отправитель НЕанонимного подарка
 // виден любому зрителю, а не только администрации канала (официальные
@@ -2283,6 +2286,44 @@ func tgSavedStarGiftGift(g domain.SavedStarGift, viewerUserID int64, catalog map
 // у всех). Отправителей СКРЫТЫХ подарков по-прежнему видит только тот, кто
 // управляет профилем канала — ViewerCanManage проставляют RPC-хендлеры,
 // см. tgSavedStarGiftsResponse, раунд 25.
+//
+// Раунд 44: у УНИКАЛЬНЫХ (коллекционных) подарков на личном профиле
+// отправитель виден ТОЛЬКО владельцу NFT — независимо от name_hidden.
+// Регрессия: после раунда 28 отправителя коллекционного подарка видел любой
+// зритель профиля («вверху над коллекционным подарком»). Отправителем
+// считается тот, кто отправил редкий подарок, передал его или купил для
+// владельца; самокупка тоже делает владельца отправителем — эта цепочка уже
+// поддержана в peer_star_gifts.from_user_id (transfer/resale/offer обновляют
+// поле). Оригинальные детали (original_details.sender_id) остаются публичными
+// как на официальных серверах — они «заморожены» и не следуют за цепочкой
+// передач, которую описывает правило раунда.
+func savedStarGiftSenderVisible(viewerUserID int64, gift domain.SavedStarGift) bool {
+	if gift.Owner.Type == domain.PeerTypeChannel {
+		// Канал: админ видит даже скрытых отправителей, остальные — только
+		// неанонимных (name_hidden=false).
+		return gift.ViewerCanManage || !gift.NameHidden
+	}
+	if gift.Unique != nil {
+		// Раунд 44: коллекционный подарок — только владелец NFT видит
+		// отправителя, остальные зрители получают бейдж «Аноним».
+		return gift.Owner.ID == viewerUserID
+	}
+	if gift.NameHidden {
+		return gift.Owner.ID == viewerUserID
+	}
+	return true
+}
+
+// savedStarGiftOriginalDetailsVisible — виден ли получателю-зрителю
+// 附言 подарка в профиле (сообщение отправителя, savedStarGift.message).
+// Отправитель с раунда 44 гейтится отдельно — savedStarGiftSenderVisible.
+//
+// Раунд 28: на личных профилях 附言 НЕанонимных подарков публична; анонимные
+// (name_hidden) — только получателю-пользователю.
+//
+// Раунд 43: в канальных списках 附言 НЕанонимного подарка видна любому
+// зрителю; СКРЫТЫХ — только тому, кто управляет профилем канала
+// (ViewerCanManage проставляют RPC-хендлеры, см. tgSavedStarGiftsResponse).
 func savedStarGiftOriginalDetailsVisible(viewerUserID int64, gift domain.SavedStarGift) bool {
 	if gift.Owner.Type == domain.PeerTypeChannel {
 		// Канал: админ видит даже скрытых отправителей, остальные — только
@@ -2309,7 +2350,9 @@ func savedStarGiftUserIDs(viewerUserID int64, gifts []domain.SavedStarGift) []in
 		ids = append(ids, id)
 	}
 	for _, g := range gifts {
-		if g.FromUserID == 0 || !savedStarGiftOriginalDetailsVisible(viewerUserID, g) {
+		// Раунд 44: тот же sender-гейт, что и на wire — иначе отправитель
+		// уникального подарка утекал через users-вектор ответа.
+		if g.FromUserID == 0 || !savedStarGiftSenderVisible(viewerUserID, g) {
 			continue
 		}
 		add(g.FromUserID)

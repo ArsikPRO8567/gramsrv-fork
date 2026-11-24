@@ -885,17 +885,41 @@ FOR UPDATE`, req.UserID, sourceMessageID).Scan(&peerType, &peerID)
                         } else {
                                 action.UpgradeMsgID = 0
                         }
+                        // Раунд 44 (цены сервисных сообщений после дарения
+                        // улучшения): правка не должна менять отображаемую цену.
+                        // Официальные клиенты считают цену подписи так
+                        // (MessageObject.java, history_item.cpp prepareStarGift):
+                        // prepaid_upgrade → upgrade_stars; иначе gift.stars, плюс
+                        // upgrade_stars при upgrade_separate=false. Поэтому флаги
+                        // цены сохраняются как есть:
+                        //  - исходное сообщение: upgrade_separate остаётся true
+                        //    после отдельной предоплаты — цена в подписи остаётся
+                        //    исходной ценой подарка (сброс флага здесь превращал
+                        //    «100» в «100 + 50 = 150» сразу после выполнения
+                        //    улучшения); при покупке с включённым улучшением он
+                        //    false — суммарная цена тоже не меняется;
+                        //  - отдельное уведомление о предоплате: prepaid_upgrade и
+                        //    upgrade_separate сохраняются — подпись «отправил
+                        //    улучшение стоимостью {цена подарка + цена улучшения}»
+                        //    остаётся навсегда, без пересчёта в gift.stars +
+                        //    upgrade_stars.
+                        // Действие при этом гасится: can_upgrade=false и
+                        // prepaid_upgrade_hash="" — улучшение уже выполнено и не
+                        // может быть выполнено повторно; prepaid_upgrade снимается
+                        // только у исходного сообщения (там он не выставляется
+                        // ни одним текущим сценарием, сброс нужен для сообщений,
+                        // записанных раундом 42), у уведомления он — часть
+                        // подписи.
                         action.CanUpgrade = false
                         action.PrepaidUpgradeHash = ""
-                        action.PrepaidUpgrade = false
-                        action.UpgradeSeparate = false
+                        if sourceMessageID == saved.MsgID {
+                                action.PrepaidUpgrade = false
+                        }
                         // Подарок стал уникальным: ветка «обменять на звёзды» в исходном
                         // сервисном сообщении больше не имеет смысла (конвертация
                         // уникального подарка отклоняется агрегатом), клиент должен
                         // показывать нейтральное «подарок можно добавить в профиль».
                         action.ConvertStars = 0
-                        action.CanUpgrade = false
-                        action.PrepaidUpgradeHash = ""
                         mediaJSON, err := encodeMessageMedia(media)
                         if err != nil {
                                 return nil, fmt.Errorf("encode upgraded star gift source media: %w", err)

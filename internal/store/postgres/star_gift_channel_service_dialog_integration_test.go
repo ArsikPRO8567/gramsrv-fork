@@ -159,9 +159,12 @@ WHERE j.saved_gift_id=$1 AND j.target_user_id=$2`, purchased2.Saved.ID, owner.ID
         if prepaidAction.PeerChannelID != created.Channel.ID || prepaidAction.SavedID != purchased2.Saved.SavedID {
                 t.Fatalf("prepaid notification action lacks channel namespace: %+v", prepaidAction)
         }
-        // Официальный wire-формат предоплаты: внутренний stars — чистая цена
-        // подарка, внешняя upgrade_stars — сумма предоплаты (цена ревизии
-        // коллекции = 40, каталог несёт Stars=60).
+        // Официальный wire-формат ПОКУПКИ с включённым улучшением (раунды 25/26,
+        // раунд 44 его не меняет): внутренний stars — чистая цена подарка,
+        // внешняя upgrade_stars — сумма предоплаты (цена ревизии коллекции = 40,
+        // каталог несёт Stars=60). Суммарная форма «upgrade_stars = подарок +
+        // улучшение» с нулевым gift.stars относится только к ОТДЕЛЬНОМУ
+        // уведомлению об оплаченном улучшении (PrepayStarGiftUpgrade).
         if prepaidAction.Stars != entry.Gift.Stars || prepaidAction.UpgradeStars != 40 {
                 t.Fatalf("prepaid action price format wrong: stars=%d (want %d) upgrade_stars=%d (want 40)",
                         prepaidAction.Stars, entry.Gift.Stars, prepaidAction.UpgradeStars)

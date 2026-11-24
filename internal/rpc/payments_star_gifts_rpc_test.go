@@ -2355,6 +2355,94 @@ func TestSavedStarGiftOriginalDetailsAreManageScoped(t *testing.T) {
         }
 }
 
+// Раунд 44: отправитель УНИКАЛЬНОГО (коллекционного) подарка на личном
+// профиле виден только владельцу NFT — независимо от name_hidden. Регрессия:
+// после раунда 28 обёрточный from_id неанонимных подарков отдавался всем
+// зрителям, и любой пользователь видел отправителя над коллекционным
+// подарком в сетке профиля (Android GiftCell рисует его из обёртки).
+// Отправителем считается тот, кто отправил редкий подарок, передал его или
+// купил для владельца (цепочка уже поддержана в from_user_id); 附言 при этом
+// остаётся публичной для неанонимных подарков (gate не менялся).
+func TestUniqueStarGiftSenderVisibleToOwnerOnly(t *testing.T) {
+        const (
+                senderID = int64(7401)
+                ownerID  = int64(7402)
+                stranger = int64(7403)
+        )
+        uniqueGift := domain.SavedStarGift{
+                Owner: domain.Peer{Type: domain.PeerTypeUser, ID: ownerID}, FromUserID: senderID,
+                GiftID: 7201, RevisionID: 8201, MsgID: 41, Date: 200, Message: "birthday note",
+                Unique: &domain.UniqueStarGift{ID: 9201, GiftID: 7201, Owner: domain.Peer{Type: domain.PeerTypeUser, ID: ownerID}},
+        }
+
+        // Владелец NFT видит отправителя — открыто и анонимно.
+        if !savedStarGiftSenderVisible(ownerID, uniqueGift) {
+                t.Fatal("NFT owner must see sender of own collectible gift")
+        }
+        anonymousUnique := uniqueGift
+        anonymousUnique.NameHidden = true
+        if !savedStarGiftSenderVisible(ownerID, anonymousUnique) {
+                t.Fatal("NFT owner must see sender of own hidden collectible gift")
+        }
+        // Посторонний зритель не видит отправителя ни при каком name_hidden —
+        // это и есть правило раунда 44.
+        if savedStarGiftSenderVisible(stranger, uniqueGift) {
+                t.Fatal("stranger must not see sender of a collectible gift (round 44)")
+        }
+        if savedStarGiftSenderVisible(stranger, anonymousUnique) {
+                t.Fatal("stranger must not see sender of a hidden collectible gift (round 44)")
+        }
+        // Канальные коллекционные подарки не меняются (раунд 43): отправитель
+        // неанонимного подарка публичен, скрытого видит администрация.
+        channelUnique := uniqueGift
+        channelUnique.Owner = domain.Peer{Type: domain.PeerTypeChannel, ID: 8402}
+        channelUnique.MsgID = 0
+        channelUnique.SavedID = 61
+        if !savedStarGiftSenderVisible(stranger, channelUnique) {
+                t.Fatal("member must still see sender of a non-hidden channel collectible (round 43)")
+        }
+        hiddenChannelUnique := channelUnique
+        hiddenChannelUnique.NameHidden = true
+        if savedStarGiftSenderVisible(stranger, hiddenChannelUnique) {
+                t.Fatal("member must not see sender of a hidden channel collectible (round 43)")
+        }
+        if !savedStarGiftSenderVisible(stranger, func() domain.SavedStarGift {
+                gift := hiddenChannelUnique
+                gift.ViewerCanManage = true
+                return gift
+        }()) {
+                t.Fatal("channel admin must see sender of a hidden channel collectible (round 43)")
+        }
+        // Обычные подарки не меняются (раунд 28): неанонимный отправитель
+        // публичен на личных профилях.
+        ordinary := uniqueGift
+        ordinary.Unique = nil
+        if !savedStarGiftSenderVisible(stranger, ordinary) {
+                t.Fatal("stranger must still see sender of a non-hidden ordinary gift (round 28)")
+        }
+
+        // Wire-проекция: владелец получает from_id, посторонний — нет; 附言
+        // неанонимного подарка остаётся публичной, users[] не утекает.
+        catalog := map[int64]domain.StarGift{8201: {ID: 7201, RevisionID: 8201}}
+        ownerProjection := tgSavedStarGifts(ownerID, []domain.SavedStarGift{uniqueGift}, catalog, nil)[0]
+        if _, ok := ownerProjection.GetFromID(); !ok {
+                t.Fatal("owner projection lost collectible from_id (round 44)")
+        }
+        strangerProjection := tgSavedStarGifts(stranger, []domain.SavedStarGift{uniqueGift}, catalog, nil)[0]
+        if _, ok := strangerProjection.GetFromID(); ok {
+                t.Fatal("stranger projection must not carry collectible from_id (round 44)")
+        }
+        if _, ok := strangerProjection.GetMessage(); !ok {
+                t.Fatal("stranger projection must keep public note of a non-hidden collectible (gate unchanged)")
+        }
+        if ids := savedStarGiftUserIDs(stranger, []domain.SavedStarGift{uniqueGift}); len(ids) != 0 {
+                t.Fatalf("stranger collectible sender ids = %v, want empty (round 44)", ids)
+        }
+        if ids := savedStarGiftUserIDs(ownerID, []domain.SavedStarGift{uniqueGift}); !reflect.DeepEqual(ids, []int64{senderID}) {
+                t.Fatalf("owner collectible sender ids = %v, want sender %d", ids, senderID)
+        }
+}
+
 // Раунд 43: в списке подарков канала отправитель НЕанонимного подарка виден
 // любому зрителю (from_id + подпись + users[]), как на официальных серверах;
 // анонимные (name_hidden) подарки раскрывают отправителя только администрации.

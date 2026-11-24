@@ -385,14 +385,34 @@ func TestStarGiftResaleListingFloorAndOriginalDetailsUsersPG(t *testing.T) {
 			t.Fatalf("profile users missing %s peer %d (have %v)", source, id, profileUsers)
 		}
 	}
-	// wire: обёртка savedStarGift несёт from_id продавца (bit 1).
+	// Раунд 44: обёртка savedStarGift уникального подарка несёт from_id
+	// ТОЛЬКО владельцу NFT. Покупатель купил подарок сам — он и есть
+	// отправитель («Если подарок куплен самим пользователем, то он станет
+	// отправителем»); посторонний зритель (sender) from_id не получает.
+	ownerProfile, err := r.onPaymentsGetSavedStarGifts(WithUserID(ctx, buyer.ID), &tg.PaymentsGetSavedStarGiftsRequest{
+		Peer: &tg.InputPeerUser{UserID: buyer.ID, AccessHash: buyer.AccessHash},
+	})
+	if err != nil {
+		t.Fatalf("get owner profile gifts: %v", err)
+	}
+	if len(ownerProfile.Gifts) == 0 {
+		t.Fatal("owner profile gifts is empty")
+	}
+	var ownerRaw bin.Buffer
+	if err := ownerProfile.Gifts[0].Encode(&ownerRaw); err != nil {
+		t.Fatalf("encode owner savedStarGift: %v", err)
+	}
+	ownerFlags := int32(ownerRaw.Buf[8]) | int32(ownerRaw.Buf[9])<<8 | int32(ownerRaw.Buf[10])<<16 | int32(ownerRaw.Buf[11])<<24
+	if ownerFlags&2 == 0 {
+		t.Fatalf("owner view of resold gift missing from_id bit: flags=%08x (round 44: owner sees sender)", ownerFlags)
+	}
 	var raw bin.Buffer
 	if err := profile.Gifts[0].Encode(&raw); err != nil {
 		t.Fatalf("encode savedStarGift: %v", err)
 	}
 	flagsWord := int32(raw.Buf[8]) | int32(raw.Buf[9])<<8 | int32(raw.Buf[10])<<16 | int32(raw.Buf[11])<<24
-	if flagsWord&2 == 0 {
-		t.Fatalf("resold gift wrapper missing from_id bit: flags=%08x", flagsWord)
+	if flagsWord&2 != 0 {
+		t.Fatalf("stranger view of resold gift carries from_id bit: flags=%08x (round 44: sender hidden from non-owner)", flagsWord)
 	}
 
 	// Слоевая согласованность (228): ответ кодируется/декодируется без потерь.

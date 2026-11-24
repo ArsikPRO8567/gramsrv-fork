@@ -135,22 +135,32 @@ VALUES($1,$2,$3,$4,$5,$6,$7)`, req.PayerUserID, req.CommandKey, locked.ID, req.F
 		sticker := gift.Sticker
 		// Полный снимок каталога обязателен: клиенты рисуют стоимость и бейдж
 		// «N из M» из этого payload, а без released_by блок неполон.
-		// Раунд 43 (калибровка по требованиям раунда и логике клиента):
-		// gift.stars несёт ЦЕНУ ПОДАРКА + стоимость улучшения — это суммарная
-		// стоимость подарка после предоплаты улучшения (в блоке «улучшение
-		// стоимостью X» цена объекта = подарок + улучшение, а не только
-		// улучшение). Подпись сообщения считается отдельно от
-		// action.upgrade_stars = сумме предоплаты.
+		// Раунд 44 (цены сервисных сообщений при дарении улучшения): все
+		// официальные клиенты считают цену подписи предоплаты ТОЛЬКО из
+		// action.upgrade_stars — MessageObject (Android): prepaid_upgrade →
+		// stars = upgrade_stars, gift.stars в этой ветке не читается; тот же
+		// расчёт в tdesktop prepareStarGift (upgradeGifted → vupgrade_stars).
+		// Раунд 43 складывал сумму в gift.stars — подпись продолжала показывать
+		// голую цену улучшения, поэтому цена второго сообщения оставалась
+		// неверной. Требование раунда: во втором сообщении отображается
+		// суммарная стоимость «цена подарка + цена улучшения»
+		// (подарок 100 + улучшение 50 = 150), значит upgrade_stars =
+		// gift.Stars + charge. gift.stars обнуляется ниже (после
+		// fillStarGiftSnapshot, который подставляет каталоговую цену в нулевое
+		// поле): в шторке, открытой из этого сообщения, строка «Стоимость»
+		// считается как gift.stars + upgrade_stars — нулевой gift.stars не даёт
+		// задвоить сумму (иначе клиент показывал бы 150 + 150 = 300).
 		action := fillStarGiftSnapshot(&domain.MessageStarGiftAction{
 			// ConvertStars = 0: у предоплаченного улучшения конвертация
 			// запрещена, и на официальном сервере action такого сообщения
 			// не несёт convert_stars (дамп 183490: prepaid_upgrade=true,
 			// convert_stars отсутствует, can_upgrade=true).
-			GiftID: gift.ID, Stars: gift.Stars + req.ChargeStars, ConvertStars: 0, Title: gift.Title, Sticker: &sticker,
+			GiftID: gift.ID, ConvertStars: 0, Title: gift.Title, Sticker: &sticker,
 			FromUserID: req.PayerUserID, To: req.Owner, SavedID: locked.SavedID, Saved: true, CanUpgrade: true,
 			PrepaidUpgrade: true, UpgradeSeparate: true, UpgradePriceStars: req.ChargeStars,
-			UpgradeStars: req.ChargeStars, GiftMsgID: locked.MsgID,
+			UpgradeStars: gift.Stars + req.ChargeStars, GiftMsgID: locked.MsgID,
 		}, gift)
+		action.Stars = 0
 		if req.Owner.Type == domain.PeerTypeChannel {
 			action.PeerChannelID = req.Owner.ID
 		} else {

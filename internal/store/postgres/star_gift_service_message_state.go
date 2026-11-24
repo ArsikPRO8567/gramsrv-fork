@@ -454,15 +454,24 @@ FOR UPDATE`, ref.userID, ref.msgID).Scan(&peerType, &peerID)
 			continue
 		}
 		if !action.CanUpgrade && action.ConvertStars == 0 && !action.PrepaidUpgrade &&
-			!action.UpgradeSeparate && action.UpgradeStars == 0 && action.PrepaidUpgradeHash == "" {
+			!action.UpgradeSeparate && action.PrepaidUpgradeHash == "" {
 			// Кнопки уже сняты — повторная правка не нужна.
 			continue
 		}
+		// Раунд 44: upgrade_stars СОХРАНЯЕТСЯ. Официальные клиенты считают цену
+		// подписи канального уведомления как gift.stars + upgrade_stars
+		// (после снятия prepaid_upgrade/upgrade_separate остаётся эта ветка),
+		// поэтому сохранённый upgrade_stars держит цену на месте: у уведомления
+		// о покупке с включённым улучшением это суммарная цена (100+50=150, не
+		// менялась и до раунда), у уведомления об отдельной предоплате
+		// (раунд 44: gift.stars=0, upgrade_stars=цена подарка+улучшения) —
+		// суммарная цена (0+150=150). Обнуление upgrade_stars (раунд 43)
+		// превращало вторую подпись в «0 звёзд». Кнопок при этом нет:
+		// can_upgrade=false, prepaid_upgrade_hash="".
 		action.CanUpgrade = false
 		action.ConvertStars = 0
 		action.PrepaidUpgrade = false
 		action.UpgradeSeparate = false
-		action.UpgradeStars = 0
 		action.PrepaidUpgradeHash = ""
 		mediaJSON, err := encodeMessageMedia(media)
 		if err != nil {
