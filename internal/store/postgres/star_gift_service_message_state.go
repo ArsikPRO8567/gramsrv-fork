@@ -343,29 +343,30 @@ WHERE owner_peer_type=$1 AND owner_peer_id=$2 AND pinned_order=$3`, string(req.R
 // о подарке после отдельной предоплаты улучшения другим пользователем
 // (payments.sendStarsForm с InputInvoiceStarGiftPrepaidUpgrade).
 //
-// Раунд 43 — калибровка по логике официального клиента (MessageObject +
-// StarGiftSheet, дамп 183490). Флаг prepaid_upgrade на messageActionStarGift
-// клиенты читают как «это сообщение — уведомление об улучшении»: подпись
-// становится «{from} отправил улучшение стоимостью {upgrade_stars}», а не
-// «отправил подарок». Поэтому исходное сообщение предоплату выражает БЕЗ
-// этого флага, в официальном wire-формате предоплаты (как при покупке с
-// включённым улучшением, раунды 25/26):
+// Раунд 45 — цена исходного сообщения закрепляется НАВСЕГДА (требование
+// раунда: «исходное сообщение закрепляет за собой навсегда его цену»).
+// Клиентская формула строки цены сервисного сообщения —
+// gift.stars + action.upgrade_stars, строка скрыта при gift.stars==0;
+// флаг upgrade_separate клиент пользователя игнорирует (наблюдения раундов
+// 43/44: сообщение с upgrade_separate=true и upgrade_stars=50 показывало
+// «цена подарка + улучшение»). Поэтому предоплата выражается на исходном
+// сообщении так:
 //
 //   - prepaid_upgrade НЕ выставляется — подпись остаётся
 //     «Вы (или {user}) отправил(а) подарок…»;
-//   - upgrade_separate=true — клиент НЕ прибавляет upgrade_stars к
-//     gift.stars в подписи: цена в сообщении остаётся исходной ценой подарка;
-//   - upgrade_stars=сумма предоплаты (>0) — включает у владельца кнопку
-//     «Улучшить бесплатно» (StarGiftSheet: !out && can_upgrade &&
-//     upgrade_stars > 0 → Gift2UpgradeButtonFree), а у отправителя — подпись
-//     «{user} может сделать этот подарок уникальным коллекционным»
-//     (Gift2InfoFreeUpgrade);
+//   - upgrade_stars=0 и upgrade_separate=false — строка цены показывает
+//     чистый gift.stars (100) и больше никогда не меняется: ни предоплата,
+//     ни само улучшение (unpack) не переписывают цену;
 //   - convert_stars убирается — конвертация предоплаченного подарка запрещена
 //     (ConvertStarGift → STARGIFT_INVALID), клиент не должен показывать кнопку
 //     «Обменять на N звёзд» (официальный дамп 183490);
 //   - prepaid_upgrade_hash снимается — инвойс «оплатить улучшение» больше
 //     недоступен, улучшение уже оплачено.
 //
+// Бесплатность улучшения не зависит от upgrade_stars: у агрегата остаётся
+// entitlement prepaid_upgrade_stars>0, и форма
+// payments.getPaymentForm(inputInvoiceStarGiftUpgrade) отдаёт нулевую цену
+// (раунд 43) — кнопка улучшения открывает бесплатное подтверждение.
 // can_upgrade сохраняется на обеих копиях: официальные серверы отдают его
 // отправителю тоже, а действие апгрейда остаётся доступным только владельцу.
 // Правятся ВСЕ копии (владелец + отправитель), каждой выдаётся свой pts и
@@ -375,7 +376,6 @@ func (s *StarGiftLifecycleStore) markStarGiftSourcePrepaidUpgradeTx(
 	tx pgx.Tx,
 	req domain.StarGiftPrepaidUpgradeRequest,
 	saved domain.SavedStarGift,
-	price int64,
 ) error {
 	if s == nil || s.messages == nil || req.Date <= 0 || saved.ID <= 0 ||
 		saved.Owner.Type != domain.PeerTypeUser || saved.Owner.ID <= 0 || saved.MsgID <= 0 {
@@ -387,8 +387,8 @@ func (s *StarGiftLifecycleStore) markStarGiftSourcePrepaidUpgradeTx(
 				return
 			}
 			starGift.PrepaidUpgrade = false
-			starGift.UpgradeSeparate = true
-			starGift.UpgradeStars = price
+			starGift.UpgradeSeparate = false
+			starGift.UpgradeStars = 0
 			starGift.ConvertStars = 0
 			starGift.PrepaidUpgradeHash = ""
 		}, req.PayerUserID)

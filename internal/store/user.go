@@ -29,6 +29,13 @@ type UserStore interface {
 	SetScamFake(ctx context.Context, userID int64, scam, fake bool) (domain.User, error)
 	// SetSupport 设置/取消用户的 support 标记（官方客服账号）。
 	SetSupport(ctx context.Context, userID int64, support bool) (domain.User, error)
+	// ServiceAccount читает флаг service_account (миграция 0200): служебные
+	// аккаунты и боты — им нельзя дарить подарки, но сами они дарят свободно.
+	// Флаг не связан с support. Отсутствие строки = false.
+	ServiceAccount(ctx context.Context, userID int64) (bool, error)
+	// SetServiceAccount выставляет/снимает флаг service_account. Неизвестный
+	// id = domain.ErrUserNotFound.
+	SetServiceAccount(ctx context.Context, userID int64, service bool) error
 	// SweepExpiredPremium 把到期（premium_expires_at <= now）的会员行清空并
 	// 返回清理后的用户（供推送 updateUser）；单次最多处理 limit 行。
 	SweepExpiredPremium(ctx context.Context, now int64, limit int) ([]domain.User, error)

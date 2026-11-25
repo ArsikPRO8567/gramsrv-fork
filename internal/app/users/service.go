@@ -489,6 +489,41 @@ func (s *Service) SetSupport(ctx context.Context, userID int64, support bool) (d
 	return updated, nil
 }
 
+// ServiceAccount читает флаг service_account (миграция 0200) напрямую из
+// store: служебные аккаунты и боты — им нельзя дарить подарки, но сами они
+// дарят свободно. Флаг не связан с support.
+func (s *Service) ServiceAccount(ctx context.Context, userID int64) (bool, error) {
+	if userID == 0 {
+		return false, ErrNotAuthorized
+	}
+	return s.users.ServiceAccount(ctx, userID)
+}
+
+// SetServiceAccount выставляет/снимает флаг service_account (миграция 0200):
+// служебные аккаунты и боты не получают подарки, но сами дарят свободно.
+// Флаг не связан с support. Подарочные ограничения читают флаг напрямую из
+// store (rpc.GiftActorRulesStore), поэтому здесь достаточно сбросить кэш
+// базовой проекции после записи.
+func (s *Service) SetServiceAccount(ctx context.Context, userID int64, service bool) error {
+	if userID == 0 {
+		return ErrNotAuthorized
+	}
+	u, found, err := s.users.ByID(ctx, userID)
+	if err != nil {
+		return err
+	}
+	if !found {
+		return domain.ErrUserNotFound
+	}
+	if err := s.users.SetServiceAccount(ctx, userID, service); err != nil {
+		return err
+	}
+	if !service {
+		s.refreshCachedUsers(ctx, u)
+	}
+	return nil
+}
+
 // SweepExpiredPremium 清理到期会员（store 把过期行清 NULL）并失效用户缓存，
 // 返回清理后的用户，供 RPC 层向本人在线 session 推 updateUser。premium 下发
 // 正确性由读取路径即时派生保证，这里只做收尾与通知。

@@ -15,6 +15,7 @@ type UserStore struct {
 	byID             map[int64]domain.User
 	nextID           int64
 	usernameRegistry *CollectibleUsernameStore
+	serviceAccounts  map[int64]bool
 }
 
 // NewUserStore 创建内存 UserStore。内置系统账号
@@ -340,6 +341,51 @@ func (s *UserStore) SetSupport(_ context.Context, userID int64, support bool) (d
 	u.Support = support
 	s.byID[userID] = u
 	return u, nil
+}
+
+// ServiceAccount читает флаг service_account (миграция 0200): служебные
+// аккаунты и боты — им нельзя дарить подарки (USER_GIFT_UNAVAILABLE /
+// PEER_ID_INVALID), но сами они дарят свободно. Флаг не связан с support.
+func (s *UserStore) ServiceAccount(_ context.Context, userID int64) (bool, error) {
+	if userID <= 0 {
+		return false, nil
+	}
+	s.mu.RLock()
+	if service, ok := s.serviceAccounts[userID]; ok {
+		s.mu.RUnlock()
+		return service, nil
+	}
+	s.mu.RUnlock()
+	// Встроенные служебные ряды (777000, BotFather, боты) — service accounts
+	// по умолчанию, как в postgres-миграции 0200; явное значение из карты
+	// (операторский путь) имеет приоритет.
+	_, isSystem := domain.SystemUserByID(userID)
+	return isSystem, nil
+}
+
+// SetServiceAccount выставляет/снимает флаг service_account. Неизвестный или
+// удалённый id = domain.ErrUserNotFound.
+func (s *UserStore) SetServiceAccount(_ context.Context, userID int64, service bool) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	u, ok := s.byID[userID]
+	if !ok || u.Deleted {
+		return domain.ErrUserNotFound
+	}
+	if s.serviceAccounts == nil {
+		s.serviceAccounts = make(map[int64]bool)
+	}
+	s.serviceAccounts[userID] = service
+	return nil
+}
+
+// HasPrivateChatEver — память не ведёт отдельную историю чатов в UserStore
+// (сообщения живут в MessageStore, диалоги в DialogStore), поэтому правило
+// «знакомства бота» здесь fail-open: считается, что чат был. Точное поведение
+// даёт PostgreSQL; RPC-тесты правила знакомства подставляют собственную
+// заглушку GiftActorRulesStore.
+func (s *UserStore) HasPrivateChatEver(_ context.Context, a, b int64) (bool, error) {
+	return a > 0 && b > 0 && a != b, nil
 }
 
 // SetScamFake 设置/取消用户的 scam 与 fake 标记（与 postgres 语义一致）。

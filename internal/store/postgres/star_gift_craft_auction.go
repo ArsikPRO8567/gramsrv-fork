@@ -1150,14 +1150,19 @@ WHERE gift_id=$1 AND saved_gift_id IS NULL ORDER BY id LIMIT 100`, giftID)
 			var msgID int
 			if owner.Type == domain.PeerTypeUser {
 				sticker := gift.Sticker
+				// Раунд 45: флаг saved следует настройке конфиденциальности
+				// получателя (privacyKeyStarGiftsAutoSave + исключения) — как в
+				// обычной покупке. Само-выигрыш (bidder == owner) всегда
+				// отображается: оценка приватности исключает самоподарки.
+				awardUnsaved := s.recipientUnsavedFn != nil && s.recipientUnsavedFn(item.bidder, owner)
 				action := fillStarGiftSnapshot(&domain.MessageStarGiftAction{GiftID: gift.ID,
 					Stars: item.amount, ConvertStars: 0, Title: gift.Title, Sticker: &sticker, Message: item.message,
 					FromUserID: item.bidder, PeerUserID: owner.ID, NameHidden: item.hide,
 					To: domain.Peer{Type: domain.PeerTypeUser, ID: owner.ID},
-					// Свежий подарок, как и при обычной покупке: Saved=false —
-					// иначе клиент показывает «подарок виден в вашем профиле»
-					// вместо подсказки об улучшении.
-					Saved: false}, gift)
+					// Свежий подарок, как и при обычной покупке: saved повторяет
+					// агрегатный unsaved — иначе клиент показывает состояние
+					// «скрыт из профиля» у получателя с разрешённым авто-показом.
+					Saved: !awardUnsaved}, gift)
 				if freeUpgrade {
 					// Раунд 36 (официальная формула стоимости Gift2Value):
 					// клиент считает стоимость как gift.stars + upgrade_stars.

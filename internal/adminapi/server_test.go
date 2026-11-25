@@ -632,6 +632,10 @@ func (fakeService) SetSupport(_ context.Context, req admin.SetSupportRequest) (a
 	return admin.CommandResult{CommandID: req.CommandID, Status: "completed", DryRun: req.DryRun}, nil
 }
 
+func (fakeService) SetServiceAccount(_ context.Context, req admin.SetServiceAccountRequest) (admin.CommandResult, error) {
+	return admin.CommandResult{CommandID: req.CommandID, Status: "completed", DryRun: req.DryRun}, nil
+}
+
 func (fakeService) GiveGift(_ context.Context, req admin.GiveGiftRequest) (admin.CommandResult, error) {
 	return admin.CommandResult{CommandID: req.CommandID, Status: "completed", DryRun: req.DryRun}, nil
 }

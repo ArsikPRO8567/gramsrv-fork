@@ -236,7 +236,10 @@ func (r *Router) ensureStarGiftRecipientExists(ctx context.Context, buyerUserID 
 	if !found || recipient.ID <= 0 || recipient.Deleted {
 		return userIDInvalidErr()
 	}
-	return nil
+	// Раунд 45: служебные аккаунты (USER_GIFT_UNAVAILABLE) и боты
+	// (PEER_ID_INVALID) не получают подарки; бот-отправитель дарит только
+	// знакомым пользователям.
+	return r.enforceGiftRecipientRules(ctx, buyerUserID, peer)
 }
 
 func validateStarsGiftOption(purpose *tg.InputStorePaymentStarsGift) (tg.StarsGiftOption, error) {
@@ -1092,8 +1095,9 @@ func (r *Router) sendStarGiftToUser(ctx context.Context, senderID, recipientID i
 		}
 		prepaidUpgradeHash = base64.RawURLEncoding.EncodeToString(token[:])
 	}
-	// 2. 投递礼物服务消息到收礼人私聊（双盒 + 推送）。
-	send, err := r.deliverStarGift(ctx, senderID, recipientID, gift, hideName, message, messageEntities, prepaidUpgradeStars, prepaidUpgradeHash)
+	// 2. 投递礼物服务消息到收礼人私聊（双盒 + 推送）。saved-флаг сообщения
+	// следует настройкам конфиденциальности получателя (раунд 45).
+	send, err := r.deliverStarGift(ctx, senderID, recipientID, gift, hideName, message, messageEntities, prepaidUpgradeStars, prepaidUpgradeHash, unsaved)
 	if err != nil {
 		return domain.SavedStarGiftRef{}, nil, err
 	}
@@ -1240,7 +1244,7 @@ func applyStarGiftSnapshot(action *domain.MessageStarGiftAction, gift domain.Sta
 
 // deliverStarGift 经 SendPrivateText 把 messageActionStarGift 服务消息投递到收礼人私聊。
 func (r *Router) deliverStarGift(ctx context.Context, senderID, recipientID int64, gift domain.StarGift, hideName bool,
-	message string, messageEntities []domain.MessageEntity, prepaidUpgradeStars int64, prepaidUpgradeHash string) (domain.SendPrivateTextResult, error) {
+	message string, messageEntities []domain.MessageEntity, prepaidUpgradeStars int64, prepaidUpgradeHash string, recipientUnsaved bool) (domain.SendPrivateTextResult, error) {
 	recipientBlocked, err := r.peerBlocksUser(ctx, senderID, recipientID)
 	if err != nil {
 		return domain.SendPrivateTextResult{}, err
@@ -1275,11 +1279,13 @@ func (r *Router) deliverStarGift(ctx context.Context, senderID, recipientID int6
 				PeerUserID:      recipientID,
 				To:              domain.Peer{Type: domain.PeerTypeUser, ID: recipientID},
 				NameHidden:      hideName,
-				// Свежий подарок ещё не отображается в профиле получателя:
-				// Saved=false — иначе клиент получателя показывает «сейчас
-				// подарок виден в вашем профиле» вместо подсказки об
-				// улучшении до уникального коллекционного.
-				Saved:              false,
+				// Раунд 45: строка «скрыт/показан в профиле» в сервисном сообщении
+				// обязана отражать настройки конфиденциальности получателя
+				// (privacyKeyStarGiftsAutoSave + исключения, starGiftRecipientUnsaved):
+				// авто-показ разрешён → saved=true («подарок отображается в
+				// профиле»), иначе saved=false («скрыт из профиля») — тот же
+				// агрегатный флаг unsaved записывается в peer_star_gifts.
+				Saved:              !recipientUnsaved,
 				CanUpgrade:         canUpgrade,
 				PrepaidUpgradeHash: prepaidUpgradeHash,
 				UpgradePriceStars:  gift.UpgradeStars,

@@ -370,6 +370,68 @@ func (s *UserStore) SetSupport(ctx context.Context, userID int64, support bool) 
 	return userFromModel(row), nil
 }
 
+// ServiceAccount читает флаг service_account (миграция 0200): аккаунты и боты
+// с этим флагом служебные — им нельзя дарить подарки (USER_GIFT_UNAVAILABLE,
+// ботам PEER_ID_INVALID), но сами они свободно дарят подарки всем. Флаг не
+// связан с support: официальная поддержка остаётся обычным получателем
+// подарков. Отсутствие строки = false.
+func (s *UserStore) ServiceAccount(ctx context.Context, userID int64) (bool, error) {
+	if userID <= 0 {
+		return false, nil
+	}
+	var service bool
+	if err := s.db.QueryRow(ctx,
+		`SELECT service_account FROM users WHERE id=$1`, userID).Scan(&service); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return false, nil
+		}
+		return false, fmt.Errorf("read user service_account: %w", err)
+	}
+	return service, nil
+}
+
+// SetServiceAccount выставляет/снимает флаг service_account (миграция 0200).
+// Операторский путь: админ-API set-service-account. Обновлённая проекция
+// инвалидниется вызывающим слоем (админ-сервис уведомляет кэши как SetSupport).
+func (s *UserStore) SetServiceAccount(ctx context.Context, userID int64, service bool) error {
+	tag, err := s.db.Exec(ctx,
+		`UPDATE users SET service_account=$2, updated_at=now() WHERE id=$1`, userID, service)
+	if err != nil {
+		return fmt.Errorf("set user service_account: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return domain.ErrUserNotFound
+	}
+	return nil
+}
+
+// HasPrivateChatEver сообщает, существовал ли когда-либо приватный чат между
+// двумя пользователями: активный диалог любой из сторон ИЛИ хотя бы один бокс
+// сообщения в диалоге этих пиров (включая удалённые строки — «имел когда-то»).
+// Используется правилом раунда 45: бот дарит подарки только тем пользователям,
+// с которыми он знаком. Ошибка чтения пробрасывается вызывающему слою
+// (rpc трактует её как «знакомы», чтобы сбой индекса не блокировал дарение).
+func (s *UserStore) HasPrivateChatEver(ctx context.Context, a, b int64) (bool, error) {
+	if a <= 0 || b <= 0 || a == b {
+		return false, nil
+	}
+	var chatted bool
+	err := s.db.QueryRow(ctx, `
+SELECT EXISTS(
+  SELECT 1 FROM dialogs d
+  WHERE d.peer_type='user'
+    AND ((d.user_id=$1 AND d.peer_id=$2) OR (d.user_id=$2 AND d.peer_id=$1))
+) OR EXISTS(
+  SELECT 1 FROM message_boxes mb
+  WHERE mb.peer_type='user'
+    AND ((mb.owner_user_id=$1 AND mb.peer_id=$2) OR (mb.owner_user_id=$2 AND mb.peer_id=$1))
+)`, a, b).Scan(&chatted)
+	if err != nil {
+		return false, fmt.Errorf("check private chat history %d/%d: %w", a, b, err)
+	}
+	return chatted, nil
+}
+
 // SetScamFake 设置/取消用户的 scam 与 fake 标记（bot 复用同一路径）。
 func (s *UserStore) SetScamFake(ctx context.Context, userID int64, scam, fake bool) (domain.User, error) {
 	if scam && fake {

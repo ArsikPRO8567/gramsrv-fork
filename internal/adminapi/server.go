@@ -51,6 +51,7 @@ type Service interface {
 	DeleteBot(ctx context.Context, req admin.DeleteBotRequest) (admin.CommandResult, error)
 	ExportBotToken(ctx context.Context, req admin.ExportBotTokenRequest) (admin.CommandResult, error)
 	SetSupport(ctx context.Context, req admin.SetSupportRequest) (admin.CommandResult, error)
+	SetServiceAccount(ctx context.Context, req admin.SetServiceAccountRequest) (admin.CommandResult, error)
 	SetUsername(ctx context.Context, req admin.SetUsernameRequest) (admin.CommandResult, error)
 	SetProfile(ctx context.Context, req admin.SetProfileRequest) (admin.CommandResult, error)
 	SetPhone(ctx context.Context, req admin.SetPhoneRequest) (admin.CommandResult, error)
@@ -223,6 +224,7 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("POST /v1/accounts/set-verified", s.authenticated(s.handleSetVerified))
 	mux.HandleFunc("POST /v1/accounts/set-flags", s.authenticated(s.handleSetUserFlags))
 	mux.HandleFunc("POST /v1/accounts/set-support", s.authenticated(s.handleSetSupport))
+	mux.HandleFunc("POST /v1/accounts/set-service-account", s.authenticated(s.handleSetServiceAccount))
 	mux.HandleFunc("POST /v1/accounts/set-username", s.authenticated(s.handleSetUsername))
 	mux.HandleFunc("GET /v1/accounts/{id}/avatar", s.authenticated(s.handleAccountAvatar))
 	mux.HandleFunc("POST /v1/accounts/set-profile", s.authenticated(s.handleSetProfile))
@@ -515,6 +517,18 @@ func (s *Server) handleSetSupport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	result, err := s.svc.SetSupport(r.Context(), req)
+	writeCommandResult(w, result, err)
+}
+
+// handleSetServiceAccount — раунд 45: выставить/снять флаг service_account
+// (миграция 0200): служебные аккаунты и боты не получают подарки, но сами
+// дарят свободно. Флаг не связан с support.
+func (s *Server) handleSetServiceAccount(w http.ResponseWriter, r *http.Request) {
+	var req admin.SetServiceAccountRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	result, err := s.svc.SetServiceAccount(r.Context(), req)
 	writeCommandResult(w, result, err)
 }
 

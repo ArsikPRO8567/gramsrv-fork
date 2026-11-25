@@ -24,9 +24,13 @@ func (r *Router) onPaymentsGetPremiumGiftCodeOptions(
 	if !authorized || userID == 0 {
 		return nil, authKeyUnregisteredErr()
 	}
-	if r.userIsBot(ctx, userID) {
-		return nil, botMethodInvalidErr()
-	}
+	// Раунд 45: боты тоже получают варианты подарочной подписки (официальный
+	// сервер разрешает ботам дарить Premium пользователям), но платят ТОЛЬКО
+	// Telegram Stars: фиатные варианты для бота не отдаются, и инвойс за
+	// валюту бот построить не сможет (resolvePremiumInvoice отбивает
+	// InputInvoicePremiumGiftCode). Формат строки: «currency == "XTR"» —
+	// официальный критерий звёздных опций (corefork api/premium).
+	botCaller := r.userIsBot(ctx, userID)
 	if r.deps.Premium == nil {
 		return []tg.PremiumGiftCodeOption{}, nil
 	}
@@ -47,15 +51,18 @@ func (r *Router) onPaymentsGetPremiumGiftCodeOptions(
 		if !plan.Valid() || !plan.Enabled {
 			continue
 		}
-		fiat := tg.PremiumGiftCodeOption{
-			Users: 1, Months: plan.Months,
-			Currency: plan.EffectiveFiatCurrency(), Amount: plan.EffectiveFiatAmount(),
+		if !botCaller {
+			fiat := tg.PremiumGiftCodeOption{
+				Users: 1, Months: plan.Months,
+				Currency: plan.EffectiveFiatCurrency(), Amount: plan.EffectiveFiatAmount(),
+			}
+			if plan.StoreProduct != "" {
+				fiat.SetStoreProduct(plan.StoreProduct)
+				fiat.SetStoreQuantity(plan.StoreQuantity)
+			}
+			out = append(out, fiat)
 		}
-		if plan.StoreProduct != "" {
-			fiat.SetStoreProduct(plan.StoreProduct)
-			fiat.SetStoreQuantity(plan.StoreQuantity)
-		}
-		out = append(out, fiat, tg.PremiumGiftCodeOption{
+		out = append(out, tg.PremiumGiftCodeOption{
 			Users:    1,
 			Months:   plan.Months,
 			Currency: domain.PremiumCurrencyStars,
@@ -208,6 +215,13 @@ func (r *Router) resolvePremiumInvoice(
 		if invoice == nil || r.deps.Premium == nil {
 			return domain.PremiumInvoice{}, tgerr.New(400, "PREMIUM_GIFT_CODE_INVALID")
 		}
+		// Раунд 45: ботам доступен только звёздный канал оплаты подарочной
+		// подписки (inputInvoicePremiumGiftStars). Фиатный инвойс за валюту
+		// бот построить не может — PAYMENT_UNSUPPORTED, как и на официальном
+		// сервере для неподдерживаемого способа оплаты.
+		if r.userIsBot(ctx, userID) {
+			return domain.PremiumInvoice{}, tgerr.New(400, "PAYMENT_UNSUPPORTED")
+		}
 		purpose, ok := invoice.Purpose.(*tg.InputStorePaymentPremiumGiftCode)
 		if !ok || purpose == nil || purpose.BoostPeer != nil || len(purpose.Users) != 1 ||
 			invoice.Option.Users != 1 || invoice.Option.Months <= 0 {
@@ -223,6 +237,11 @@ func (r *Router) resolvePremiumInvoice(
 				return domain.PremiumInvoice{}, tgerr.New(400, "PREMIUM_GIFT_SELF_INVALID")
 			}
 			return domain.PremiumInvoice{}, userIDInvalidErr()
+		}
+		// Раунд 45: подарочная подписка — подарочное действие в отношении
+		// получателя: служебные аккаунты недоступны, бот дарит только знакомым.
+		if err := r.enforceGiftRecipientRules(ctx, userID, domain.Peer{Type: domain.PeerTypeUser, ID: recipient.ID}); err != nil {
+			return domain.PremiumInvoice{}, err
 		}
 		if restricted, err := r.premiumGiftsRestricted(ctx, recipient.ID); err != nil {
 			return domain.PremiumInvoice{}, internalErr()
@@ -271,6 +290,12 @@ func (r *Router) resolvePremiumInvoice(
 				return domain.PremiumInvoice{}, tgerr.New(400, "PREMIUM_GIFT_SELF_INVALID")
 			}
 			return domain.PremiumInvoice{}, userIDInvalidErr()
+		}
+		// Раунд 45: подарочная подписка за звёзды — подарочное действие в
+		// отношении получателя: служебные аккаунты недоступны, бот дарит
+		// только знакомым пользователям.
+		if err := r.enforceGiftRecipientRules(ctx, userID, domain.Peer{Type: domain.PeerTypeUser, ID: recipient.ID}); err != nil {
+			return domain.PremiumInvoice{}, err
 		}
 		if restricted, err := r.premiumGiftsRestricted(ctx, recipient.ID); err != nil {
 			return domain.PremiumInvoice{}, internalErr()

@@ -90,11 +90,13 @@ func TestStarGiftLifecycleAggregatePostgres(t *testing.T) {
 	ordinaryAction := purchased.Send.RecipientMessage.Media.ServiceAction.StarGift
 	if ordinaryAction == nil || !ordinaryAction.CanUpgrade || ordinaryAction.PrepaidUpgrade ||
 		ordinaryAction.UpgradePriceStars != 100 || ordinaryAction.UpgradeStars != 0 ||
-		ordinaryAction.PrepaidUpgradeHash != "" || ordinaryAction.Saved {
+		ordinaryAction.PrepaidUpgradeHash != "" || !ordinaryAction.Saved {
+		// Раунд 45: saved повторяет агрегатный unsaved (RecipientUnsaved=false в
+		// прямом тесте → подарок отображается в профиле, saved=true).
 		t.Fatalf("ordinary purchase action mixed paid price with prepaid amount: %+v", ordinaryAction)
 	}
 	senderOrdinaryAction := purchased.Send.SenderMessage.Media.ServiceAction.StarGift
-	if senderOrdinaryAction == nil || !senderOrdinaryAction.CanUpgrade || senderOrdinaryAction.Saved ||
+	if senderOrdinaryAction == nil || !senderOrdinaryAction.CanUpgrade || !senderOrdinaryAction.Saved ||
 		senderOrdinaryAction.PrepaidUpgradeHash != purchased.Saved.PrepaidUpgradeHash {
 		t.Fatalf("ordinary sender purchase projection = %+v", senderOrdinaryAction)
 	}
@@ -166,22 +168,25 @@ WHERE owner_user_id=$1 AND msg_id=$2`, prepayPayer.ID, prepaid.Send.SenderMessag
 	if ownerPrepayAlias != 1 || payerPrepayAlias != 0 {
 		t.Fatalf("prepay aliases owner=%d payer=%d, want owner-only", ownerPrepayAlias, payerPrepayAlias)
 	}
-	// Раунд 43: официальная wire-форма предоплаты. ИСХОДНОЕ сообщение о подарке
-	// (обе копии) после предоплаты: подпись «отправил подарок» с исходной ценой
-	// (prepaid_upgrade НЕ выставляется, upgrade_separate=true не даёт клиенту
-	// сложить цены), конвертация заблокирована (convert_stars=0), улучшение
-	// бесплатно (upgrade_stars=сумма предоплаты).
-	// Раунд 44: отдельное уведомление об улучшении показывает СУММАРНУЮ цену
-	// «подарок + улучшение» — все клиенты считают подпись prepaid-сообщения
-	// из action.upgrade_stars (MessageObject/prepareStarGift), поэтому сумма
-	// кладётся туда (50 + 100 = 150), а gift.stars обнуляется: строка
-	// «Стоимость» в шторке считается как gift.stars + upgrade_stars, ноль не
-	// даёт задвоить сумму.
+	// Раунд 45: цена исходного сообщения о подарке закрепляется НАВСЕГДА.
+	// ИСХОДНОЕ сообщение (обе копии) после предоплаты: подпись «отправил
+	// подарок» с исходной ценой (prepaid_upgrade НЕ выставляется,
+	// upgrade_stars=0 и upgrade_separate=false — клиентская формула
+	// gift.stars + upgrade_stars даёт ровно исходную цену), конвертация
+	// заблокирована (convert_stars=0). Бесплатность улучшения обеспечивается
+	// агрегатным entitlement prepaid_upgrade_stars>0 и нулевой ценой формы
+	// улучшения (раунд 43), а не внешним upgrade_stars.
+	// Раунд 45: отдельное уведомление об улучшении показывает УВЕЛИЧЕННУЮ
+	// цену «подарок + улучшение»: клиентская формула строки цены —
+	// gift.stars + action.upgrade_stars (строка скрыта при gift.stars==0),
+	// поэтому gift.stars = цена подарка (50), upgrade_stars = цена улучшения
+	// (100), сумма 150 видна; подпись «отправил улучшение стоимостью X» при
+	// prepaid_upgrade=true считается клиентом из upgrade_stars (дамп 183490).
 	for _, box := range []struct {
 		name string
 		uid  int64
 		msg  int
-	}{ {"owner", owner.ID, purchased.Send.RecipientMessage.ID}, {"sender", buyer.ID, purchased.Send.SenderMessage.ID} } {
+	}{{"owner", owner.ID, purchased.Send.RecipientMessage.ID}, {"sender", buyer.ID, purchased.Send.SenderMessage.ID}} {
 		var sourceMediaJSON string
 		if err := pool.QueryRow(ctx, `SELECT media::text FROM message_boxes
 WHERE owner_user_id=$1 AND box_id=$2 AND NOT deleted`, box.uid, box.msg).Scan(&sourceMediaJSON); err != nil {
@@ -192,9 +197,9 @@ WHERE owner_user_id=$1 AND box_id=$2 AND NOT deleted`, box.uid, box.msg).Scan(&s
 			t.Fatalf("decode prepaid source media (%s): media=%+v err=%v", box.name, sourceMedia, err)
 		}
 		action := sourceMedia.ServiceAction.StarGift
-		if action.PrepaidUpgrade || !action.UpgradeSeparate || action.UpgradeStars != 100 ||
+		if action.PrepaidUpgrade || action.UpgradeSeparate || action.UpgradeStars != 0 ||
 			action.ConvertStars != 0 || action.PrepaidUpgradeHash != "" || !action.CanUpgrade {
-			t.Fatalf("prepaid source action (%s) = %+v, want {no prepaid_upgrade, upgrade_separate, upgrade_stars=100, convert_stars=0}", box.name, action)
+			t.Fatalf("prepaid source action (%s) = %+v, want {no prepaid_upgrade, no upgrade_separate, upgrade_stars=0, convert_stars=0}", box.name, action)
 		}
 		if action.Stars != 50 {
 			t.Fatalf("prepaid source gift price (%s) = %d, want original 50", box.name, action.Stars)
@@ -202,9 +207,9 @@ WHERE owner_user_id=$1 AND box_id=$2 AND NOT deleted`, box.uid, box.msg).Scan(&s
 	}
 	prepayNotificationMedia := prepaid.Send.RecipientMessage.Media.ServiceAction.StarGift
 	if prepayNotificationMedia == nil || !prepayNotificationMedia.PrepaidUpgrade || !prepayNotificationMedia.UpgradeSeparate ||
-		prepayNotificationMedia.UpgradeStars != 150 || prepayNotificationMedia.ConvertStars != 0 ||
-		prepayNotificationMedia.Stars != 0 {
-		t.Fatalf("prepay notification action = %+v, want prepaid caption priced from upgrade_stars=150 (gift 50 + upgrade 100) with gift.stars=0", prepayNotificationMedia)
+		prepayNotificationMedia.UpgradeStars != 100 || prepayNotificationMedia.ConvertStars != 0 ||
+		prepayNotificationMedia.Stars != 50 {
+		t.Fatalf("prepay notification action = %+v, want prepaid caption with increased total price (gift.stars=50 + upgrade_stars=100 = 150)", prepayNotificationMedia)
 	}
 	upgradeReq := domain.StarGiftUpgradeRequest{
 		UserID: owner.ID, Ref: domain.SavedStarGiftRef{Owner: ownerPeer, MsgID: prepaid.Send.RecipientMessage.ID},
@@ -287,22 +292,23 @@ WHERE owner_user_id=$1 AND box_id=$2 AND NOT deleted`, box.uid, box.msg).Scan(&s
 		ownerPrepayEdit.Message.Media.ServiceAction.StarGift.UpgradeMsgID != upgraded.Send.SenderMessage.ID {
 		t.Fatalf("owner prepay card did not converge with upgrade: %+v", ownerPrepayEdit)
 	}
-	// Раунд 44: выполнение улучшения НЕ меняет отображаемые цены. Уведомление
-	// о предоплате сохраняет prepaid_upgrade + upgrade_separate, подпись
-	// считается клиентом из upgrade_stars = 150 (подарок 50 + улучшение 100);
-	// gift.stars остаётся нулевым (строка «Стоимость» шторки не задваивается).
+	// Раунд 45: выполнение улучшения НЕ меняет отображаемые цены. Уведомление
+	// о предоплате сохраняет prepaid_upgrade + upgrade_separate: подпись
+	// «отправил улучшение стоимостью 100» и цена «подарок + улучшение»
+	// (50 + 100 = 150) остаются навсегда.
 	ownerPrepayAction := ownerPrepayEdit.Message.Media.ServiceAction.StarGift
 	if !ownerPrepayAction.PrepaidUpgrade || !ownerPrepayAction.UpgradeSeparate ||
-		ownerPrepayAction.UpgradeStars != 150 || ownerPrepayAction.Stars != 0 || ownerPrepayAction.ConvertStars != 0 {
-		t.Fatalf("owner prepay caption prices changed by upgrade: %+v (want prepaid caption upgrade_stars=150, gift.stars=0)", ownerPrepayAction)
+		ownerPrepayAction.UpgradeStars != 100 || ownerPrepayAction.Stars != 50 || ownerPrepayAction.ConvertStars != 0 {
+		t.Fatalf("owner prepay caption prices changed by upgrade: %+v (want prepaid caption upgrade_stars=100, gift.stars=50)", ownerPrepayAction)
 	}
-	// Исходное сообщение: upgrade_separate сохраняется — подпись остаётся
-	// «отправил подарок» с исходной ценой подарка (50), без прибавления
-	// цены улучшения после выполнения апгрейда.
+	// Исходное сообщение: цена закреплена навсегда — upgrade_stars=0,
+	// upgrade_separate=false, подпись остаётся «отправил подарок» с исходной
+	// ценой подарка (50), без прибавления цены улучшения после выполнения
+	// апгрейда.
 	ownerSourceAction := ownerSourceEdit.Message.Media.ServiceAction.StarGift
-	if ownerSourceAction.PrepaidUpgrade || !ownerSourceAction.UpgradeSeparate ||
-		ownerSourceAction.Stars != 50 || ownerSourceAction.UpgradeStars != 100 || ownerSourceAction.ConvertStars != 0 {
-		t.Fatalf("owner source caption prices changed by upgrade: %+v (want original gift price 50, upgrade_separate kept)", ownerSourceAction)
+	if ownerSourceAction.PrepaidUpgrade || ownerSourceAction.UpgradeSeparate ||
+		ownerSourceAction.Stars != 50 || ownerSourceAction.UpgradeStars != 0 || ownerSourceAction.ConvertStars != 0 {
+		t.Fatalf("owner source caption prices changed by upgrade: %+v (want original gift price 50, upgrade_stars=0)", ownerSourceAction)
 	}
 	if payerPrepayEdit.Event.Pts <= prepaid.Send.SenderMessage.Pts || payerPrepayEdit.Message.Media == nil ||
 		payerPrepayEdit.Message.Media.ServiceAction == nil || payerPrepayEdit.Message.Media.ServiceAction.StarGift == nil ||

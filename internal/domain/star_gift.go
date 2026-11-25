@@ -882,6 +882,12 @@ type StarGiftResolveOfferRequest struct {
 	Date            int
 	OriginAuthKeyID [8]byte
 	OriginSessionID int64
+	// RecipientUnsavedFor — раунд 45: вычисляет флаг «не отображать в профиле
+	// получателя» для покупателя, принявшего оффер (settings конфиденциальности
+	// получателя privacyKeyStarGiftsAutoSave + исключения). Идентификатор
+	// покупателя становится известен только после загрузки оффера, поэтому
+	// RPC передаёт функцию оценки вместо готового значения. nil = показывать.
+	RecipientUnsavedFor func(buyerUserID int64) bool
 }
 
 type StarGiftCraftRequest struct {

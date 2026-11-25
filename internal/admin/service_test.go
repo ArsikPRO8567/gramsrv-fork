@@ -767,10 +767,11 @@ func (f *fakeRevoker) RevokeAuthorizationAuthKey(_ context.Context, key [8]byte,
 }
 
 type fakeUsersService struct {
-	users         map[int64]domain.User
-	grantCalls    int
-	lastMonths    int
-	verifiedCalls int
+	users           map[int64]domain.User
+	grantCalls      int
+	lastMonths      int
+	verifiedCalls   int
+	serviceAccounts map[int64]bool
 }
 
 func (f *fakeUsersService) AdminUser(_ context.Context, userID int64) (domain.User, bool, error) {
@@ -827,6 +828,26 @@ func (f *fakeUsersService) SetSupport(_ context.Context, userID int64, support b
 	u.Support = support
 	f.users[userID] = u
 	return u, nil
+}
+
+func (f *fakeUsersService) ServiceAccount(_ context.Context, userID int64) (bool, error) {
+	_, ok := f.users[userID]
+	if !ok {
+		return false, domain.ErrUserNotFound
+	}
+	return f.serviceAccounts[userID], nil
+}
+
+func (f *fakeUsersService) SetServiceAccount(_ context.Context, userID int64, service bool) error {
+	_, ok := f.users[userID]
+	if !ok {
+		return domain.ErrUserNotFound
+	}
+	if f.serviceAccounts == nil {
+		f.serviceAccounts = make(map[int64]bool)
+	}
+	f.serviceAccounts[userID] = service
+	return nil
 }
 
 func (f *fakeUsersService) UpdateUsername(_ context.Context, userID int64, username string) (domain.User, error) {

@@ -221,11 +221,12 @@ func (s *StarGiftLifecycleStore) PurchaseStarGift(ctx context.Context, req domai
 					PeerUserID:      req.To.ID,
 					To:              req.To,
 					NameHidden:      req.HideName,
-					// Свежий подарок ещё не отображается в профиле получателя:
-					// Saved=false — иначе клиент получателя показывает «сейчас
-					// подарок виден в вашем профиле» вместо подсказки об
-					// улучшении до уникального коллекционного.
-					Saved:              false,
+					// Раунд 45: строка «скрыт/показан в профиле» сервисного
+					// сообщения следует настройкам конфиденциальности получателя
+					// (privacyKeyStarGiftsAutoSave + исключения): RPC кладёт
+					// оценку в RecipientUnsaved, агрегатный unsaved записывается
+					// тем же значением — сообщение и сетка профиля согласованы.
+					Saved:              !req.RecipientUnsaved,
 					CanUpgrade:         canUpgrade,
 					PrepaidUpgradeHash: saved.PrepaidUpgradeHash,
 					UpgradePriceStars:  gift.UpgradeStars,
