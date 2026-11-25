@@ -66,10 +66,6 @@ type StarsPurchaseForm struct {
         Amount           int64
         IssuedAt         int
         ExpiresAt        int
-        // Acquisition (раунд 31) — канал приобретения пополнения, выбирается по
-        // платформе сессии покупателя и персистится в purpose_json формы: settlement
-        // записывает транзакцию начисления с reason выбранного канала.
-        Acquisition StarsTopupAcquisition
 }
 
 // StarsPurchaseRequest is the immutable settlement command carried by
@@ -127,12 +123,9 @@ const (
         StarsReasonSuggestedPost StarsTransactionReason = "suggested_post"
         StarsReasonPremium       StarsTransactionReason = "premium"
         StarsReasonAdjust        StarsTransactionReason = "adjust" // 兜底/人工调整
-        // Раунд 31: каналы приобретения пополнения — официальный клиент
-        // локализует начисление по типу peer в starsTransaction (Fragment /
-        // App Store / Google Play / PremiumBot).
-        StarsReasonTopupAppStore   StarsTransactionReason = "topup_appstore"
-        StarsReasonTopupPlayMarket StarsTransactionReason = "topup_playmarket"
-        StarsReasonTopupBot        StarsTransactionReason = "topup_bot"
+        // StarsReasonAds — реклама（广告）：官方服务器用该类型承载广告平台的
+        // 收入/支出流水（tg 侧对手方为 starsTransactionPeerAds）。
+        StarsReasonAds StarsTransactionReason = "ads"
 )
 
 // StarsTransaction 是一条账本流水。amount 带符号：贷记 > 0（含收取），借记 < 0。
@@ -152,15 +145,12 @@ type StarsTransaction struct {
         Refunded        bool  // starsTransaction.refund：资金已退回（与方向无关）
         GiftID          int64 // 关联礼物（目录礼物 id 或唯一礼物 id）
         GiftIsUnique    bool  // GiftID 是否为 unique_star_gifts.id
-}
-
-// PaidMessagesRefund — результат account.toggleNoPaidMessagesException
-// (refund_charged=true): непогашенные проводки платных сообщений помечаются
-// refunded, балансы обеих сторон корректируются в одной транзакции.
-type PaidMessagesRefund struct {
-        Refunded   int64 // возвращено плательщику (брутто — столько он заплатил)
-        ClawedBack int64 // списано с получателя (фактически удержано; клампится к остатку)
-        Charges    int   // число погашенных платежей
+        // Processing/Failed 是产品侧（продуктивный сервер）的两个状态标志，与
+        // refund 一样独立于方向：processing 标记资金的提现/入账在途，failed
+        // 标记与第三方资源集成失败。二者不进 tg 投影（官方 schema 无对应
+        // 字段），只落库供账务/集成消费。
+        Processing bool // «В обработке»: вывод/зачисление средств в пути
+        Failed     bool // «Ошибка»: интеграция со сторонним ресурсом завершилась ошибкой
 }
 
 // IsCredit 报告该流水是否为入账（贷记）。
@@ -181,57 +171,8 @@ type StarsLedgerFlags struct {
         GiftID       int64 // 关联礼物；0 = 无礼物载荷
         GiftIsUnique bool  // GiftID 指向 unique_star_gifts.id（否则为目录礼物）
         Refunded     bool  // starsTransaction.refund
-        // TransactionID — явно заданный публичный идентификатор транзакции
-        // (проблема C): парный перевод «аккаунт -> аккаунт» пишет дебет и кредит
-        // с ОДНИМ id, чтобы клиент показывал обе стороны как одну операцию.
-        // Пусто — идентификатор генерируется при записи.
-        TransactionID string
-}
-
-// StarsPeerTransferRequest описывает атомарный парный перевод Stars между
-// аккаунтами (платные сообщения, компенсации): списание у отправителя и
-// зачисление получателю в одной транзакции, обе строки с одним публичным
-// transaction_id.
-type StarsPeerTransferRequest struct {
-        SenderUserID    int64
-        RecipientUserID int64
-        Amount          int64 // > 0; знак строк леджера проставляет store
-        Reason          StarsTransactionReason
-        Date            int // Unix секунды
-}
-
-// StarsPeerTransferResult возвращает публичный transaction_id, общий для
-// обеих строк леджера перевода (или его компенсации).
-type StarsPeerTransferResult struct {
-        TransactionID string
-}
-
-// StarsTopupAcquisition — канал приобретения звёзд (раунд 31): официальный
-// клиент рисует counterparts StarsTransactionPeerFragment (Fragment),
-// StarsTransactionPeerAppStore / PlayMarket (магазин приложения) и
-// StarsTransactionPeerPremiumBot («бот для покупки звёзд») по типу peer.
-type StarsTopupAcquisition string
-
-const (
-        StarsTopupFragment   StarsTopupAcquisition = "fragment"
-        StarsTopupAppStore   StarsTopupAcquisition = "appstore"
-        StarsTopupPlayMarket StarsTopupAcquisition = "playmarket"
-        StarsTopupBot        StarsTopupAcquisition = "bot"
-)
-
-// StarsTopupReason — reason транзакции начисления для канала приобретения;
-// неизвестные значения откатываются к Fragment-начислению (topup).
-func (a StarsTopupAcquisition) StarsTopupReason() StarsTransactionReason {
-        switch a {
-        case StarsTopupAppStore:
-                return StarsReasonTopupAppStore
-        case StarsTopupPlayMarket:
-                return StarsReasonTopupPlayMarket
-        case StarsTopupBot:
-                return StarsReasonTopupBot
-        default:
-                return StarsReasonTopup
-        }
+        Processing   bool  // «В обработке»（продуктивный сервер）
+        Failed       bool  // «Ошибка»（продуктивный сервер）
 }
 
 // NewStarsTransactionID 生成官方形状的公开交易 ID：前缀 + 60 位 [A-Za-z0-9]
@@ -331,6 +272,8 @@ type TonTransaction struct {
         Title         string
         Description   string
         Refunded      bool // starsTransaction.refund：资金已退回
+        Processing    bool // «В обработке»（продуктивный сервер）
+        Failed        bool // «Ошибка»（продуктивный сервер）
 }
 
 // PublicID 返回客户端可见的交易 ID（与 StarsTransaction.PublicID 同规则）。
@@ -356,11 +299,6 @@ const (
         MaxStarsTransactionsLimit = 100
         // MaxStarsTransactionsOffsetBytes 是 keyset 游标字符串长度上限。
         MaxStarsTransactionsOffsetBytes = 64
-        // DefaultPaidMessageCommissionPermille — stars_paid_message_commission_permille
-        // 的服务器默认值：付费消息接收者收到 amount*permille/1000（850‰ = 85%，
-        // 余下 15% 为服务器佣金）。可用 TELESRV_STARS_PAID_MESSAGE_COMMISSION_PERMILLE
-        // 覆盖；0/越界值回落到该默认值（раунд 42）。
-        DefaultPaidMessageCommissionPermille = 850
 )
 
 // Stars 账本哨兵错误（rpc 层 errors.Is 匹配后映射为 tgerr，仿 ErrPremiumRequired）。
