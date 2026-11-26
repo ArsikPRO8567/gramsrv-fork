@@ -19,64 +19,16 @@ import (
 // обе копии логического сообщения и доставлять durable edit-событие —
 // иначе кнопка в сервисном сообщении «работает», а её состояние и подписи
 // не обновляются.
-
-// editStarGiftSavedFlagTx переписывает флаг saved во ВСЕХ живых проекциях
-// сервисных сообщений одного агрегата peer_star_gifts: исходное сообщение
-// messageActionStarGift, отдельное уведомление о предоплате улучшения
-// (upgrade_separate) и messageActionStarGiftUnique для уникальных подарков.
-// После payments.saveStarGift обе копии логического сообщения (владелец и
-// отправитель) видят актуальное состояние кнопки «показать/скрыть в
-// профиле». Каждому видимому боксу выдаётся собственный pts и durable
-// edit-event — как при конвертации (editConvertedStarGiftMessagesTx).
-func (s *StarGiftLifecycleStore) editStarGiftSavedFlagTx(
-	ctx context.Context,
-	tx pgx.Tx,
-	saved domain.SavedStarGift,
-	unsaved bool,
-	date int,
-	actorUserID int64,
-) error {
-	if s == nil || s.messages == nil || date <= 0 || saved.ID <= 0 {
-		return nil
-	}
-	if saved.Owner.Type == domain.PeerTypeUser {
-		if saved.Owner.ID <= 0 {
-			return nil
-		}
-		return editStarGiftUserMessageFlagsTx(ctx, tx, s.messages, saved.Owner.ID, saved.ID, saved, date,
-			func(starGift *domain.MessageStarGiftAction, unique *domain.MessageStarGiftUniqueAction) {
-				if starGift != nil {
-					starGift.Saved = !unsaved
-				}
-				if unique != nil {
-					unique.Saved = !unsaved
-				}
-			}, actorUserID)
-	}
-	if saved.Owner.Type == domain.PeerTypeChannel && saved.Owner.ID > 0 {
-		// Канальные подарки: флаг saved живёт в «Telegram»-уведомлениях
-		// владельцу/админам, зарегистрированных в star_gift_user_message_refs.
-		viewers, err := starGiftRefViewers(ctx, tx, saved.ID)
-		if err != nil {
-			return err
-		}
-		for _, viewer := range viewers {
-			if err := editStarGiftUserMessageFlagsTx(ctx, tx, s.messages, viewer.userID, saved.ID, saved, date,
-				func(starGift *domain.MessageStarGiftAction, unique *domain.MessageStarGiftUniqueAction) {
-					if starGift != nil {
-						starGift.Saved = !unsaved
-					}
-					if unique != nil {
-						unique.Saved = !unsaved
-					}
-				}, actorUserID); err != nil {
-				return err
-			}
-		}
-	}
-	return nil
-}
-
+//
+// Раунд 47 (задача ①): ИСКЛЮЧЕНИЕ для флага saved. Официальный Android-клиент
+// (ChatActionCell, ветка входящего подарка) по saved=true меняет главную
+// подпись-плейсхолдер блока на «Вы добавили подарок в свой профиль»
+// (Gift2ActionSavedInfo). Требование раунда 47: главная подпись-плейсхолдер
+// НЕ меняется НИЗАВИСИМО от статуса отображения подарка в профиле — ни при
+// ручном добавлении (payments.saveStarGift), ни при скрытии. Поэтому toggle
+// больше не переписывает saved в сервисных сообщениях: состояние отображения
+// живёт только в peer_star_gifts.unsaved (сетка профиля читает его через
+// payments.getSavedStarGifts). Исторические строки нормализует миграция 0202.
 type starGiftRefViewer struct {
 	userID int64
 	msgID  int
@@ -272,10 +224,12 @@ func containsStarGiftRefMsg(refs []starGiftRefViewer, msgID int) bool {
 	return false
 }
 
-// ToggleStarGiftSaved — агрегат payments.saveStarGift: состояние unsaved
-// peer_star_gifts (с переносом pinned_order при скрытии) и флаг saved во всех
-// сервисных сообщениях агрегата обновляются одной транзакцией. Официальные
-// клиенты перерисовывают кнопки «показать/скрыть в профиле» из edit-события.
+// ToggleStarGiftSaved — агрегат payments.saveStarGift: одной транзакцией
+// обновляется состояние unsaved peer_star_gifts (с переносом pinned_order при
+// скрытии). Раунд 47 (задача ①): флаг saved в сервисных сообщениях больше НЕ
+// переписывается — главная подпись-плейсхолдер блока подарка не должна
+// меняться от статуса отображения; профильные списки и шторка подарка читают
+// актуальное состояние из peer_star_gifts (payments.getSavedStarGifts).
 func (s *StarGiftLifecycleStore) ToggleStarGiftSaved(ctx context.Context, req domain.StarGiftSavedToggleRequest) (domain.SavedStarGift, bool, error) {
 	if s == nil || s.db == nil || s.messages == nil || req.ActorUserID <= 0 || !req.Ref.Valid() || req.Date <= 0 {
 		return domain.SavedStarGift{}, false, domain.ErrStarGiftNotFound
@@ -320,9 +274,10 @@ WHERE owner_peer_type=$1 AND owner_peer_id=$2 AND pinned_order=$3`, string(req.R
 		if err != nil {
 			return err
 		}
-		if err := s.editStarGiftSavedFlagTx(ctx, tx, locked, req.Unsaved, req.Date, req.ActorUserID); err != nil {
-			return err
-		}
+		// Раунд 47 (задача ①): saved в сообщениях не переписывается и edit-события
+		// не рассылаются — клиент не должен перерисовывать главную подпись блока
+		// при переключении отображения (уникальные подарки тоже: их подписи от
+		// saved не зависят, состояние сетки читается из peer_star_gifts).
 		locked.Unsaved = req.Unsaved
 		if req.Unsaved {
 			locked.PinnedOrder = 0

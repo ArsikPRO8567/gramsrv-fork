@@ -668,7 +668,24 @@ func tgChannelFull(view domain.ChannelView, publicBaseURL ...string) *tg.Channel
         if ch.Broadcast && !ch.Megagroup && ch.ReactionPolicy.PaidEnabled {
                 full.SetPaidReactionsAvailable(true)
         }
+        // Раунд 47 (вкладки балансов): can_view_stars_revenue / can_view_revenue
+        // открывают клиентский экран баланса Stars/TON (StatisticActivity →
+        // ChannelMonetizationLayout, строка «Balance» в профиле канала и группы).
+        // Правило совпадает с checkStarGiftOwnerPermission (создатель или админ
+        // с правом PostMessages), чтобы вкладка никогда не открывалась тому,
+        // кому леджер ответит CHAT_ADMIN_REQUIRED.
+        if canManageChannelStarsLedger(view.Self) {
+                full.CanViewRevenue = true
+                full.CanViewStarsRevenue = true
+        }
         return full
+}
+
+// canManageChannelStarsLedger повторяет правило доступа к канальному
+// Stars/TON леджеру из checkStarGiftOwnerPermission.
+func canManageChannelStarsLedger(member domain.ChannelMember) bool {
+        return member.Role == domain.ChannelRoleCreator ||
+                (member.Role == domain.ChannelRoleAdmin && member.AdminRights.PostMessages)
 }
 
 func channelMemberIsAdmin(member domain.ChannelMember) bool {

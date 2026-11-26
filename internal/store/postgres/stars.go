@@ -38,6 +38,21 @@ func (s *StarsStore) GetBalance(ctx context.Context, userID int64) (domain.Stars
         return bal, nil
 }
 
+// TotalReceived возвращает «Всего поступлений» (раунд 47, статистика
+// пополнения баланса): сумму всех кредитных проводок личного Stars-леджера
+// (amount>0) за всё время. Гросс-поступления — без вычета списаний.
+func (s *StarsStore) TotalReceived(ctx context.Context, userID int64) (int64, error) {
+        if userID == 0 {
+                return 0, nil
+        }
+        var total int64
+        if err := s.db.QueryRow(ctx, `SELECT COALESCE(SUM(amount),0) FROM stars_transactions WHERE user_id = $1 AND amount > 0`, userID).
+                Scan(&total); err != nil {
+                return 0, fmt.Errorf("sum stars received: %w", err)
+        }
+        return total, nil
+}
+
 func (s *StarsStore) EnsureGrant(ctx context.Context, userID, amount int64, date int) (domain.StarsBalance, bool, error) {
         if userID == 0 {
                 return domain.StarsBalance{}, false, nil

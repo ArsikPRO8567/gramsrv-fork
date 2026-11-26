@@ -195,9 +195,15 @@ func (r *Router) onPaymentsAssignPlayMarketTransaction(ctx context.Context, _ *t
 }
 
 // onPaymentsGetStarsRevenueStats exposes real channel Star Gift proceeds from
-// the same peer-scoped ledger as getStarsStatus/getStarsTransactions. Personal
-// and bot revenue remain the bounded compatibility response because their
-// revenue bucket is distinct from the general Stars balance and is not modeled.
+// the same peer-scoped ledger as getStarsStatus/getStarsTransactions.
+//
+// Раунд 47 (статистика пополнения баланса): для ЛИЧНЫХ балансов (свой аккаунт,
+// включая сессию бота) и для БОТОВ (их Stars/TON баланс — публичный экран
+// BotStarsActivity, клиент запрашивает его с пира бота) сервер отдаёт
+// реальные числа: «Общий баланс» (current_balance), «Всего поступлений»
+// (overall_revenue — сумма кредитных проводок за всё время) и
+// «Доступно для вывода» (available_balance; вывод ещё не имплементирован —
+// строка остаётся нулевой, WithdrawalEnabled=false, как и раньше).
 func (r *Router) onPaymentsGetStarsRevenueStats(ctx context.Context, req *tg.PaymentsGetStarsRevenueStatsRequest) (*tg.PaymentsStarsRevenueStats, error) {
         userID, _, err := r.currentUserID(ctx)
         if err != nil {
@@ -212,7 +218,7 @@ func (r *Router) onPaymentsGetStarsRevenueStats(ctx context.Context, req *tg.Pay
         }
         ton := req.GetTon()
         if owner.Type != domain.PeerTypeChannel {
-                return tdesktop.StarsRevenueStats(ton), nil
+                return r.personalStarsRevenueStats(ctx, userID, owner, ton), nil
         }
         if err := r.checkStarGiftOwnerPermission(ctx, userID, owner); err != nil {
                 return nil, err
@@ -242,6 +248,68 @@ func (r *Router) onPaymentsGetStarsRevenueStats(ctx context.Context, req *tg.Pay
         stats.Status.AvailableBalance = amount
         stats.Status.OverallRevenue = amount
         return stats, nil
+}
+
+// personalStarsRevenueStats строит статистику пополнения личного баланса
+// Stars/TON (раунд 47): current_balance = текущий остаток леджера,
+// overall_revenue = «Всего поступлений» (гросс-сумма кредитных проводок),
+// available_balance = 0 (вывод будет имплементирован позже — строку сервер
+// пока не меняет), WithdrawalEnabled=false. Реальные числа отдаются самому
+// запрашивающему аккаунту и ботам (публичный экран баланса бота, как на
+// оригинальном сервере); прочие чужие пользователи продолжают получать
+// нейтральный bounded-ответ (приватность личного баланса).
+func (r *Router) personalStarsRevenueStats(ctx context.Context, callerUserID int64, owner domain.Peer, ton bool) *tg.PaymentsStarsRevenueStats {
+        stats := tdesktop.StarsRevenueStats(ton)
+        if owner.Type != domain.PeerTypeUser || owner.ID <= 0 {
+                return stats
+        }
+        if owner.ID != callerUserID {
+                if r.deps.Users == nil {
+                        return stats
+                }
+                target, found, err := r.deps.Users.ByID(ctx, callerUserID, owner.ID)
+                if err != nil || !found || !target.Bot {
+                        return stats
+                }
+        }
+        if ton {
+                if r.deps.Gifts == nil {
+                        return stats
+                }
+                balance, err := r.deps.Gifts.TonBalance(ctx, owner.ID)
+                if err != nil {
+                        return stats
+                }
+                stats.Status.CurrentBalance = &tg.StarsTonAmount{Amount: balance}
+                stats.Status.AvailableBalance = &tg.StarsTonAmount{}
+                overall := &tg.StarsTonAmount{}
+                if reader, ok := r.deps.Gifts.(interface {
+                        TonTotalReceived(ctx context.Context, userID int64) (int64, error)
+                }); ok {
+                        if total, err := reader.TonTotalReceived(ctx, owner.ID); err == nil {
+                                overall = &tg.StarsTonAmount{Amount: total}
+                        }
+                }
+                stats.Status.OverallRevenue = overall
+                return stats
+        }
+        if r.deps.Stars == nil {
+                return stats
+        }
+        bal, err := r.deps.Stars.GetBalance(ctx, owner.ID)
+        if err != nil {
+                return stats
+        }
+        stats.Status.CurrentBalance = &tg.StarsAmount{Amount: bal.Balance}
+        stats.Status.AvailableBalance = &tg.StarsAmount{}
+        if reader, ok := r.deps.Stars.(interface {
+                TotalReceived(ctx context.Context, userID int64) (int64, error)
+        }); ok {
+                if total, err := reader.TotalReceived(ctx, owner.ID); err == nil {
+                        stats.Status.OverallRevenue = &tg.StarsAmount{Amount: total}
+                }
+        }
+        return stats
 }
 
 type channelGiftLedgerReader interface {
@@ -292,7 +360,10 @@ func (r *Router) onPaymentsGetStarsStatus(ctx context.Context, req *tg.PaymentsG
                 if r.deps.Gifts == nil {
                         return emptyStarsStatus(&tg.StarsTonAmount{}), nil
                 }
-                balance, err := r.deps.Gifts.TonBalance(ctx, userID)
+                // Раунд 47 (вкладки балансов): леджер читается по ВЛАДЕЛЬЦУ пира
+                // (owner.ID), а не по вызывающему: с раунда 47 бот-пир разрешён, и
+                // баланс бота должен видеть запрашивающий. Для self owner.ID == userID.
+                balance, err := r.deps.Gifts.TonBalance(ctx, owner.ID)
                 if err != nil {
                         return nil, internalErr()
                 }
@@ -301,7 +372,7 @@ func (r *Router) onPaymentsGetStarsStatus(ctx context.Context, req *tg.PaymentsG
         if r.deps.Stars == nil {
                 return emptyStarsStatus(&tg.StarsAmount{}), nil
         }
-        bal, err := r.deps.Stars.GetBalance(ctx, userID)
+        bal, err := r.deps.Stars.GetBalance(ctx, owner.ID)
         if err != nil {
                 return nil, starsErr(err)
         }
@@ -386,7 +457,8 @@ func (r *Router) onPaymentsGetStarsTransactions(ctx context.Context, req *tg.Pay
                 if r.deps.Gifts == nil {
                         return emptyStarsStatus(&tg.StarsTonAmount{}), nil
                 }
-                page, err := r.deps.Gifts.TonTransactions(ctx, userID, query)
+                // Раунд 47 (вкладки балансов): леджер по ВЛАДЕЛЬЦУ пира (owner.ID).
+                page, err := r.deps.Gifts.TonTransactions(ctx, owner.ID, query)
                 if err != nil {
                         return nil, internalErr()
                 }
@@ -409,7 +481,9 @@ func (r *Router) onPaymentsGetStarsTransactions(ctx context.Context, req *tg.Pay
         if r.deps.Stars == nil {
                 return emptyStarsStatus(&tg.StarsAmount{}), nil
         }
-        page, err := r.deps.Stars.ListTransactions(ctx, userID, query)
+        // Раунд 47 (вкладки балансов): леджер по ВЛАДЕЛЬЦУ пира (owner.ID),
+        // для self owner.ID == userID — поведение прежнее.
+        page, err := r.deps.Stars.ListTransactions(ctx, owner.ID, query)
         if err != nil {
                 return nil, starsErr(err)
         }
@@ -482,11 +556,11 @@ func (r *Router) onPaymentsGetStarsTransactionsByID(ctx context.Context, req *tg
                 if r.deps.Gifts == nil {
                         return emptyStarsStatus(&tg.StarsTonAmount{}), nil
                 }
-                txns, err := r.deps.Gifts.TonTransactionsByID(ctx, userID, ids)
+                txns, err := r.deps.Gifts.TonTransactionsByID(ctx, owner.ID, ids)
                 if err != nil {
                         return nil, internalErr()
                 }
-                balance, err := r.deps.Gifts.TonBalance(ctx, userID)
+                balance, err := r.deps.Gifts.TonBalance(ctx, owner.ID)
                 if err != nil {
                         return nil, internalErr()
                 }
@@ -495,11 +569,11 @@ func (r *Router) onPaymentsGetStarsTransactionsByID(ctx context.Context, req *tg
         if r.deps.Stars == nil {
                 return emptyStarsStatus(&tg.StarsAmount{}), nil
         }
-        txns, err := r.deps.Stars.ListTransactionsByID(ctx, userID, ids)
+        txns, err := r.deps.Stars.ListTransactionsByID(ctx, owner.ID, ids)
         if err != nil {
                 return nil, starsErr(err)
         }
-        balance, err := r.deps.Stars.GetBalance(ctx, userID)
+        balance, err := r.deps.Stars.GetBalance(ctx, owner.ID)
         if err != nil {
                 return nil, starsErr(err)
         }
@@ -602,6 +676,15 @@ func (r *Router) starGiftLedgerOwnerForPeer(ctx context.Context, input tg.InputP
         }
         if owner.Type == domain.PeerTypeUser {
                 if owner.ID != userID {
+                        // Раунд 47 (вкладки балансов): Stars/TON баланс БОТА — публичный
+                        // экран (BotStarsActivity): клиент запрашивает getStarsStatus/
+                        // getStarsTransactions с пира бота из профиля бота. Чужие обычные
+                        // пользователи по-прежнему PEER_ID_INVALID (приватность).
+                        if r.deps.Users != nil {
+                                if target, found, err := r.deps.Users.ByID(ctx, userID, owner.ID); err == nil && found && target.Bot {
+                                        return userID, owner, nil
+                                }
+                        }
                         return 0, domain.Peer{}, peerIDInvalidErr()
                 }
                 return userID, owner, nil
@@ -760,6 +843,18 @@ func tgStarsTransactions(in []domain.StarsTransaction, payloads starsGiftPayload
                 if t.Refunded {
                         item.Refund = true
                 }
+                // Раунд 47 (задача ④): статусные флаги «В обработке»/«Ошибка»
+                // (stars_transactions.processing/failed) проецируются в
+                // starsTransaction.pending (flags.4) / .failed (flags.6) — официальный
+                // Android-клиент подписывает строку истории « — В обработке»/« — Ошибка»
+                // (StarsPending/StarsFailed) именно по этим флагам. Флаги независимы
+                // от направления суммы (как refund).
+                if t.Processing {
+                        item.Pending = true
+                }
+                if t.Failed {
+                        item.Failed = true
+                }
                 if t.Title != "" {
                         item.SetTitle(t.Title)
                 }
@@ -837,6 +932,14 @@ func tgTonTransactions(in []domain.TonTransaction, payloads starsGiftPayloads) [
                         Date: t.Date, Peer: tgStarsTransactionPeer(domain.StarsTransaction{Peer: t.Peer, Reason: t.Reason})}
                 if t.Refunded {
                         item.Refund = true
+                }
+                // Раунд 47 (задача ④): «В обработке»/«Ошибка» в TON-леджере — те же
+                // starsTransaction.pending/.failed (см. tgStarsTransactions).
+                if t.Processing {
+                        item.Pending = true
+                }
+                if t.Failed {
+                        item.Failed = true
                 }
                 if t.Title != "" {
                         item.SetTitle(t.Title)

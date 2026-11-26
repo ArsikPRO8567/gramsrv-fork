@@ -39,6 +39,27 @@ func (s *StarsStore) GetBalance(_ context.Context, userID int64) (domain.StarsBa
         return domain.StarsBalance{UserID: userID, Balance: st.balance, Granted: st.granted}, nil
 }
 
+// TotalReceived — «Всего поступлений» (раунд 47): сумма кредитных проводок
+// (amount>0) личного леджера; семантика совпадает с postgres-версией.
+func (s *StarsStore) TotalReceived(_ context.Context, userID int64) (int64, error) {
+        if userID == 0 {
+                return 0, nil
+        }
+        s.mu.Lock()
+        defer s.mu.Unlock()
+        st := s.states[userID]
+        if st == nil {
+                return 0, nil
+        }
+        var total int64
+        for _, t := range st.txns {
+                if t.Amount > 0 {
+                        total += t.Amount
+                }
+        }
+        return total, nil
+}
+
 func (s *StarsStore) EnsureGrant(_ context.Context, userID, amount int64, date int) (domain.StarsBalance, bool, error) {
         if userID == 0 {
                 return domain.StarsBalance{}, false, nil

@@ -38,8 +38,10 @@ func (r *Router) ensureBotGiftAcquaintance(ctx context.Context, senderUserID int
         if err != nil || !found {
                 return nil
         }
-        // Ограничение действует только на ботов; служебные боты свободно дарят.
-        if !sender.Bot || sender.Support {
+        // Ограничение действует только на ботов; служебные аккаунты
+        // (users.service_account, миграция 0200 — флаг админ-API
+        // set-service-account, а не support) свободно дарят.
+        if !sender.Bot || r.actorIsServiceAccount(ctx, r.deps.GiftActorRules, senderUserID) {
                 return nil
         }
         recipientUser, found, err := r.deps.Users.ByID(ctx, senderUserID, recipient.ID)

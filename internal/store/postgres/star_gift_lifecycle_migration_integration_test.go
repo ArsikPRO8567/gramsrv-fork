@@ -14,7 +14,9 @@ func TestStarGiftLifecycleMigrationsApply(t *testing.T) {
         if err != nil {
                 t.Fatalf("migrate star gift lifecycle schema: %v", err)
         }
-        if status.Dirty || status.Empty || status.Version != 199 {
-                t.Fatalf("migration status = %+v, want clean version 199", status)
+        // Раунд 47: головная версия цепочки — 0202 (нормализация saved флага
+        // messageActionStarGift). Обновляется вместе с каждой новой миграцией.
+        if status.Dirty || status.Empty || status.Version != 202 {
+                t.Fatalf("migration status = %+v, want clean version 202", status)
         }
 }

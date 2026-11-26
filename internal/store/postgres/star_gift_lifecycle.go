@@ -2682,6 +2682,21 @@ func (s *StarGiftLifecycleStore) TonBalance(ctx context.Context, userID int64) (
         return balance, err
 }
 
+// TonTotalReceived — «Всего поступлений» TON (раунд 47, статистика пополнения
+// баланса): сумма кредитных проводок личного TON-леджера (amount_nanoton>0)
+// за всё время, без вычета списаний.
+func (s *StarGiftLifecycleStore) TonTotalReceived(ctx context.Context, userID int64) (int64, error) {
+        if s == nil || s.db == nil || userID <= 0 {
+                return 0, nil
+        }
+        var total int64
+        if err := s.db.QueryRow(ctx, `SELECT COALESCE(SUM(amount_nanoton),0) FROM ton_transactions WHERE user_id=$1 AND amount_nanoton > 0`, userID).
+                Scan(&total); err != nil {
+                return 0, fmt.Errorf("sum ton received: %w", err)
+        }
+        return total, nil
+}
+
 func (s *StarGiftLifecycleStore) ensureTonGrantTx(ctx context.Context, tx pgx.Tx, userID int64, date int) (int64, error) {
         if _, err := tx.Exec(ctx, `INSERT INTO ton_balances(user_id,balance_nanoton,granted) VALUES($1,0,false)
 ON CONFLICT(user_id) DO NOTHING`, userID); err != nil {

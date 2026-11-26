@@ -24,13 +24,16 @@ func (r *Router) onPaymentsGetPremiumGiftCodeOptions(
         if !authorized || userID == 0 {
                 return nil, authKeyUnregisteredErr()
         }
-        // Раунд 46 (задача ⑤): метод остаётся доступным ботам (Android-клиент
-        // со сессией бота падал StackOverflowError на пустом/ошибочном ответе —
-        // фильтр валют уходил в бесконечный перезапрос). Валютные (fiat)
-        // опции ботам не отдаются: оплатить Premium валютой бот не может —
-        // на форме вернётся BOT_METHOD_INVALID (см. resolvePremiumInvoice).
-        // Звёздные опции бот получает и оплачивает звёздами как обычно.
-        botCaller := r.userIsBot(ctx, userID)
+        // Раунд 47 (задача ③): метод остаётся доступным ботам, и ботам отдаётся
+        // ПОЛНЫЙ каталог (fiat + звёздные опции), как обычным пользователям.
+        // Клиент Android (GiftSheet.updatePremiumTiers) строит строки тарифов
+        // ТОЛЬКО из не-XTR опций — XTR-опции он прикрепляет к fiat-тарифу как
+        // «оплатить звёздами»: список из одних звёздных опций оставлял
+        // premiumTiers пустым, а колбэк loadGiftOptions (синхронный при
+        // кэшированном ответе) перезапускал updatePremiumTiers — бесконечная
+        // рекурсия StackOverflowError. Оплатить Premium валютой бот всё равно
+        // не может: на валютном инвойсе сервер вернёт BOT_METHOD_INVALID
+        // (см. resolvePremiumInvoice). Звёздные опции бот оплачивает звёздами.
         if r.deps.Premium == nil {
                 return []tg.PremiumGiftCodeOption{}, nil
         }
@@ -51,17 +54,15 @@ func (r *Router) onPaymentsGetPremiumGiftCodeOptions(
                 if !plan.Valid() || !plan.Enabled {
                         continue
                 }
-                if !botCaller {
-                        fiat := tg.PremiumGiftCodeOption{
-                                Users: 1, Months: plan.Months,
-                                Currency: plan.EffectiveFiatCurrency(), Amount: plan.EffectiveFiatAmount(),
-                        }
-                        if plan.StoreProduct != "" {
-                                fiat.SetStoreProduct(plan.StoreProduct)
-                                fiat.SetStoreQuantity(plan.StoreQuantity)
-                        }
-                        out = append(out, fiat)
+                fiat := tg.PremiumGiftCodeOption{
+                        Users: 1, Months: plan.Months,
+                        Currency: plan.EffectiveFiatCurrency(), Amount: plan.EffectiveFiatAmount(),
                 }
+                if plan.StoreProduct != "" {
+                        fiat.SetStoreProduct(plan.StoreProduct)
+                        fiat.SetStoreQuantity(plan.StoreQuantity)
+                }
+                out = append(out, fiat)
                 out = append(out, tg.PremiumGiftCodeOption{
                         Users:    1,
                         Months:   plan.Months,

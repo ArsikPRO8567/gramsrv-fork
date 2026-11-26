@@ -64,6 +64,20 @@ func (s *Service) GetBalance(ctx context.Context, userID int64) (domain.StarsBal
         return s.ensureGranted(ctx, userID)
 }
 
+// TotalReceived возвращает «Всего поступлений» (раунд 47, статистика
+// пополнения баланса): сумму кредитных проводок леджера за всё время.
+// Реализуется опционально — изолированные фейковые stores без метода дают 0
+// (RPC-слой трактует отсутствие как «статистика недоступна», как для TON).
+func (s *Service) TotalReceived(ctx context.Context, userID int64) (int64, error) {
+        reader, ok := s.store.(interface {
+                TotalReceived(ctx context.Context, userID int64) (int64, error)
+        })
+        if !ok || userID <= 0 {
+                return 0, nil
+        }
+        return reader.TotalReceived(ctx, userID)
+}
+
 // Credit 为账号入账（amount>0）。
 func (s *Service) Credit(ctx context.Context, userID, amount int64, reason domain.StarsTransactionReason, peer domain.Peer, title, desc string) (domain.StarsBalance, error) {
         if amount <= 0 {

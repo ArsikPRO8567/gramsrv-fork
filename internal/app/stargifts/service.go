@@ -1076,6 +1076,22 @@ func (s *Service) TonTransactionsByID(ctx context.Context, userID int64, ids []s
         return s.lifecycle.TonTransactionsByID(ctx, userID, ids)
 }
 
+// TonTotalReceived — «Всего поступлений» TON (раунд 47, статистика пополнения
+// баланса): сумма кредитных проводок личного TON-леджера. Опционально:
+// memory/lifecycle-хранилища без метода дают 0.
+func (s *Service) TonTotalReceived(ctx context.Context, userID int64) (int64, error) {
+        if s == nil || s.lifecycle == nil || userID <= 0 {
+                return 0, nil
+        }
+        reader, ok := s.lifecycle.(interface {
+                TonTotalReceived(ctx context.Context, userID int64) (int64, error)
+        })
+        if !ok {
+                return 0, nil
+        }
+        return reader.TonTotalReceived(ctx, userID)
+}
+
 // ChannelStarsTransactionsByID 按公开交易 ID 批量读取频道 Stars 流水。
 func (s *Service) ChannelStarsTransactionsByID(ctx context.Context, channelID int64, ids []string) ([]domain.StarsTransaction, error) {
         if s == nil || s.lifecycle == nil || len(ids) == 0 {

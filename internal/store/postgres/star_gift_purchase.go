@@ -52,21 +52,23 @@ func (s *StarGiftLifecycleStore) ValidateStarGiftPurchaseForm(ctx context.Contex
         return validateStarGiftPurchaseForm(ctx, s.db, req, false)
 }
 
-// starGiftSenderConvertLocked — раунд 46: подарки от ботов нельзя конвертировать
-// в звёзды, если бот не служебный аккаунт (users.support). Служебные боты
-// сохраняют конвертацию как обычные пользователи; обычным пользователям
-// ограничение не применяется. Ошибка чтения не блокирует отправку: ограничение
-// консервативно считается выключенным.
+// starGiftSenderConvertLocked — раунд 47: подарки от ботов нельзя конвертировать
+// в звёзды, если бот не служебный аккаунт (users.service_account, миграция 0200;
+// флаг выставляется через админ-API POST /v1/accounts/set-service-account).
+// Служебные боты сохраняют конвертацию как обычные пользователи; обычным
+// пользователям ограничение не применяется. Флаг support (официальная поддержка)
+// на ограничение не влияет — в раунде 46 читался он по ошибке. Ошибка чтения не
+// блокирует отправку: ограничение консервативно считается выключенным.
 func starGiftSenderConvertLocked(ctx context.Context, db sqlcgen.DBTX, senderUserID int64) bool {
         if senderUserID <= 0 {
                 return false
         }
-        var isBot, support bool
-        if err := db.QueryRow(ctx, `SELECT COALESCE(is_bot, false), COALESCE(support, false) FROM users WHERE id=$1`, senderUserID).
-                Scan(&isBot, &support); err != nil {
+        var isBot, service bool
+        if err := db.QueryRow(ctx, `SELECT COALESCE(is_bot, false), COALESCE(service_account, false) FROM users WHERE id=$1`, senderUserID).
+                Scan(&isBot, &service); err != nil {
                 return false
         }
-        return isBot && !support
+        return isBot && !service
 }
 
 func validateStarGiftPurchaseForm(ctx context.Context, db sqlcgen.DBTX, req domain.StarGiftPurchaseRequest, lock bool) error {

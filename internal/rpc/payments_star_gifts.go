@@ -1268,18 +1268,33 @@ func applyStarGiftSnapshot(action *domain.MessageStarGiftAction, gift domain.Sta
         return action
 }
 
-// starGiftSenderConvertLocked — раунд 46 (RPC-слой): подарки от неслужебных
-// ботов не конвертируются в звёзды. Служебный аккаунт (support) сохраняет
-// конвертацию; ошибки чтения трактуются как отсутствие ограничения.
+// starGiftSenderConvertLocked — раунд 47 (задача ②): подарки от ботов, которые
+// НЕ являются служебными аккаунтами (users.service_account, миграция 0200),
+// не конвертируются в звёзды. Служебные боты (service_account=true, флаг
+// выставляется через админ-API POST /v1/accounts/set-service-account) и обычные
+// пользователи конвертируют как раньше. Флаг support (официальная поддержка)
+// на ограничение не влияет — он читался по ошибке в раунде 46, из-за чего
+// служебные боты теряли конвертацию. Ошибки чтения трактуются как отсутствие
+// ограничения (fail-open, консистентно с gift_actor_rules).
 func (r *Router) starGiftSenderConvertLocked(ctx context.Context, senderUserID int64) bool {
         if senderUserID <= 0 || r.deps.Users == nil {
                 return false
         }
         sender, found, err := r.deps.Users.ByID(ctx, senderUserID, senderUserID)
-        if err != nil || !found {
+        if err != nil || !found || !sender.Bot {
                 return false
         }
-        return sender.Bot && !sender.Support
+        rules, ok := r.deps.Users.(interface {
+                ServiceAccount(ctx context.Context, userID int64) (bool, error)
+        })
+        if !ok {
+                return false
+        }
+        service, err := rules.ServiceAccount(ctx, senderUserID)
+        if err != nil {
+                return false
+        }
+        return !service
 }
 
 // deliverStarGift 经 SendPrivateText 把 messageActionStarGift 服务消息投递到收礼人私聊。
@@ -1488,9 +1503,11 @@ func (r *Router) onPaymentsSaveStarGift(ctx context.Context, req *tg.PaymentsSav
         if err := r.ensureCanManageStarGiftOwner(ctx, userID, ref.Owner); err != nil {
                 return false, err
         }
-        // Продакшн-путь (раунд 42): агрегат синхронно переписывает флаг saved во
-        // всех сервисных сообщениях о подарке — кнопки «показать/скрыть» в чате
-        // отражают состояние сразу (и обычный, и уникальный подарок).
+        // Продакшн-путь (раунд 42): агрегат одной транзакцией обновляет состояние
+        // unsaved. Раунд 47 (задача ①): флаг saved в сервисных сообщениях больше
+        // НЕ переписывается (главная подпись-плейсхолдер блока подарка не меняется
+        // от статуса отображения); сетка профиля читает состояние из
+        // peer_star_gifts через payments.getSavedStarGifts.
         // Изолированные memory-адаптеры без lifecycle-хранилища продолжают
         // работать через ToggleSaved: агрегатный метод есть у того же
         // stargifts.Service, поэтому ветку выбирает проверка конфигурации

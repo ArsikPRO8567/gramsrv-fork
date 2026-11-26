@@ -26,8 +26,10 @@ func round46GiftActionFrom(media *domain.MessageMedia) *domain.MessageStarGiftAc
         return media.ServiceAction.StarGift
 }
 
-// Раунд 46: подарки от неслужебных ботов теряют конвертацию в звёзды,
-// служебные (support) боты и люди конвертируют как раньше.
+// Раунд 47 (задача ②): подарки от неслужебных ботов теряют конвертацию в звёзды;
+// служебные — с флагом service_account (миграция 0200, админ-API
+// set-service-account) — конвертируют как раньше. Флаг support на ограничение
+// не влияет: бот-«поддержка» без service_account всё равно заблокирован.
 func TestRound46BotGiftConversionLockedForNonServiceBots(t *testing.T) {
         ctx := context.Background()
         users := memory.NewUserStore()
@@ -36,7 +38,14 @@ func TestRound46BotGiftConversionLockedForNonServiceBots(t *testing.T) {
         if err != nil {
                 t.Fatal(err)
         }
-        serviceBot, err := users.Create(ctx, domain.User{AccessHash: 9102, Phone: "15550009102", FirstName: "Service Bot", Bot: true, Support: true})
+        serviceBot, err := users.Create(ctx, domain.User{AccessHash: 9102, Phone: "15550009102", FirstName: "Service Bot", Bot: true})
+        if err != nil {
+                t.Fatal(err)
+        }
+        if err := users.SetServiceAccount(ctx, serviceBot.ID, true); err != nil {
+                t.Fatal(err)
+        }
+        supportBot, err := users.Create(ctx, domain.User{AccessHash: 9105, Phone: "15550009105", FirstName: "Support Bot", Bot: true, Support: true})
         if err != nil {
                 t.Fatal(err)
         }
@@ -71,7 +80,7 @@ func TestRound46BotGiftConversionLockedForNonServiceBots(t *testing.T) {
                 t.Fatalf("bot convert lock = %v, want true", locked)
         }
 
-        // Служебный бот сохраняет конвертацию.
+        // Служебный бот (service_account=true) сохраняет конвертацию.
         send, err = r.deliverStarGift(WithUserID(ctx, serviceBot.ID), serviceBot.ID, recipient.ID, gift, false, "", nil, 0, "")
         if err != nil {
                 t.Fatalf("service bot deliverStarGift: %v", err)
@@ -80,6 +89,14 @@ func TestRound46BotGiftConversionLockedForNonServiceBots(t *testing.T) {
         if serviceAction == nil || serviceAction.ConvertStars != 50 {
                 t.Fatalf("service bot gift convert_stars = %+v, want 50", serviceAction)
         }
+        if locked := r.starGiftSenderConvertLocked(ctx, serviceBot.ID); locked {
+                t.Fatalf("service bot convert lock = %v, want false", locked)
+        }
+
+        // Флаг support не влияет: бот-«поддержка» без service_account заблокирован.
+        if locked := r.starGiftSenderConvertLocked(ctx, supportBot.ID); !locked {
+                t.Fatalf("support bot convert lock = %v, want true", locked)
+        }
 
         // Люди не ограничены.
         if locked := r.starGiftSenderConvertLocked(ctx, human.ID); locked {
@@ -87,9 +104,9 @@ func TestRound46BotGiftConversionLockedForNonServiceBots(t *testing.T) {
         }
 }
 
-// Раунд 46: механика знакомства бота — незнакомый бот получает
+// Раунд 47: механика знакомства бота — незнакомый бот получает
 // PEER_ID_INVALID, знакомый (dialog в любом направлении) проходит,
-// служебные боты и люди не ограничены.
+// служебные аккаунты (service_account) и люди не ограничены.
 func TestRound46BotGiftAcquaintance(t *testing.T) {
         ctx := context.Background()
         users := memory.NewUserStore()
@@ -98,8 +115,11 @@ func TestRound46BotGiftAcquaintance(t *testing.T) {
         if err != nil {
                 t.Fatal(err)
         }
-        serviceBot, err := users.Create(ctx, domain.User{AccessHash: 9202, Phone: "15550009202", FirstName: "Service Bot", Bot: true, Support: true})
+        serviceBot, err := users.Create(ctx, domain.User{AccessHash: 9202, Phone: "15550009202", FirstName: "Service Bot", Bot: true})
         if err != nil {
+                t.Fatal(err)
+        }
+        if err := users.SetServiceAccount(ctx, serviceBot.ID, true); err != nil {
                 t.Fatal(err)
         }
         human, err := users.Create(ctx, domain.User{AccessHash: 9203, Phone: "15550009203", FirstName: "Human"})
@@ -111,8 +131,9 @@ func TestRound46BotGiftAcquaintance(t *testing.T) {
                 t.Fatal(err)
         }
         r := New(Config{}, Deps{
-                Users:   appusers.NewService(users),
-                Dialogs: appdialogs.NewService(dialogStore),
+                Users:          appusers.NewService(users),
+                Dialogs:        appdialogs.NewService(dialogStore),
+                GiftActorRules: users,
         }, zaptest.NewLogger(t), fixedClock{now: time.Unix(1_800_000_000, 0)})
         target := domain.Peer{Type: domain.PeerTypeUser, ID: recipient.ID}
 
@@ -151,8 +172,10 @@ func TestRound46BotGiftAcquaintance(t *testing.T) {
         }
 }
 
-// Раунд 46 (задача ⑤): payments.getPremiumGiftCodeOptions доступен ботам,
-// но отдает им только звёздные опции; валютный инвойс бота — BOT_METHOD_INVALID.
+// Раунд 47 (задача ③): payments.getPremiumGiftCodeOptions отдаёт ботам полный
+// каталог (fiat + звёздные опции) — клиент GiftSheet строит тарифы из fiat-опций
+// и уходит в StackOverflow на списке из одних XTR. Валютный инвойс бота по-прежнему
+// BOT_METHOD_INVALID; звёздный разрешён.
 func TestRound46BotPremiumGiftOptionsStarsOnly(t *testing.T) {
         r, premium, users, human, recipient := premiumRPCTestRouter(t)
         bot, err := users.Create(context.Background(), domain.User{AccessHash: 9301, Phone: "15550009301", FirstName: "Premium Bot", Bot: true})
@@ -160,8 +183,8 @@ func TestRound46BotPremiumGiftOptionsStarsOnly(t *testing.T) {
                 t.Fatal(err)
         }
 
-        // Бот получает только звёздные опции (клиент больше не уходит в
-        // бесконечный перезапрос после пустого фильтра валют).
+        // Бот получает тот же каталог fiat+звёзды, что и человек (без него
+        // GiftSheet не может построить тарифы и циклится на кэше ответа).
         botOptions, err := r.onPaymentsGetPremiumGiftCodeOptions(WithUserID(context.Background(), bot.ID), &tg.PaymentsGetPremiumGiftCodeOptionsRequest{})
         if err != nil {
                 t.Fatalf("bot gift options: %v", err)
@@ -169,19 +192,23 @@ func TestRound46BotPremiumGiftOptionsStarsOnly(t *testing.T) {
         if len(botOptions) == 0 {
                 t.Fatalf("bot gift options empty")
         }
+        fiatCount := 0
         for _, option := range botOptions {
                 if option.Currency != domain.PremiumCurrencyStars {
-                        t.Fatalf("bot option currency = %s, want XTR", option.Currency)
+                        fiatCount++
                 }
         }
+        if fiatCount == 0 {
+                t.Fatalf("bot gift options have no fiat options: %d options", len(botOptions))
+        }
 
-        // Людям по-прежнему доступны обе валюты.
+        // Людям доступен тот же каталог.
         humanOptions, err := r.onPaymentsGetPremiumGiftCodeOptions(WithUserID(context.Background(), human.ID), &tg.PaymentsGetPremiumGiftCodeOptionsRequest{})
         if err != nil {
                 t.Fatalf("human gift options: %v", err)
         }
-        if len(humanOptions) != len(botOptions)+1 {
-                t.Fatalf("human options = %d, bot options = %d, want fiat+stars", len(humanOptions), len(botOptions))
+        if len(humanOptions) != len(botOptions) {
+                t.Fatalf("human options = %d, bot options = %d, want identical catalogs", len(humanOptions), len(botOptions))
         }
 
         // Валютный инвойс от бота — BOT_METHOD_INVALID; звёздный разрешён.
