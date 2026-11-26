@@ -78,6 +78,19 @@ func (s *Service) TotalReceived(ctx context.Context, userID int64) (int64, error
         return reader.TotalReceived(ctx, userID)
 }
 
+// ReceivedDaily возвращает дневные суммы кредитных проводок (раунд 48, график
+// статистики баланса). Опционально, как TotalReceived: сторы без метода дают
+// пустую серию — RPC оставляет нейтральный StatsGraphError-стаб.
+func (s *Service) ReceivedDaily(ctx context.Context, userID int64) ([]domain.StarsDailyPoint, error) {
+        reader, ok := s.store.(interface {
+                ReceivedDaily(ctx context.Context, userID int64) ([]domain.StarsDailyPoint, error)
+        })
+        if !ok || userID <= 0 {
+                return nil, nil
+        }
+        return reader.ReceivedDaily(ctx, userID)
+}
+
 // Credit 为账号入账（amount>0）。
 func (s *Service) Credit(ctx context.Context, userID, amount int64, reason domain.StarsTransactionReason, peer domain.Peer, title, desc string) (domain.StarsBalance, error) {
         if amount <= 0 {

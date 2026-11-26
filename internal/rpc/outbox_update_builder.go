@@ -45,6 +45,17 @@ func (r *Router) BuildOutboxUpdates(ctx context.Context, requests []OutboxUpdate
 	// viewer-specific update has been built so one outbox claim never turns into
 	// a registry query per event/session.
 	r.applyUsernamesToUpdatesBatch(ctx, out)
+	// Раунд 48 (анти-мерцание): пуш-обновления тоже затирают кэш user/chat
+	// клиента, поэтому без оверлеев здесь кастомная верификация и bot_can_edit
+	// исчезают после каждого пуша. Верификация — один батч на клейм, бот-флаги
+	// и bot_can_edit — по получателю.
+	viewers := make([]int64, len(out))
+	for viewerUserID, items := range groups {
+		for _, item := range items {
+			viewers[item.index] = viewerUserID
+		}
+	}
+	r.applyOutboxPeerOverlays(ctx, out, viewers)
 	return out
 }
 

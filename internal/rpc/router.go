@@ -754,6 +754,12 @@ func (r *Router) dispatch(ctx context.Context, b *bin.Buffer, depth int, meta *r
 		if err == nil && exact != nil {
 			if canonical, ok := exact.CanonicalValue().(bin.Encoder); ok {
 				enc = canonical
+				// Раунд 48 (анти-мерцание): оверлеи применяются к ТОЙ копии,
+				// которая будет закодирована (canonical), после обработчика —
+				// единая точка для username/verification/bot_can_edit.
+				r.applyResponsePeerOverlays(ctx, canonical)
+			} else {
+				r.applyResponsePeerOverlays(ctx, exact)
 			}
 		}
 		dur := time.Since(start)

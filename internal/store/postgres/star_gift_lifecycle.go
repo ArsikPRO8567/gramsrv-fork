@@ -2697,6 +2697,83 @@ func (s *StarGiftLifecycleStore) TonTotalReceived(ctx context.Context, userID in
         return total, nil
 }
 
+// TonReceivedDaily — дневные суммы кредитных проводок личного TON-леджера
+// (раунд 48, график статистики баланса). Семантика совпадает с
+// StarsStore.ReceivedDaily: Day — UTC-нулевой unix-день, Amount —
+// amount_nanoton за день; дни без поступлений отсутствуют.
+func (s *StarGiftLifecycleStore) TonReceivedDaily(ctx context.Context, userID int64) ([]domain.StarsDailyPoint, error) {
+        if s == nil || s.db == nil || userID <= 0 {
+                return nil, nil
+        }
+        rows, err := s.db.Query(ctx, `
+SELECT (date - (date % 86400)) AS day, SUM(amount_nanoton)
+FROM ton_transactions WHERE user_id=$1 AND amount_nanoton > 0
+GROUP BY 1 ORDER BY 1`, userID)
+        if err != nil {
+                return nil, fmt.Errorf("sum ton received daily: %w", err)
+        }
+        defer rows.Close()
+        out := make([]domain.StarsDailyPoint, 0, 8)
+        for rows.Next() {
+                var point domain.StarsDailyPoint
+                if err := rows.Scan(&point.Day, &point.Amount); err != nil {
+                        return nil, fmt.Errorf("scan ton received daily: %w", err)
+                }
+                out = append(out, point)
+        }
+        return out, rows.Err()
+}
+
+// ChannelStarsReceivedDaily — дневные суммы кредитных проводок канального
+// Stars-леджера (раунд 48, график статистики баланса канала).
+func (s *StarGiftLifecycleStore) ChannelStarsReceivedDaily(ctx context.Context, channelID int64) ([]domain.StarsDailyPoint, error) {
+        if s == nil || s.db == nil || channelID <= 0 {
+                return nil, nil
+        }
+        rows, err := s.db.Query(ctx, `
+SELECT (date - (date % 86400)) AS day, SUM(amount)
+FROM channel_stars_transactions WHERE channel_id=$1 AND amount > 0
+GROUP BY 1 ORDER BY 1`, channelID)
+        if err != nil {
+                return nil, fmt.Errorf("sum channel stars received daily: %w", err)
+        }
+        defer rows.Close()
+        out := make([]domain.StarsDailyPoint, 0, 8)
+        for rows.Next() {
+                var point domain.StarsDailyPoint
+                if err := rows.Scan(&point.Day, &point.Amount); err != nil {
+                        return nil, fmt.Errorf("scan channel stars received daily: %w", err)
+                }
+                out = append(out, point)
+        }
+        return out, rows.Err()
+}
+
+// ChannelTonReceivedDaily — дневные суммы кредитных проводок канального
+// TON-леджера (раунд 48, график статистики баланса канала).
+func (s *StarGiftLifecycleStore) ChannelTonReceivedDaily(ctx context.Context, channelID int64) ([]domain.StarsDailyPoint, error) {
+        if s == nil || s.db == nil || channelID <= 0 {
+                return nil, nil
+        }
+        rows, err := s.db.Query(ctx, `
+SELECT (date - (date % 86400)) AS day, SUM(amount_nanoton)
+FROM channel_ton_transactions WHERE channel_id=$1 AND amount_nanoton > 0
+GROUP BY 1 ORDER BY 1`, channelID)
+        if err != nil {
+                return nil, fmt.Errorf("sum channel ton received daily: %w", err)
+        }
+        defer rows.Close()
+        out := make([]domain.StarsDailyPoint, 0, 8)
+        for rows.Next() {
+                var point domain.StarsDailyPoint
+                if err := rows.Scan(&point.Day, &point.Amount); err != nil {
+                        return nil, fmt.Errorf("scan channel ton received daily: %w", err)
+                }
+                out = append(out, point)
+        }
+        return out, rows.Err()
+}
+
 func (s *StarGiftLifecycleStore) ensureTonGrantTx(ctx context.Context, tx pgx.Tx, userID int64, date int) (int64, error) {
         if _, err := tx.Exec(ctx, `INSERT INTO ton_balances(user_id,balance_nanoton,granted) VALUES($1,0,false)
 ON CONFLICT(user_id) DO NOTHING`, userID); err != nil {

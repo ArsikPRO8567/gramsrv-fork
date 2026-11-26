@@ -2,6 +2,7 @@ package memory
 
 import (
         "context"
+        "sort"
         "sync"
 
         "telesrv/internal/domain"
@@ -58,6 +59,38 @@ func (s *StarsStore) TotalReceived(_ context.Context, userID int64) (int64, erro
                 }
         }
         return total, nil
+}
+
+// ReceivedDaily — дневные суммы кредитных проводок личного леджера
+// (раунд 48, график статистики баланса); семантика совпадает с postgres.
+func (s *StarsStore) ReceivedDaily(_ context.Context, userID int64) ([]domain.StarsDailyPoint, error) {
+        if userID == 0 {
+                return nil, nil
+        }
+        s.mu.Lock()
+        defer s.mu.Unlock()
+        st := s.states[userID]
+        if st == nil {
+                return nil, nil
+        }
+        byDay := make(map[int64]int64, 4)
+        order := make([]int64, 0, 4)
+        for _, t := range st.txns {
+                if t.Amount <= 0 {
+                        continue
+                }
+                day := int64(t.Date) - int64(t.Date)%86400
+                if _, ok := byDay[day]; !ok {
+                        order = append(order, day)
+                }
+                byDay[day] += t.Amount
+        }
+        sort.Slice(order, func(i, j int) bool { return order[i] < order[j] })
+        out := make([]domain.StarsDailyPoint, 0, len(order))
+        for _, day := range order {
+                out = append(out, domain.StarsDailyPoint{Day: day, Amount: byDay[day]})
+        }
+        return out, nil
 }
 
 func (s *StarsStore) EnsureGrant(_ context.Context, userID, amount int64, date int) (domain.StarsBalance, bool, error) {

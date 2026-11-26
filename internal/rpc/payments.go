@@ -2,6 +2,7 @@ package rpc
 
 import (
         "context"
+        "encoding/json"
         "errors"
 
         "github.com/iamxvbaba/td/tg"
@@ -198,12 +199,13 @@ func (r *Router) onPaymentsAssignPlayMarketTransaction(ctx context.Context, _ *t
 // the same peer-scoped ledger as getStarsStatus/getStarsTransactions.
 //
 // Раунд 47 (статистика пополнения баланса): для ЛИЧНЫХ балансов (свой аккаунт,
-// включая сессию бота) и для БОТОВ (их Stars/TON баланс — публичный экран
-// BotStarsActivity, клиент запрашивает его с пира бота) сервер отдаёт
-// реальные числа: «Общий баланс» (current_balance), «Всего поступлений»
-// (overall_revenue — сумма кредитных проводок за всё время) и
-// «Доступно для вывода» (available_balance; вывод ещё не имплементирован —
-// строка остаётся нулевой, WithdrawalEnabled=false, как и раньше).
+// включая сессию бота) и для БОТОВ сервер отдаёт реальные числа: «Общий баланс»
+// (current_balance), «Всего поступлений» (overall_revenue — сумма кредитных
+// проводок за всё время) и «Доступно для вывода» (available_balance; вывод ещё
+// не имплементирован — строка остаётся нулевой, WithdrawalEnabled=false).
+// Раунд 48: реальные числа чужого бота видит только его владелец (OwnsBot);
+// остальным — нейтральный bounded-ответ. Там же строится график ежедневных
+// поступлений (revenue_graph, statsGraph#8ea464b6).
 func (r *Router) onPaymentsGetStarsRevenueStats(ctx context.Context, req *tg.PaymentsGetStarsRevenueStatsRequest) (*tg.PaymentsStarsRevenueStats, error) {
         userID, _, err := r.currentUserID(ctx)
         if err != nil {
@@ -247,6 +249,25 @@ func (r *Router) onPaymentsGetStarsRevenueStats(ctx context.Context, req *tg.Pay
         stats.Status.CurrentBalance = amount
         stats.Status.AvailableBalance = amount
         stats.Status.OverallRevenue = amount
+        // Раунд 48 (график статистики баланса): дневные поступления канального
+        // леджера с первого дня с поступлениями до сегодня.
+        if ton {
+                if reader, ok := ledger.(interface {
+                        ChannelTonReceivedDaily(ctx context.Context, channelID int64) ([]domain.StarsDailyPoint, error)
+                }); ok {
+                        if points, err := reader.ChannelTonReceivedDaily(ctx, owner.ID); err == nil {
+                                stats.RevenueGraph = starsRevenueGraph(points, r.clock.Now().Unix(), true)
+                        }
+                }
+        } else {
+                if reader, ok := ledger.(interface {
+                        ChannelStarsReceivedDaily(ctx context.Context, channelID int64) ([]domain.StarsDailyPoint, error)
+                }); ok {
+                        if points, err := reader.ChannelStarsReceivedDaily(ctx, owner.ID); err == nil {
+                                stats.RevenueGraph = starsRevenueGraph(points, r.clock.Now().Unix(), false)
+                        }
+                }
+        }
         return stats, nil
 }
 
@@ -255,9 +276,9 @@ func (r *Router) onPaymentsGetStarsRevenueStats(ctx context.Context, req *tg.Pay
 // overall_revenue = «Всего поступлений» (гросс-сумма кредитных проводок),
 // available_balance = 0 (вывод будет имплементирован позже — строку сервер
 // пока не меняет), WithdrawalEnabled=false. Реальные числа отдаются самому
-// запрашивающему аккаунту и ботам (публичный экран баланса бота, как на
-// оригинальном сервере); прочие чужие пользователи продолжают получать
-// нейтральный bounded-ответ (приватность личного баланса).
+// запрашивающему аккаунту; раунд 48 (приватность баланса бота): баланс ЧУЖОГО
+// бота видит только его владелец (OwnsBot) — прочие чужие пользователи
+// продолжают получать нейтральный bounded-ответ.
 func (r *Router) personalStarsRevenueStats(ctx context.Context, callerUserID int64, owner domain.Peer, ton bool) *tg.PaymentsStarsRevenueStats {
         stats := tdesktop.StarsRevenueStats(ton)
         if owner.Type != domain.PeerTypeUser || owner.ID <= 0 {
@@ -269,6 +290,14 @@ func (r *Router) personalStarsRevenueStats(ctx context.Context, callerUserID int
                 }
                 target, found, err := r.deps.Users.ByID(ctx, callerUserID, owner.ID)
                 if err != nil || !found || !target.Bot {
+                        return stats
+                }
+                // Раунд 48: экран баланса бота — только для владельца.
+                if r.deps.Bots == nil {
+                        return stats
+                }
+                owns, err := r.deps.Bots.OwnsBot(ctx, callerUserID, owner.ID)
+                if err != nil || !owns {
                         return stats
                 }
         }
@@ -291,6 +320,14 @@ func (r *Router) personalStarsRevenueStats(ctx context.Context, callerUserID int
                         }
                 }
                 stats.Status.OverallRevenue = overall
+                // Раунд 48 (график статистики баланса): дневные поступления TON.
+                if reader, ok := r.deps.Gifts.(interface {
+                        TonReceivedDaily(ctx context.Context, userID int64) ([]domain.StarsDailyPoint, error)
+                }); ok {
+                        if points, err := reader.TonReceivedDaily(ctx, owner.ID); err == nil {
+                                stats.RevenueGraph = starsRevenueGraph(points, r.clock.Now().Unix(), true)
+                        }
+                }
                 return stats
         }
         if r.deps.Stars == nil {
@@ -309,7 +346,86 @@ func (r *Router) personalStarsRevenueStats(ctx context.Context, callerUserID int
                         stats.Status.OverallRevenue = &tg.StarsAmount{Amount: total}
                 }
         }
+        // Раунд 48 (график статистики баланса): дневные поступления с первого
+        // дня с поступлениями до сегодняшнего UTC-дня. Данные отдаём только
+        // вместе с реальными числами (та же privacy-модель, что и выше).
+        if reader, ok := r.deps.Stars.(interface {
+                ReceivedDaily(ctx context.Context, userID int64) ([]domain.StarsDailyPoint, error)
+        }); ok {
+                if points, err := reader.ReceivedDaily(ctx, owner.ID); err == nil {
+                        stats.RevenueGraph = starsRevenueGraph(points, r.clock.Now().Unix(), false)
+                }
+        }
         return stats
+}
+
+// starsRevenueGraph строит statsGraph#8ea464b6 с JSON графика ежедневных
+// поступлений (раунд 48). Формат — StackBarChartData официального Android-
+// клиента (StatisticActivity.createViewData → ChartData): columns с рядом
+// "x" (UTC-полдень в миллисекундах) и рядом "y0" (сумма поступлений за день),
+// имена/цвета и форматоры значений. Дни без поступлений заполняются нулями,
+// чтобы ось X покрывала все дни с первого дня с поступлениями до сегодня.
+// nil (и нейтральный StatsGraphError-стаб в ответе) остаётся для леджеров без
+// единого поступления — графику нечего показывать, числа при этом отдаются.
+func starsRevenueGraph(points []domain.StarsDailyPoint, nowUnix int64, ton bool) tg.StatsGraphClass {
+        if len(points) == 0 {
+                return nil
+        }
+        byDay := make(map[int64]int64, len(points))
+        for _, point := range points {
+                if point.Day <= 0 {
+                        continue
+                }
+                day := point.Day - point.Day%86400
+                byDay[day] += point.Amount
+        }
+        if len(byDay) == 0 {
+                return nil
+        }
+        first := int64(0)
+        for day := range byDay {
+                if first == 0 || day < first {
+                        first = day
+                }
+        }
+        today := nowUnix - nowUnix%86400
+        if today < first {
+                today = first
+        }
+        // Предохранитель от патологического диапазона: 1000 дней ~ 2.5 года,
+        // JSON такого графика ~20KB и укладывается в MTProto-лимиты.
+        const maxDays = 1000
+        if today-first >= maxDays*86400 {
+                first = today - (maxDays-1)*86400
+        }
+        days := int((today-first)/86400) + 1
+        xs := make([]any, 0, days+1)
+        ys := make([]any, 0, days+1)
+        xs = append(xs, "x")
+        ys = append(ys, "y0")
+        for i := 0; i < days; i++ {
+                day := first + int64(i)*86400
+                xs = append(xs, day*1000)
+                ys = append(ys, byDay[day])
+        }
+        formatter := "XTR"
+        if ton {
+                formatter = "TON"
+        }
+        payload := map[string]any{
+                "columns":           []any{xs, ys},
+                "names":             map[string]string{"y0": formatter},
+                "colors":            map[string]string{"y0": "statisticChartLine_golden#EBA52D"},
+                "xTickFormatter":    "",
+                "yTickFormatter":    formatter,
+                "xTooltipFormatter": "",
+                "yTooltipFormatter": formatter,
+        }
+        data, err := json.Marshal(payload)
+        if err != nil {
+                return nil
+        }
+        return &tg.StatsGraph{JSON: tg.DataJSON{Data: string(data)}}
 }
 
 type channelGiftLedgerReader interface {
@@ -676,13 +792,19 @@ func (r *Router) starGiftLedgerOwnerForPeer(ctx context.Context, input tg.InputP
         }
         if owner.Type == domain.PeerTypeUser {
                 if owner.ID != userID {
-                        // Раунд 47 (вкладки балансов): Stars/TON баланс БОТА — публичный
-                        // экран (BotStarsActivity): клиент запрашивает getStarsStatus/
-                        // getStarsTransactions с пира бота из профиля бота. Чужие обычные
-                        // пользователи по-прежнему PEER_ID_INVALID (приватность).
+                        // Раунд 47 (вкладки балансов) разрешал Stars/TON экран БОТА
+                        // любому запрашивающему; раунд 48 (приватность баланса бота):
+                        // реальные числа видит только ВЛАДЕЛЕЦ бота (OwnsBot) —
+                        // сторонние аккаунты получают PEER_ID_INVALID, как и для
+                        // чужих обычных пользователей.
                         if r.deps.Users != nil {
                                 if target, found, err := r.deps.Users.ByID(ctx, userID, owner.ID); err == nil && found && target.Bot {
-                                        return userID, owner, nil
+                                        if r.deps.Bots != nil {
+                                                if owns, err := r.deps.Bots.OwnsBot(ctx, userID, owner.ID); err == nil && owns {
+                                                        return userID, owner, nil
+                                                }
+                                        }
+                                        return 0, domain.Peer{}, peerIDInvalidErr()
                                 }
                         }
                         return 0, domain.Peer{}, peerIDInvalidErr()

@@ -19,6 +19,13 @@ type StarsBalance struct {
         Granted bool  // 起始授予是否已应用（惰性首读授予的幂等守卫）
 }
 
+// StarsDailyPoint 是收入统计图表（раунд 48）的单日聚合点：Day 为 UTC 零点的
+// unix 秒，Amount 为当日入账毛额（仅信用方向，不含提现/扣减）。
+type StarsDailyPoint struct {
+        Day    int64
+        Amount int64
+}
+
 // StarsPurchaseKind identifies the balance owner affected by a fiat Stars
 // checkout. It is persisted with the form so a client cannot reinterpret a
 // self top-up as a friend gift (or vice versa) when submitting the form.

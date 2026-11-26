@@ -53,6 +53,33 @@ func (s *StarsStore) TotalReceived(ctx context.Context, userID int64) (int64, er
         return total, nil
 }
 
+// ReceivedDaily возвращает дневные суммы кредитных проводок личного
+// Stars-леджера (раунд 48, график статистики баланса). Day — UTC-нулевой
+// unix-день; дни без поступлений в выборку не попадают (график достраивает
+// их нулями от первого дня с поступлениями до сегодня).
+func (s *StarsStore) ReceivedDaily(ctx context.Context, userID int64) ([]domain.StarsDailyPoint, error) {
+        if userID == 0 {
+                return nil, nil
+        }
+        rows, err := s.db.Query(ctx, `
+SELECT (date - (date % 86400)) AS day, SUM(amount)
+FROM stars_transactions WHERE user_id = $1 AND amount > 0
+GROUP BY 1 ORDER BY 1`, userID)
+        if err != nil {
+                return nil, fmt.Errorf("sum stars received daily: %w", err)
+        }
+        defer rows.Close()
+        out := make([]domain.StarsDailyPoint, 0, 8)
+        for rows.Next() {
+                var point domain.StarsDailyPoint
+                if err := rows.Scan(&point.Day, &point.Amount); err != nil {
+                        return nil, fmt.Errorf("scan stars received daily: %w", err)
+                }
+                out = append(out, point)
+        }
+        return out, rows.Err()
+}
+
 func (s *StarsStore) EnsureGrant(ctx context.Context, userID, amount int64, date int) (domain.StarsBalance, bool, error) {
         if userID == 0 {
                 return domain.StarsBalance{}, false, nil

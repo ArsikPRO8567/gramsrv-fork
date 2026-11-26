@@ -837,6 +837,9 @@ func (r *Router) onContactsDeleteContacts(ctx context.Context, ids []tg.InputUse
         }
         r.invalidateRPCProjectionForViewer(userID)
         r.applyUsernamesToPeerObjects(ctx, users, nil)
+        // Раунд 48 (анти-мерцание): ответ и его push идут одним объектом —
+        // кастомная верификация обязана быть на user-объектах до отправки.
+        r.applyBotVerificationIconsToPeerObjects(ctx, users, nil)
         out := &tg.Updates{Updates: updates, Users: users, Date: int(r.clock.Now().Unix())}
         r.pushUserUpdatesIfNoReliableDispatch(ctx, userID, out)
         return out, nil
@@ -1080,6 +1083,9 @@ func (r *Router) contactNoteRefreshUpdates(ctx context.Context, viewerUserID int
                 Date:    date,
         }
         r.applyUsernamesToPeerObjects(ctx, out.Users, nil)
+        // Раунд 48 (анти-мерцание): nudge затирает кэш peer-объекта клиента —
+        // значок кастомной верификации не должен исчезать после него.
+        r.applyBotVerificationIconsToPeerObjects(ctx, out.Users, nil)
         return out
 }
 

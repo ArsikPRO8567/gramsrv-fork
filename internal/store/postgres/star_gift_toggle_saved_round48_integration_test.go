@@ -1,12 +1,16 @@
 package postgres
 
-// Раунд 47 (задача ①): payments.saveStarGift (ToggleStarGiftSaved) НЕ должен
-// переписывать флаг saved в сервисных сообщениях о подарке. Официальный
-// Android-клиент по saved=true меняет главную подпись-плейсхолдер блока на
-// «Вы добавили подарок в свой профиль» — по требованию раунда 47 подпись не
-// меняется НИЗАВИСИМО от статуса отображения подарка в профиле: ни при
-// ручном добавлении, ни при скрытии, ни при одобрении pending-подарка.
-// Состояние отображения живёт только в peer_star_gifts.unsaved.
+// Раунд 48 (показ/скрытие из сервисного сообщения): payments.saveStarGift
+// (ToggleStarGiftSaved) снова переписывает флаг saved в сервисных сообщениях о
+// подарке (обе копии логического сообщения + канальные уведомления) и
+// доставляет durable edit-события. Диагностика раунда 48: Android-клиент
+// (StarGiftSheet) для регулярных подарков читает saved прямо из
+// messageActionStarGift и не перепрашивает состояние — при замороженном флаге
+// (раунд 47) переключение из сервисного сообщения отправляло unsave=false
+// всегда, и скрыть видимый в профиле подарок из чата было невозможно.
+// Подпись блока при saved=true задаётся langpack-строкой Gift2ActionSavedInfo,
+// приведённой к тексту Gift2ActionBotSavedInfo («Сейчас подарок виден в Вашем
+// профиле»), поэтому раунд 46 (корректная строка состояния) не регрессирует.
 
 import (
         "context"
@@ -18,7 +22,7 @@ import (
         "telesrv/internal/domain"
 )
 
-func toggleRound47RecipientGiftAction(t *testing.T, ctx context.Context, pool *pgxpool.Pool, userID int64, msgID int) *domain.MessageStarGiftAction {
+func toggleRound48RecipientGiftAction(t *testing.T, ctx context.Context, pool *pgxpool.Pool, userID int64, msgID int) *domain.MessageStarGiftAction {
         t.Helper()
         var mediaJSON string
         if err := pool.QueryRow(ctx, `SELECT p.media::text FROM private_messages p
@@ -34,7 +38,7 @@ WHERE b.owner_user_id=$1 AND b.box_id=$2`, userID, msgID).Scan(&mediaJSON); err 
         return media.ServiceAction.StarGift
 }
 
-func TestStarGiftToggleSavedDoesNotRewriteMessageSavedFlagPostgres(t *testing.T) {
+func TestStarGiftToggleSavedRewritesMessageSavedFlagPostgres(t *testing.T) {
         pool := testPool(t)
         ctx := context.Background()
         suffix := randomSuffix(t)
@@ -67,7 +71,7 @@ func TestStarGiftToggleSavedDoesNotRewriteMessageSavedFlagPostgres(t *testing.T)
                 BuyerUserID: sender.ID,
                 To:          domain.Peer{Type: domain.PeerTypeUser, ID: recipient.ID},
                 GiftID:      entry.Gift.ID,
-                CommandKey:  "toggle-round47-" + suffix,
+                CommandKey:  "toggle-round48-" + suffix,
                 Date:        now + 1,
         })
         purchased, err := lifecycle.PurchaseStarGift(ctx, req)
@@ -84,13 +88,14 @@ func TestStarGiftToggleSavedDoesNotRewriteMessageSavedFlagPostgres(t *testing.T)
 
         // Свежий подарок: saved=false (раунд 5) — клиент рисует подсказку
         // «добавить в профиль или конвертировать».
-        fresh := toggleRound47RecipientGiftAction(t, ctx, pool, recipient.ID, msgID)
+        fresh := toggleRound48RecipientGiftAction(t, ctx, pool, recipient.ID, msgID)
         if fresh.Saved {
                 t.Fatalf("fresh gift action saved = true, want false")
         }
 
         // 1) Ручное добавление в профиль (payments.saveStarGift unsave=false):
-        //    агрегат переходит в unsaved=false, но saved в сообщении НЕ меняется.
+        //    агрегат переходит в unsaved=false, saved в сообщении получателя
+        //    становится true (кнопка «скрыть» в шторке из сервисного сообщения).
         shown, changed, err := lifecycle.ToggleStarGiftSaved(ctx, domain.StarGiftSavedToggleRequest{
                 ActorUserID: recipient.ID,
                 Ref:         domain.SavedStarGiftRef{Owner: domain.Peer{Type: domain.PeerTypeUser, ID: recipient.ID}, MsgID: msgID},
@@ -103,12 +108,12 @@ func TestStarGiftToggleSavedDoesNotRewriteMessageSavedFlagPostgres(t *testing.T)
         if shown.Unsaved {
                 t.Fatalf("after show aggregate unsaved = true, want false")
         }
-        afterShow := toggleRound47RecipientGiftAction(t, ctx, pool, recipient.ID, msgID)
-        if afterShow.Saved {
-                t.Fatalf("after SHOW message saved = true, want false (задача ①: подпись блока не меняется)")
+        afterShow := toggleRound48RecipientGiftAction(t, ctx, pool, recipient.ID, msgID)
+        if !afterShow.Saved {
+                t.Fatalf("after SHOW message saved = false, want true (раунд 48: шторка из сервисного сообщения)")
         }
 
-        // 2) Скрытие (unsave=true): saved в сообщении по-прежнему не трогается.
+        // 2) Скрытие (unsave=true): saved в сообщении снова false.
         hidden, changed, err := lifecycle.ToggleStarGiftSaved(ctx, domain.StarGiftSavedToggleRequest{
                 ActorUserID: recipient.ID,
                 Ref:         domain.SavedStarGiftRef{Owner: domain.Peer{Type: domain.PeerTypeUser, ID: recipient.ID}, MsgID: msgID},
@@ -121,13 +126,13 @@ func TestStarGiftToggleSavedDoesNotRewriteMessageSavedFlagPostgres(t *testing.T)
         if !hidden.Unsaved || hidden.PinnedOrder != 0 {
                 t.Fatalf("after hide aggregate = %+v, want unsaved=true pinned=0", hidden)
         }
-        afterHide := toggleRound47RecipientGiftAction(t, ctx, pool, recipient.ID, msgID)
+        afterHide := toggleRound48RecipientGiftAction(t, ctx, pool, recipient.ID, msgID)
         if afterHide.Saved {
-                t.Fatalf("after HIDE message saved = true, want false (задача ①: подпись блока не меняется)")
+                t.Fatalf("after HIDE message saved = true, want false")
         }
 
         // 3) Повторное добавление и проверка копии ОТПРАВИТЕЛЯ: обе копии
-        // логического сообщения остаются с saved=false.
+        // логического сообщения получают одинаковый флаг.
         if _, _, err := lifecycle.ToggleStarGiftSaved(ctx, domain.StarGiftSavedToggleRequest{
                 ActorUserID: recipient.ID,
                 Ref:         domain.SavedStarGiftRef{Owner: domain.Peer{Type: domain.PeerTypeUser, ID: recipient.ID}, MsgID: msgID},
@@ -136,11 +141,11 @@ func TestStarGiftToggleSavedDoesNotRewriteMessageSavedFlagPostgres(t *testing.T)
         }); err != nil {
                 t.Fatalf("toggle show again: %v", err)
         }
-        senderAction := toggleRound47RecipientGiftAction(t, ctx, pool, sender.ID, msgID)
+        senderAction := toggleRound48RecipientGiftAction(t, ctx, pool, sender.ID, msgID)
         if senderAction == nil {
                 t.Fatalf("sender copy missing")
         }
-        if senderAction.Saved {
-                t.Fatalf("sender copy saved = true, want false (обе копии не переписываются)")
+        if !senderAction.Saved {
+                t.Fatalf("sender copy saved = false, want true (обе копии переписываются)")
         }
 }
