@@ -893,7 +893,27 @@ func tgStarsTransactionPeer(t domain.StarsTransaction) tg.StarsTransactionPeerCl
         switch t.Reason {
         case domain.StarsReasonGrant, domain.StarsReasonTopup:
                 return &tg.StarsTransactionPeerFragment{}
+        // Раунд 31: каналы приобретения пополнения — официальный клиент локализует
+        // начисление по типу peer (магазин приложения / бот / Fragment).
+        case domain.StarsReasonTopupAppStore:
+                return &tg.StarsTransactionPeerAppStore{}
+        case domain.StarsReasonTopupPlayMarket:
+                return &tg.StarsTransactionPeerPlayMarket{}
+        case domain.StarsReasonTopupBot:
+                return &tg.StarsTransactionPeerPremiumBot{}
         case domain.StarsReasonPremium:
+                // Раунд 45 (документация Telegram: starsTransactionPeer — «recipient for
+                // outgoing transactions», premium_gift_months — «payment for a gifted
+                // Telegram Premium subscription»). Подаренная подписка: peer = получатель
+                // подарка (premium_recipient_user_id) — только так клиент рисует
+                // «Gifted Premium {N} months to {peer}». Само-покупка через @premiumbot:
+                // peer = starsTransactionPeerPremiumBot (конструктор описывает транзакции,
+                // совершённые через @PremiumBot).
+                if t.RecipientUserID > 0 {
+                        if p := tgPeer(domain.Peer{Type: domain.PeerTypeUser, ID: t.RecipientUserID}); p != nil {
+                                return &tg.StarsTransactionPeer{Peer: p}
+                        }
+                }
                 return &tg.StarsTransactionPeerPremiumBot{}
         case domain.StarsReasonAds:
                 // «Реклама»: официальный сервер показывает доходы/расходы рекламной

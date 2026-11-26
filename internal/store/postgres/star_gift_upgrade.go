@@ -171,6 +171,17 @@ WHERE collectible_revision_id=$1 AND crafted
                         saved.ID = savedID
 
                         num := revision.Issued + 1
+                        // Раунд 41: конвертация подарка освобождает слот улучшения
+                        // (issued уменьшается), поэтому номер нового экземпляра не должен
+                        // переиспользовать номер уже выпущенного подарка той же ревизии:
+                        // берём максимум из issued+1 и существующих номеров.
+                        var adminMaxNum int
+                        if err := tx.QueryRow(ctx, `SELECT COALESCE(MAX(num), 0) FROM unique_star_gifts WHERE collectible_revision_id=$1`, revision.ID).Scan(&adminMaxNum); err != nil {
+                                return fmt.Errorf("allocate admin unique gift number: %w", err)
+                        }
+                        if num <= adminMaxNum {
+                                num = adminMaxNum + 1
+                        }
                         var uniqueID int64
                         if err := tx.QueryRow(ctx, `SELECT nextval('unique_star_gift_id_seq')`).Scan(&uniqueID); err != nil {
                                 return fmt.Errorf("allocate admin unique star gift id: %w", err)
@@ -482,6 +493,19 @@ WHERE collectible_revision_id=$1 AND crafted
                         if locked.GiftNum > 0 {
                                 num = locked.GiftNum
                         }
+                        // Раунд 41: конвертация подарка освобождает слот улучшения
+                        // (issued уменьшается), поэтому номер нового экземпляра не должен
+                        // переиспользовать номер уже выпущенного подарка той же ревизии:
+                        // берём максимум из issued+1 и существующих номеров. Явный номер
+                        // предоплаченного экземпляра (locked.GiftNum) не переиспользуется
+                        // тоже — он уже занят этим подарком.
+                        var maxNum int
+                        if err := tx.QueryRow(ctx, `SELECT COALESCE(MAX(num), 0) FROM unique_star_gifts WHERE collectible_revision_id=$1`, revision.ID).Scan(&maxNum); err != nil {
+                                return fmt.Errorf("allocate unique gift number: %w", err)
+                        }
+                        if num <= maxNum {
+                                num = maxNum + 1
+                        }
                         var uniqueID int64
                         if err := tx.QueryRow(ctx, `SELECT nextval('unique_star_gift_id_seq')`).Scan(&uniqueID); err != nil {
                                 return fmt.Errorf("allocate unique star gift id: %w", err)
@@ -649,6 +673,13 @@ WHERE user_id=$1 AND command_key=$2`, req.UserID, commandKey, ownerEditPts)
                                 if err := enqueueChannelStarGiftUniqueNotifications(ctx, tx, result.Saved.ID,
                                         result.Saved.Owner.ID, req.Date, channelStarGiftNotificationKindUniqueUpgrad,
                                         &notification, req.UserID); err != nil {
+                                        return err
+                                }
+                                // Раунд 43: старые «Telegram»-уведомления о покупке
+                                // (kind star_gift) продолжают рисовать кнопки «улучшить»/
+                                // «обменять» у уже уникального подарка — снимаем их edit-
+                                // событиями (convert-путь делает то же при конвертации).
+                                if err := editUpgradedChannelStarGiftNotificationsTx(ctx, tx, s.messages, result.Saved, req.Date); err != nil {
                                         return err
                                 }
                         }
@@ -864,17 +895,51 @@ FOR UPDATE`, req.UserID, sourceMessageID).Scan(&peerType, &peerID)
                         } else {
                                 action.UpgradeMsgID = 0
                         }
+                        // Раунд 45 (цены сервисных сообщений после дарения
+                        // улучшения): правка НЕ меняет отображаемую цену — она
+                        // закреплена за сообщением навсегда.
+                        //  - исходное сообщение с отдельной предоплатой (раунд 45:
+                        //    upgrade_stars=0, upgrade_separate=false) показывает
+                        //    чистый gift.stars и здесь не трогается; строкам из
+                        //    раундов 43/44 (upgrade_separate=true,
+                        //    upgrade_stars=сумма предоплаты) формат приводится к
+                        //    раунду 45 при первом улучшении — цена возвращается к
+                        //    исходной цене подарка;
+                        //  - исходное сообщение покупки с включённым улучшением
+                        //    (upgrade_separate=false, upgrade_stars=сумма
+                        //    предоплаты) несёт суммарную цену с момента доставки —
+                        //    она остаётся навсегда;
+                        //  - отдельное уведомление о предоплате (prepaid_upgrade=
+                        //    true) сохраняет prepaid_upgrade/upgrade_separate/
+                        //    upgrade_stars — его цена «подарок + улучшение» и
+                        //    подпись «отправил улучшение стоимостью X» остаются
+                        //    навсегда.
+                        // Действие при этом гасится: can_upgrade=false и
+                        // prepaid_upgrade_hash="" — улучшение уже выполнено и не
+                        // может быть выполнено повторно; prepaid_upgrade снимается
+                        // только у исходного сообщения (там он не выставляется
+                        // ни одним текущим сценарием, сброс нужен для сообщений,
+                        // записанных раундом 42), у уведомления он — часть
+                        // подписи.
                         action.CanUpgrade = false
                         action.PrepaidUpgradeHash = ""
-                        action.PrepaidUpgrade = false
-                        action.UpgradeSeparate = false
+                        if sourceMessageID == saved.MsgID {
+                                action.PrepaidUpgrade = false
+                                if action.UpgradeSeparate {
+                                        // Сообщения раундов 43/44: upgrade_separate=true
+                                        // был признаком отдельной предоплаты, но клиент
+                                        // пользователя складывает gift.stars +
+                                        // upgrade_stars независимо от флага. Приводим
+                                        // к раунду 45: цена снова = чистый gift.stars.
+                                        action.UpgradeSeparate = false
+                                        action.UpgradeStars = 0
+                                }
+                        }
                         // Подарок стал уникальным: ветка «обменять на звёзды» в исходном
                         // сервисном сообщении больше не имеет смысла (конвертация
                         // уникального подарка отклоняется агрегатом), клиент должен
                         // показывать нейтральное «подарок можно добавить в профиль».
                         action.ConvertStars = 0
-                        action.CanUpgrade = false
-                        action.PrepaidUpgradeHash = ""
                         mediaJSON, err := encodeMessageMedia(media)
                         if err != nil {
                                 return nil, fmt.Errorf("encode upgraded star gift source media: %w", err)
@@ -988,7 +1053,7 @@ func lockSavedStarGiftByID(ctx context.Context, tx pgx.Tx, savedID int64) (domai
 func lockSavedStarGiftWhere(ctx context.Context, tx pgx.Tx, where string, args ...any) (domain.SavedStarGift, error) {
         row := tx.QueryRow(ctx, `
 SELECT p.id, p.owner_peer_type, p.owner_peer_id, p.from_user_id, p.gift_id, p.catalog_revision_id,
-       p.msg_id, p.saved_id, p.gift_date, p.name_hidden, p.unsaved, p.converted, p.convert_stars, p.prepaid_upgrade_stars, p.prepaid_upgrade_hash, p.gift_num,
+       p.msg_id, p.saved_id, p.gift_date, p.name_hidden, p.unsaved, p.converted, p.convert_stars, p.prepaid_upgrade_stars, p.prepaid_upgrade_hash, p.gift_num, COALESCE(p.paid_stars, 0),
            p.lifecycle_status, p.transfer_stars, p.can_export_at, p.can_transfer_at, p.can_resell_at,
            p.drop_original_details_stars, p.can_craft_at,
        p.message, COALESCE(p.message_entities, '[]'::jsonb)::text, COALESCE(p.unique_gift_id, 0), p.upgrade_msg_id, p.pinned_order,

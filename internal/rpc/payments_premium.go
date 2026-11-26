@@ -242,6 +242,13 @@ func (r *Router) resolvePremiumInvoice(
                 } else if restricted {
                         return domain.PremiumInvoice{}, tgerr.New(403, "USER_PRIVACY_RESTRICTED")
                 }
+                // Раунд 45: подарочная подписка — подарочное действие в отношении
+                // получателя: служебные аккаунты недоступны. Знакомство бота с
+                // раунда 46 проверяется ниже по звёздному пути (PEER_ID_INVALID);
+                // фиатный инвойс бот построить не может (BOT_METHOD_INVALID).
+                if err := r.enforceGiftRecipientRules(ctx, userID, domain.Peer{Type: domain.PeerTypeUser, ID: recipient.ID}); err != nil {
+                        return domain.PremiumInvoice{}, err
+                }
                 plan, err := r.deps.Premium.Plan(ctx, invoice.Option.Months)
                 if err != nil {
                         return domain.PremiumInvoice{}, premiumPaymentErr(err)
@@ -288,6 +295,11 @@ func (r *Router) resolvePremiumInvoice(
                 // Раунд 46 (задача ④): подарить Premium бот может только
                 // «знакомому» пользователю — иначе PEER_ID_INVALID.
                 if err := r.ensureBotGiftAcquaintance(ctx, userID, domain.Peer{Type: domain.PeerTypeUser, ID: recipient.ID}); err != nil {
+                        return domain.PremiumInvoice{}, err
+                }
+                // Раунд 45: подарочная подписка за звёзды — подарочное действие в
+                // отношении получателя: служебные аккаунты недоступны.
+                if err := r.enforceGiftRecipientRules(ctx, userID, domain.Peer{Type: domain.PeerTypeUser, ID: recipient.ID}); err != nil {
                         return domain.PremiumInvoice{}, err
                 }
                 if restricted, err := r.premiumGiftsRestricted(ctx, recipient.ID); err != nil {

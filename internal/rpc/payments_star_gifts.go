@@ -236,7 +236,11 @@ func (r *Router) ensureStarGiftRecipientExists(ctx context.Context, buyerUserID 
         if !found || recipient.ID <= 0 || recipient.Deleted {
                 return userIDInvalidErr()
         }
-        return nil
+        // Раунд 45: служебные аккаунты (USER_GIFT_UNAVAILABLE) и боты
+        // (PEER_ID_INVALID) не получают подарков. Знакомство бота с получателем
+        // с раунда 46 проверяется отдельно (ensureBotGiftAcquaintance, ниже по
+        // потоку — ошибка PEER_ID_INVALID).
+        return r.enforceGiftRecipientRules(ctx, buyerUserID, peer)
 }
 
 func validateStarsGiftOption(purpose *tg.InputStorePaymentStarsGift) (tg.StarsGiftOption, error) {
@@ -1023,6 +1027,8 @@ func (r *Router) starsTopupPaymentForm(ctx context.Context, userID int64, purpos
         form, err := service.IssuePurchaseForm(ctx, domain.StarsPurchaseForm{
                 Kind: domain.StarsPurchaseTopup, BuyerUserID: userID,
                 SpendPurposePeer: peer,
+                // Раунд 31: канал приобретения — по платформе сессии покупателя.
+                Acquisition:      starsTopupAcquisitionForClient(r, ctx),
                 Stars:            purpose.Stars, Currency: purpose.Currency, Amount: purpose.Amount,
                 IssuedAt: now, ExpiresAt: now + 600,
         })
@@ -1054,6 +1060,8 @@ func (r *Router) sendStarsTopupForm(ctx context.Context, userID, formID int64, i
                 StarsPurchaseForm: domain.StarsPurchaseForm{
                         FormID: formID, Kind: domain.StarsPurchaseTopup, BuyerUserID: userID,
                         SpendPurposePeer: peer,
+                        // Раунд 31: канал приобретения — по платформе сессии покупателя.
+                        Acquisition:      starsTopupAcquisitionForClient(r, ctx),
                         Stars:            purpose.Stars, Currency: purpose.Currency, Amount: purpose.Amount,
                 },
                 Date: int(r.clock.Now().Unix()), OriginAuthKeyID: rawAuthKeyIDForOrigin(ctx),
@@ -1063,6 +1071,24 @@ func (r *Router) sendStarsTopupForm(ctx context.Context, userID, formID int64, i
                 return nil, starsPurchaseErr(err)
         }
         return &tg.PaymentsPaymentResult{Updates: starsBalanceUpdates(result.Balance.Balance, r.clock.Now().Unix())}, nil
+}
+
+// starsTopupAcquisitionForClient выбирает канал приобретения пополнения по
+// платформе сессии покупателя (раунд 31): iOS -> App Store, Android ->
+// Google Play, desktop/web/неизвестная платформа -> Fragment.
+func starsTopupAcquisitionForClient(r *Router, ctx context.Context) domain.StarsTopupAcquisition {
+        info, ok := ClientInfoFrom(ctx)
+        if !ok || !info.typeResolved {
+                return domain.StarsTopupFragment
+        }
+        switch info.Type {
+        case ClientTypeIOS:
+                return domain.StarsTopupAppStore
+        case ClientTypeAndroid:
+                return domain.StarsTopupPlayMarket
+        default:
+                return domain.StarsTopupFragment
+        }
 }
 
 func (r *Router) sendStarGiftToUser(ctx context.Context, senderID, recipientID int64, gift domain.StarGift, hideName bool,
@@ -1079,7 +1105,12 @@ func (r *Router) sendStarGiftToUser(ctx context.Context, senderID, recipientID i
                 }
                 prepaidUpgradeHash = base64.RawURLEncoding.EncodeToString(token[:])
         }
-        // 2. 投递礼物服务消息到收礼人私聊（双盒 + 推送）。
+        // 2. 投递礼物服务消息到收礼人私聊（双盒 + 推送）。Раунд 46 (задача ①):
+        // saved-флаг СВЕЖЕГО подарка в сообщении всегда false — иначе клиент при
+        // автопоказе по приватности рисует заголовок «Вы добавили подарок в свой
+        // профиль» вместо исходного «получили подарок»; флаг конфиденциальности
+        // получателя (unsaved) продолжает определять отображение в сетке профиля
+        // через агрегат (RecordSavedGift ниже).
         send, err := r.deliverStarGift(ctx, senderID, recipientID, gift, hideName, message, messageEntities, prepaidUpgradeStars, prepaidUpgradeHash)
         if err != nil {
                 return domain.SavedStarGiftRef{}, nil, err
@@ -1296,10 +1327,12 @@ func (r *Router) deliverStarGift(ctx context.Context, senderID, recipientID int6
                                 PeerUserID:      recipientID,
                                 To:              domain.Peer{Type: domain.PeerTypeUser, ID: recipientID},
                                 NameHidden:      hideName,
-                                // Свежий подарок ещё не отображается в профиле получателя:
-                                // Saved=false — иначе клиент получателя показывает «сейчас
-                                // подарок виден в вашем профиле» вместо подсказки об
-                                // улучшении до уникального коллекционного.
+                                // Раунд 46 (задача ①): заголовок сервисного сообщения о свежем
+                                // подарке не должен превращаться в «Вы добавили подарок в свой
+                                // профиль» — saved всегда false, независимо от автопоказа по
+                                // приватности. Отображение в профиле по-прежнему регулируется
+                                // агрегатным unsaved (раунд 45), клиент перепроверяет статус
+                                // через payments.getSavedStarGift.
                                 Saved:              false,
                                 CanUpgrade:         canUpgrade,
                                 PrepaidUpgradeHash: prepaidUpgradeHash,
@@ -1454,6 +1487,33 @@ func (r *Router) onPaymentsSaveStarGift(ctx context.Context, req *tg.PaymentsSav
         }
         if err := r.ensureCanManageStarGiftOwner(ctx, userID, ref.Owner); err != nil {
                 return false, err
+        }
+        // Продакшн-путь (раунд 42): агрегат синхронно переписывает флаг saved во
+        // всех сервисных сообщениях о подарке — кнопки «показать/скрыть» в чате
+        // отражают состояние сразу (и обычный, и уникальный подарок).
+        // Изолированные memory-адаптеры без lifecycle-хранилища продолжают
+        // работать через ToggleSaved: агрегатный метод есть у того же
+        // stargifts.Service, поэтому ветку выбирает проверка конфигурации
+        // (AtomicPurchaseConfigured = lifecycle-хранилище подключено).
+        if aggregator, ok := r.deps.Gifts.(interface {
+                AtomicPurchaseConfigured() bool
+                ToggleSavedAggregate(context.Context, domain.StarGiftSavedToggleRequest) (domain.SavedStarGift, bool, error)
+        }); ok && aggregator != nil && aggregator.AtomicPurchaseConfigured() {
+                _, toggled, aggErr := aggregator.ToggleSavedAggregate(ctx, domain.StarGiftSavedToggleRequest{
+                        ActorUserID: userID,
+                        Ref:         ref,
+                        Unsaved:     req.Unsave,
+                        Date:        int(r.clock.Now().Unix()),
+                })
+                if aggErr != nil {
+                        return false, internalErr()
+                }
+                if !toggled {
+                        return false, starGiftInvalidErr()
+                }
+                // 隐藏/展示切换改变展示礼物数 → 失效 owner full 投影。
+                r.invalidateStarGiftOwnerProjection(ref.Owner)
+                return true, nil
         }
         updated, err := r.deps.Gifts.ToggleSaved(ctx, ref, req.Unsave)
         if err != nil {
@@ -2106,7 +2166,10 @@ func tgSavedStarGifts(viewerUserID int64, gifts []domain.SavedStarGift, catalog 
                 if g.Unsaved {
                         item.Unsaved = true
                 }
-                if g.FromUserID != 0 && savedStarGiftOriginalDetailsVisible(viewerUserID, g) {
+                // Раунд 44: отправитель обёртки (иконка/имя над подарком в сетке
+                // профиля и строка «From» в шторке) гейтится отдельно от 附言 — у
+                // уникальных подарков он виден только владельцу NFT.
+                if g.FromUserID != 0 && savedStarGiftSenderVisible(viewerUserID, g) {
                         item.SetFromID(&tg.PeerUser{UserID: g.FromUserID})
                 }
                 if g.Owner.Type == domain.PeerTypeUser && g.MsgID > 0 {
@@ -2260,23 +2323,67 @@ func tgSavedStarGiftGift(g domain.SavedStarGift, viewerUserID int64, catalog map
         }
 }
 
+// savedStarGiftSenderVisible — виден ли зрителю ОТПРАВИТЕЛЬ подарка
+// (обёрточный savedStarGift.from_id): иконка/имя над подарком в сетке профиля
+// и строка «From» в шторке (Android GiftCell рисует их из обёртки, iOS — для
+// обычных подарков тоже).
+//
+// Раунд 28: на личных профилях отправитель НЕанонимных ОБЫЧНЫХ подарков
+// публичен — официальная сетка профиля рисует имя/иконку отправителя у каждого
+// зрителя (фикс «на чужом профиле все подарки от анонима»). Анонимные подарки
+// (name_hidden) раскрывают отправителя только получателю-пользователю: iOS
+// строит InputSavedStarGiftUser по msg_id из этого peer (тест миграции 0181).
+//
+// Раунд 43: в канальных списках подарков отправитель НЕанонимного подарка
+// виден любому зрителю, а не только администрации канала (официальные
+// клиенты рисуют «{user} отправил(а) этот подарок» в сетке профиля канала
+// у всех). Отправителей СКРЫТЫХ подарков по-прежнему видит только тот, кто
+// управляет профилем канала — ViewerCanManage проставляют RPC-хендлеры,
+// см. tgSavedStarGiftsResponse, раунд 25.
+//
+// Раунд 44: у УНИКАЛЬНЫХ (коллекционных) подарков на личном профиле
+// отправитель виден ТОЛЬКО владельцу NFT — независимо от name_hidden.
+// Регрессия: после раунда 28 отправителя коллекционного подарка видел любой
+// зритель профиля («вверху над коллекционным подарком»). Отправителем
+// считается тот, кто отправил редкий подарок, передал его или купил для
+// владельца; самокупка тоже делает владельца отправителем — эта цепочка уже
+// поддержана в peer_star_gifts.from_user_id (transfer/resale/offer обновляют
+// поле). Оригинальные детали (original_details.sender_id) остаются публичными
+// как на официальных серверах — они «заморожены» и не следуют за цепочкой
+// передач, которую описывает правило раунда.
+func savedStarGiftSenderVisible(viewerUserID int64, gift domain.SavedStarGift) bool {
+        if gift.Owner.Type == domain.PeerTypeChannel {
+                // Канал: админ видит даже скрытых отправителей, остальные — только
+                // неанонимных (name_hidden=false).
+                return gift.ViewerCanManage || !gift.NameHidden
+        }
+        if gift.Unique != nil {
+                // Раунд 44: коллекционный подарок — только владелец NFT видит
+                // отправителя, остальные зрители получают бейдж «Аноним».
+                return gift.Owner.ID == viewerUserID
+        }
+        if gift.NameHidden {
+                return gift.Owner.ID == viewerUserID
+        }
+        return true
+}
+
 // savedStarGiftOriginalDetailsVisible — видны ли получателю-зрителю
 // «оригинальные детали» подарка в профиле: отправитель (savedStarGift.from_id,
 // подпись «{отправитель} отправил(а) Вам этот подарок {дата}») и 附言.
+// Отправитель с раунда 44 гейтится отдельно — savedStarGiftSenderVisible.
 //
-// Раунд 25: в канальных списках подарков подпись отправителя и附言 видит
-// только администрация канала — право проставляют RPC-хендлеры в
-// SavedStarGift.ViewerCanManage (см. tgSavedStarGiftsResponse).
+// Раунд 28: на личных профилях 附言 НЕанонимных подарков публична; анонимные
+// (name_hidden) — только получателю-пользователю.
 //
-// Раунд 28: на личных профилях отправитель НЕанонимных подарков публичен —
-// официальная сетка профиля рисует имя/иконку отправителя у каждого зрителя
-// (фикс «на чужом профиле все подарки от анонима»). Анонимные подарки
-// (name_hidden) как и раньше раскрывают отправителя только
-// получателю-пользователю: iOS строит InputSavedStarGiftUser по msg_id из
-// этого peer (см. тест миграции 0181).
+// Раунд 43: в канальных списках 附言 НЕанонимного подарка видна любому
+// зрителю; СКРЫТЫХ — только тому, кто управляет профилем канала
+// (ViewerCanManage проставляют RPC-хендлеры, см. tgSavedStarGiftsResponse).
 func savedStarGiftOriginalDetailsVisible(viewerUserID int64, gift domain.SavedStarGift) bool {
         if gift.Owner.Type == domain.PeerTypeChannel {
-                return gift.ViewerCanManage
+                // Раунд 43: неанонимное сообщение отправителя видят все зрители
+                // канального списка; скрытое — только управляющие профилем.
+                return gift.ViewerCanManage || !gift.NameHidden
         }
         if gift.NameHidden {
                 return gift.Owner.ID == viewerUserID
@@ -2298,7 +2405,9 @@ func savedStarGiftUserIDs(viewerUserID int64, gifts []domain.SavedStarGift) []in
                 ids = append(ids, id)
         }
         for _, g := range gifts {
-                if g.FromUserID == 0 || !savedStarGiftOriginalDetailsVisible(viewerUserID, g) {
+                // Раунд 44: тот же sender-гейт, что и на wire — иначе отправитель
+                // уникального подарка утекал через users-вектор ответа.
+                if g.FromUserID == 0 || !savedStarGiftSenderVisible(viewerUserID, g) {
                         continue
                 }
                 add(g.FromUserID)

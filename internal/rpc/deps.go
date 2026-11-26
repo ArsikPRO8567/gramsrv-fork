@@ -1064,6 +1064,10 @@ type Deps struct {
         EphemeralPush           store.EphemeralPushBroker
         Moderation              ModerationService
         Users                   UsersService
+        // GiftActorRules — раунд 45: флаги service_account (миграция 0200) и
+        // история приватных чатов для правила «бот дарит только знакомым».
+        // nil = ограничения не применяются (тестовые подделки).
+        GiftActorRules          GiftActorRulesStore
         Usernames               UsernameRegistryService
         CollectiblePhones       CollectiblePhoneService
         AccountRatings          AccountRatingService
@@ -1206,6 +1210,12 @@ type StarsService interface {
         DebitFlags(ctx context.Context, userID, amount int64, reason domain.StarsTransactionReason, peer domain.Peer, flags domain.StarsLedgerFlags, title, desc string) (domain.StarsBalance, error)
         ListTransactions(ctx context.Context, userID int64, query domain.StarsTransactionQuery) (domain.StarsTransactionPage, error)
         ListTransactionsByID(ctx context.Context, userID int64, ids []string) ([]domain.StarsTransaction, error)
+        // RefundPaidMessages гасит проводки платных сообщений payer'а в пользу
+        // owner'а (account.toggleNoPaidMessagesException(refund_charged=true)).
+        RefundPaidMessages(ctx context.Context, ownerUserID, payerUserID int64) (domain.PaidMessagesRefund, error)
+        // PaidMessagesRevenue — непогашенная сумма платежей payer'а за сообщения
+        // в адрес peer'а (account.getPaidMessagesRevenue).
+        PaidMessagesRevenue(ctx context.Context, payerUserID int64, peer domain.Peer) (int64, error)
 }
 
 // PremiumService is the domain-only boundary for catalog reads, payment form

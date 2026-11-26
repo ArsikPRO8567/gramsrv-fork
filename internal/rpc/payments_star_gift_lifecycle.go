@@ -32,6 +32,12 @@ func (r *Router) sendStarGiftTransferForm(ctx context.Context, userID, formID in
         if err := r.ensureBotGiftAcquaintance(ctx, userID, to); err != nil {
                 return nil, err
         }
+        // Раунд 45: передача коллекционного подарка — подарочное действие в
+        // отношении получателя: служебные аккаунты (USER_GIFT_UNAVAILABLE) и
+        // боты (PEER_ID_INVALID) недоступны.
+        if err := r.enforceGiftRecipientRules(ctx, userID, to); err != nil {
+                return nil, err
+        }
         wantFormID := starGiftLifecycleFormID("transfer", userID,
                 target.ID, target.Owner.Type, target.Owner.ID, to.Type, to.ID, target.TransferStars, target.CanTransferAt)
         if formID == 0 || formID != wantFormID {
@@ -101,6 +107,12 @@ func (r *Router) sendStarGiftResaleForm(ctx context.Context, userID, formID int6
                 return nil, err
         }
         if err := r.ensureBotGiftAcquaintance(ctx, userID, to); err != nil {
+                return nil, err
+        }
+        // Раунд 45: покупка на маркете — подарочное действие в отношении
+        // ПРОДАВЦА (текущего владельца подарка): служебные аккаунты
+        // (USER_GIFT_UNAVAILABLE) и боты (PEER_ID_INVALID) недоступны.
+        if err := r.enforceGiftRecipientRules(ctx, userID, gift.Owner); err != nil {
                 return nil, err
         }
         wantFormID := starGiftLifecycleFormID("resale", userID,
@@ -263,16 +275,43 @@ func (r *Router) starGiftAuctionBidTarget(ctx context.Context, userID int64, inv
         oldAmount := state.UserState.BidAmount
         peer := domain.Peer{Type: domain.PeerTypeUser, ID: userID}
         if inv.UpdateBid {
-                if oldAmount <= 0 || inv.HideName {
+                // Раунд 31 (официальные клиенты, документация api/auctions): при
+                // update_bid=true клиент вправе ДОПОЛНИТЬ инвойс peer/message/
+                // hide_name — Android GiftAuctionController.sendBid всегда
+                // прикладывает AuctionBidSheet.Params (AuctionWearingSheet шлёт
+                // hide_name=true, SendGiftSheet — peer+message), tdesktop
+                // PlaceAuctionBid передаёт peer+message, когда форма отправки
+                // подарка открыта с деталями. Официальный сервер такие поля
+                // принимает, поэтому отклонять инвойс (STARGIFT_INVALID)
+                // нельзя.
+                //
+                // АКТИВНАЯ ставка: получатель/сообщение/анонимность существующей
+                // ставки не меняются («the value cannot be changed for existing
+                // bids») — поля инвойса игнорируются, используется прежний
+                // bid_peer.
+                if oldAmount <= 0 || !state.UserState.BidActive && !state.UserState.Returned {
                         return domain.StarGiftAuction{}, domain.Peer{}, 0, starGiftInvalidErr()
                 }
-                if _, ok := inv.GetPeer(); ok {
-                        return domain.StarGiftAuction{}, domain.Peer{}, 0, starGiftInvalidErr()
+                if state.UserState.BidActive {
+                        peer = state.UserState.BidPeer
+                } else {
+                        // ВОЗВРАЩЁННАЯ ставка (перебита и снята с аукциона,
+                        // звёзды возвращены): повторное участие документировано
+                        // как «новая ставка», при этом клиенты всё равно шлют
+                        // update_bid=true, потому что bid_amount в user_state
+                        // сохраняется. Атрибуты берутся из инвойса (как у новой
+                        // ставки); стор для неактивной строки применяет
+                        // EXCLUDED-значения. Без peer в инвойсе — прежний
+                        // получатель (чистое увеличение из bid box).
+                        if inputPeer, ok := inv.GetPeer(); ok {
+                                peer, err = r.checkedDomainPeerFromInputPeer(ctx, userID, inputPeer)
+                                if err != nil {
+                                        return domain.StarGiftAuction{}, domain.Peer{}, 0, err
+                                }
+                        } else {
+                                peer = state.UserState.BidPeer
+                        }
                 }
-                if _, ok := inv.GetMessage(); ok {
-                        return domain.StarGiftAuction{}, domain.Peer{}, 0, starGiftInvalidErr()
-                }
-                peer = state.UserState.BidPeer
         } else {
                 // Раунд 21 (исправление): новую ставку блокирует только АКТИВНАЯ
                 // ставка того же пользователя. Возвращённая ставка (перебита и
@@ -328,6 +367,11 @@ func (r *Router) starGiftPrepaidUpgradePaymentForm(ctx context.Context, userID i
         if err := r.ensureBotGiftAcquaintance(ctx, userID, owner); err != nil {
                 return nil, err
         }
+        // Раунд 45: предоплата улучшения чужого подарка — подарочное действие в
+        // отношении владельца подарка: служебные аккаунты и боты недоступны.
+        if err := r.enforceGiftRecipientRules(ctx, userID, owner); err != nil {
+                return nil, err
+        }
         formID := starGiftLifecycleFormID("prepay-upgrade", userID, owner.Type, owner.ID, target.ID, inv.Hash, price)
         return &tg.PaymentsPaymentFormStarGift{FormID: formID,
                 Invoice: tg.Invoice{Currency: "XTR", Prices: []tg.LabeledPrice{{Label: "Prepaid collectible gift upgrade", Amount: price}}}}, nil
@@ -353,6 +397,10 @@ func (r *Router) sendStarGiftPrepaidUpgradeForm(ctx context.Context, userID, for
         }
         // Раунд 46: предоплата улучшения чужого подарка — тоже подарочная операция.
         if err := r.ensureBotGiftAcquaintance(ctx, userID, owner); err != nil {
+                return nil, err
+        }
+        // Раунд 45: служебные аккаунты и боты недоступны как получатели.
+        if err := r.enforceGiftRecipientRules(ctx, userID, owner); err != nil {
                 return nil, err
         }
         if r.deps.Stars != nil {
@@ -785,6 +833,16 @@ func (r *Router) onPaymentsSendStarGiftOffer(ctx context.Context, req *tg.Paymen
                 return nil, starGiftInvalidErr()
         }
         now := int(r.clock.Now().Unix())
+        // Раунд 45: предложение о покупке — подарочное действие в отношении
+        // владельца коллекционного подарка: служебные аккаунты
+        // (USER_GIFT_UNAVAILABLE) и боты (PEER_ID_INVALID) недоступны.
+        // Раунд 46: бот предлагает только «знакомым» владельцам.
+        if err := r.ensureBotGiftAcquaintance(ctx, userID, owner); err != nil {
+                return nil, err
+        }
+        if err := r.enforceGiftRecipientRules(ctx, userID, owner); err != nil {
+                return nil, err
+        }
         result, err := r.deps.Gifts.SendOffer(ctx, domain.StarGiftOfferRequest{BuyerUserID: userID,
                 Owner: owner, Slug: req.Slug, Price: price, Duration: req.Duration, RandomID: req.RandomID, Date: now,
                 OriginAuthKeyID: rawAuthKeyIDForOrigin(ctx), OriginSessionID: sessionIDOrZero(ctx)})
@@ -805,9 +863,20 @@ func (r *Router) onPaymentsResolveStarGiftOffer(ctx context.Context, req *tg.Pay
                 return nil, internalErr()
         }
         now := int(r.clock.Now().Unix())
+        // Раунд 45: флаг saved уникального подарка, переданного по принятому
+        // офферу, следует настройкам конфиденциальности покупателя
+        // (privacyKeyStarGiftsAutoSave + исключения). Покупатель известен только
+        // внутри агрегата, поэтому передаётся функция оценки.
+        unsavedFor := func(buyerUserID int64) bool {
+                unsaved, err := r.starGiftRecipientUnsaved(ctx, userID, domain.Peer{Type: domain.PeerTypeUser, ID: buyerUserID})
+                if err != nil {
+                        return false
+                }
+                return unsaved
+        }
         result, err := r.deps.Gifts.ResolveOffer(ctx, domain.StarGiftResolveOfferRequest{OwnerUserID: userID,
                 OfferMsgID: req.OfferMsgID, Decline: req.Decline, Date: now, OriginAuthKeyID: rawAuthKeyIDForOrigin(ctx),
-                OriginSessionID: sessionIDOrZero(ctx)})
+                OriginSessionID: sessionIDOrZero(ctx), RecipientUnsavedFor: unsavedFor})
         if err != nil {
                 return nil, starGiftLifecycleErr(err)
         }
