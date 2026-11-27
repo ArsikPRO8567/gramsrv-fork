@@ -359,17 +359,31 @@ func (r *Router) personalStarsRevenueStats(ctx context.Context, callerUserID int
         return stats
 }
 
+// starsRevenueGraphNotEnoughData — TL-стаб пустого графика. revenue_graph в
+// payments.starsRevenueStats#6c207376 — ОБЯЗАТЕЛЬНОЕ (не flags-опциональное)
+// поле: энкодер слоя отказывается кодировать nil («field revenue_graph is nil»),
+// mtprotoedge публикует вместо результата INTERNAL, и клиент теряет ВЕСЬ ответ
+// — числа баланса и график целиком. Именно это раунд 50 зафиксировал в логах
+// («Encode RPC result failed ... field revenue_graph is nil») как причину
+// пропавших графиков звёзд, пустых групповых экранов и утраченного баланса
+// бота. Официальный клиент рисует StatsGraphError строкой «Not enough data to
+// display», оставляя числа баланса видимыми.
+func starsRevenueGraphNotEnoughData() tg.StatsGraphClass {
+        return &tg.StatsGraphError{Error: "Not enough data to display."}
+}
+
 // starsRevenueGraph строит statsGraph#8ea464b6 с JSON графика ежедневных
 // поступлений (раунд 48). Формат — StackBarChartData официального Android-
 // клиента (StatisticActivity.createViewData → ChartData): columns с рядом
 // "x" (UTC-полдень в миллисекундах) и рядом "y0" (сумма поступлений за день),
 // имена/цвета и форматоры значений. Дни без поступлений заполняются нулями,
 // чтобы ось X покрывала все дни с первого дня с поступлениями до сегодня.
-// nil (и нейтральный StatsGraphError-стаб в ответе) остаётся для леджеров без
-// единого поступления — графику нечего показывать, числа при этом отдаются.
+// Леджер без единого поступления и сбой маршалинга возвращают валидный
+// StatsGraphError-стаб (см. starsRevenueGraphNotEnoughData): revenue_graph —
+// обязательное поле конструктора, nil здесь ломает кодирование всего ответа.
 func starsRevenueGraph(points []domain.StarsDailyPoint, nowUnix int64, ton bool) tg.StatsGraphClass {
         if len(points) == 0 {
-                return nil
+                return starsRevenueGraphNotEnoughData()
         }
         byDay := make(map[int64]int64, len(points))
         for _, point := range points {
@@ -380,7 +394,7 @@ func starsRevenueGraph(points []domain.StarsDailyPoint, nowUnix int64, ton bool)
                 byDay[day] += point.Amount
         }
         if len(byDay) == 0 {
-                return nil
+                return starsRevenueGraphNotEnoughData()
         }
         first := int64(0)
         for day := range byDay {
@@ -423,7 +437,7 @@ func starsRevenueGraph(points []domain.StarsDailyPoint, nowUnix int64, ton bool)
         }
         data, err := json.Marshal(payload)
         if err != nil {
-                return nil
+                return starsRevenueGraphNotEnoughData()
         }
         return &tg.StatsGraph{JSON: tg.DataJSON{Data: string(data)}}
 }

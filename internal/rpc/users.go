@@ -171,6 +171,7 @@ func (r *Router) onUsersGetFullUser(ctx context.Context, id tg.InputUserClass) (
 		r.applyStoriesPinnedAvailableToUserFull(ctx, currentUserID, u.ID, &full)
 		r.applyNotifySettingsToUserFull(ctx, currentUserID, u.ID, &full)
 		r.applyBotVerificationToUserFull(ctx, u.ID, &full)
+		r.applyBotRevenueViewToUserFull(ctx, currentUserID, u, &full)
 		applyPrivateContactRestrictionToUserFull(&full, contactRestriction)
 		chats := r.applyPersonalChannelToUserFull(ctx, currentUserID, u.PersonalChannelID, &full)
 		return &tg.UsersUserFull{
@@ -196,6 +197,7 @@ func (r *Router) onUsersGetFullUser(ctx context.Context, id tg.InputUserClass) (
 	// is not baked into the per-(viewer,target) cache, so a revoked badge is gone on
 	// the next response instead of lingering for the cache TTL.
 	r.applyBotVerificationToUserFull(ctx, u.ID, &full)
+	r.applyBotRevenueViewToUserFull(ctx, currentUserID, u, &full)
 	applyPrivateContactRestrictionToUserFull(&full, contactRestriction)
 	chats := r.applyPersonalChannelToUserFull(ctx, currentUserID, u.PersonalChannelID, &full)
 	return &tg.UsersUserFull{
@@ -538,6 +540,34 @@ func (r *Router) applyBotCanEditToUser(ctx context.Context, currentUserID int64,
 		user.SetBotCanEdit(true)
 	}
 	return nil
+}
+
+// applyBotRevenueViewToUserFull ставит userFull#6cbe645 can_view_revenue
+// (flags2.9) — гейт экрана баланса/монетизации бота (TDesktop data_user.cpp
+// canViewRevenue, DrKLO ProfileActivity bot-настройки: строка «Balance» и
+// экран TON-доходов с графиком payments.getStarsRevenueStats(ton=true)
+// открываются только при этом флаге). Без него клиент скрывает пункт
+// «просмотр баланса бота», и TON-график бота недостижим ни при каком ответе
+// статистики. Флаг viewer-scoped (владелец или собственная bot-сессия),
+// поэтому применяется как детерминированный post-cache overlay на ОБЕИХ
+// ветках getFullUser — бит сбрасывается сначала, чтобы ответ не-owner не мог
+// протащить флаг из кэша клиента.
+func (r *Router) applyBotRevenueViewToUserFull(ctx context.Context, viewerUserID int64, u domain.User, full *tg.UserFull) {
+	if full == nil || !u.Bot {
+		return
+	}
+	full.Flags2.Unset(9)
+	if r.deps.Bots == nil || viewerUserID <= 0 || u.ID <= 0 {
+		return
+	}
+	if viewerUserID == u.ID {
+		full.SetCanViewRevenue(true)
+		return
+	}
+	owns, err := r.deps.Bots.OwnsBot(ctx, viewerUserID, u.ID)
+	if err == nil && owns {
+		full.SetCanViewRevenue(true)
+	}
 }
 
 func (r *Router) onUsersGetRequirementsToContact(ctx context.Context, ids []tg.InputUserClass) ([]tg.RequirementToContactClass, error) {

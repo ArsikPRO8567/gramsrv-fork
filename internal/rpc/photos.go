@@ -639,6 +639,14 @@ func (r *Router) pushSelfPhotoUpdateWithUser(ctx context.Context, self domain.Us
 	if self.ID == 0 || projected == nil {
 		return
 	}
+	// Раунд 50 (анти-мерцание): этот updates-объект едет и через pushUserUpdates
+	// (граница applyPushPeerOverlays штампует иконку верификации), и напрямую
+	// в текущую session (pushSelfPhotoUpdateToCurrentSession — мимо границы).
+	// Штампуем bot_verification_icon заранее, чтобы объект был одинаковым на
+	// обеих дорогах и отложенный echo-push не затирал кэш пира клиента
+	// user-объектом без значка.
+	applyBotVerificationIconToUsers([]tg.UserClass{projected}, self.ID,
+		r.peerBotVerificationIcon(ctx, domain.Peer{Type: domain.PeerTypeUser, ID: self.ID}))
 	updates := selfPhotoUpdates(self, int(r.clock.Now().Unix()), projected)
 	r.pushUserUpdates(ctx, self.ID, updates)
 	r.pushSelfPhotoUpdateToCurrentSession(ctx, updates)
@@ -648,6 +656,8 @@ func (r *Router) pushBotPhotoUpdateToOwner(ctx context.Context, ownerUserID int6
 	if ownerUserID == 0 || bot.ID == 0 || projected == nil {
 		return
 	}
+	applyBotVerificationIconToUsers([]tg.UserClass{projected}, bot.ID,
+		r.peerBotVerificationIcon(ctx, domain.Peer{Type: domain.PeerTypeUser, ID: bot.ID}))
 	updates := selfPhotoUpdates(bot, int(r.clock.Now().Unix()), projected)
 	r.pushUserUpdates(ctx, ownerUserID, updates)
 	r.pushSelfPhotoUpdateToCurrentSession(ctx, updates)
