@@ -114,11 +114,6 @@ func tgMessage(m domain.Message) tg.MessageClass {
         if m.Effect != 0 {
                 msg.SetEffect(m.Effect)
         }
-        // Раунд 37: платные сообщения в личных чатах — бейдж "оплачено N Stars"
-        // видят обе стороны (message.paid_message_stars).
-        if m.PaidMessageStars > 0 {
-                msg.SetPaidMessageStars(m.PaidMessageStars)
-        }
         if !m.Media.IsZero() {
                 msg.SetMedia(tgMessageMedia(m.Media))
                 // invert_media 是 message 级标志，但存于媒体快照（免消息表列）：仅当有媒体时投影。
@@ -248,12 +243,19 @@ func tgMessageServiceAction(msg domain.Message) tg.MessageActionClass {
                 if shared == nil {
                         return &tg.MessageActionEmpty{}
                 }
-                if msg.Out {
-                        return &tg.MessageActionRequestedPeerSentMe{
-                                ButtonID: shared.ButtonID,
-                                Peers:    tgRequestedPeers(shared),
-                        }
-                }
+                // Round52: обе стороны приватного диалога получают ОДИН конструктор
+                // messageActionRequestedPeer#31518e9b. Раньше исходящая копия (msg.Out)
+                // кодировалась как messageActionRequestedPeerSentMe#93b31848, который
+                // клиент OwpenGram не знает: TLParseException "can't parse magic
+                // 93b31848 in TLRPC$MessageAction" ронял разбор ВСЕЙ пачки ответа —
+                // updates.getDifference на старте и messages.getHistory диалога
+                // (см. клиентский лог 28_11_2026_02_39_32, FATAL-стектрейсы) — а вместе
+                // с пачкой терялись все объекты users/chats и результаты RPC, идущие
+                // следом в том же чтении сокета. Обратная сторона (бот) парсит
+                // messageActionRequestedPeer стабильно, поэтому универсальный
+                // конструктор безопасен для обеих сторон. Различие "вы отправили /
+                // вам отправили" на отображении строки не сказывается: пиров клиент
+                // восстанавливает из векторов message.users/chats.
                 return &tg.MessageActionRequestedPeer{
                         ButtonID: shared.ButtonID,
                         Peers:    tgPeerList(shared.Peers),
@@ -311,19 +313,6 @@ func tgMessageServiceAction(msg domain.Message) tg.MessageActionClass {
                         })
                 }
                 return out
-        case domain.MessageServiceActionPaidMessagesRefunded:
-                // messageActionPaidMessagesRefunded#ac1f1fcd: владелец платы вернул
-                // плательщику звёзды за сообщения чата (toggleNoPaidMessagesException
-                // с refund_charged=true). Официальные клиенты рисуют сервисное
-                // сообщение о возврате в самом диалоге.
-                action := m.ServiceAction.PaidMessagesRefunded
-                if action == nil || action.Stars <= 0 {
-                        return &tg.MessageActionEmpty{}
-                }
-                return &tg.MessageActionPaidMessagesRefunded{
-                        Count: action.Count,
-                        Stars: action.Stars,
-                }
         default:
                 return &tg.MessageActionEmpty{}
         }
@@ -389,48 +378,6 @@ func tgPeerList(peers []domain.Peer) []tg.PeerClass {
         for _, peer := range peers {
                 if converted := tgPeer(peer); converted != nil {
                         out = append(out, converted)
-                }
-        }
-        return out
-}
-
-func tgRequestedPeers(action *domain.MessageRequestedPeerAction) []tg.RequestedPeerClass {
-        if action == nil {
-                return nil
-        }
-        details := make(map[domain.Peer]domain.MessageRequestedPeerDetails, len(action.Details))
-        for _, detail := range action.Details {
-                details[detail.Peer] = detail
-        }
-        out := make([]tg.RequestedPeerClass, 0, len(action.Peers))
-        for _, peer := range action.Peers {
-                detail := details[peer]
-                switch peer.Type {
-                case domain.PeerTypeUser:
-                        item := &tg.RequestedPeerUser{UserID: peer.ID}
-                        if action.NameRequested {
-                                item.SetFirstName(detail.FirstName)
-                                item.SetLastName(detail.LastName)
-                        }
-                        if action.UsernameRequested {
-                                item.SetUsername(detail.Username)
-                        }
-                        if action.PhotoRequested && detail.Photo != nil {
-                                item.SetPhoto(tgPhoto(*detail.Photo))
-                        }
-                        out = append(out, item)
-                case domain.PeerTypeChannel:
-                        item := &tg.RequestedPeerChannel{ChannelID: peer.ID}
-                        if action.NameRequested {
-                                item.SetTitle(detail.Title)
-                        }
-                        if action.UsernameRequested {
-                                item.SetUsername(detail.Username)
-                        }
-                        if action.PhotoRequested && detail.Photo != nil {
-                                item.SetPhoto(tgPhoto(*detail.Photo))
-                        }
-                        out = append(out, item)
                 }
         }
         return out
