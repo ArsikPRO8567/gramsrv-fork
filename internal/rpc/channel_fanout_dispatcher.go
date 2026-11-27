@@ -961,12 +961,21 @@ func channelMessagesFanoutOwnerIDs(results []domain.SendChannelMessageResult, ex
 
 func channelMessagesFanoutUsernamePeers(results []domain.SendChannelMessageResult, extraUserIDs []int64) []domain.Peer {
 	userIDs, channelIDs := channelMessagesFanoutPeerRefs(results, extraUserIDs)
-	peers := make([]domain.Peer, 0, len(userIDs)+len(channelIDs))
+	peers := make([]domain.Peer, 0, len(userIDs)+len(channelIDs)+len(results))
 	for userID := range userIDs {
 		peers = append(peers, domain.Peer{Type: domain.PeerTypeUser, ID: userID})
 	}
 	for channelID := range channelIDs {
 		peers = append(peers, domain.Peer{Type: domain.PeerTypeChannel, ID: channelID})
+	}
+	// Раунд 49 (анти-мерцание): сам текущий канал едет в КАЖДОМ пуш-объекте
+	// (tgChannelChatMin), поэтому его username-вектор тоже должен быть
+	// спроецирован на предзагрузке; иначе пуш-оверлей на границе доставки читал бы
+	// реестр для него на каждого получателя.
+	for _, res := range results {
+		if res.Channel.ID != 0 {
+			peers = append(peers, domain.Peer{Type: domain.PeerTypeChannel, ID: res.Channel.ID})
+		}
 	}
 	return peers
 }
@@ -1001,6 +1010,9 @@ func (r *Router) enqueueChannelMessageFanout(ctx context.Context, originUserID i
 		func(bgCtx context.Context, viewers []int64) {
 			r.prefetchChannelFanoutUsers(bgCtx, fanoutCache, viewers, ownerIDs)
 			usernames = r.usernameRegistryMap(bgCtx, usernamePeers)
+			// Раунд 49 (анти-мерцание): иконка верификации — peer-wide факт; грузим
+			// один батч на весь fan-out, билдер штампует её в каждый пуш-объект.
+			fanoutCache.primeBotVerificationIcons(bgCtx, usernamePeers)
 		},
 		func(bgCtx context.Context, viewerUserID int64) *tg.Updates {
 			// privacy bot 在 send 时被 SkipDeliveryUserIDs 排除（命令/@/回复以外的消息不可见）。
@@ -1056,12 +1068,17 @@ func channelEditMessageFanoutOwnerIDs(res domain.EditChannelMessageResult) []int
 
 func channelEditMessageFanoutUsernamePeers(res domain.EditChannelMessageResult) []domain.Peer {
 	userIDs, channelIDs := channelEditMessageFanoutPeerRefs(res)
-	peers := make([]domain.Peer, 0, len(userIDs)+len(channelIDs))
+	peers := make([]domain.Peer, 0, len(userIDs)+len(channelIDs)+1)
 	for userID := range userIDs {
 		peers = append(peers, domain.Peer{Type: domain.PeerTypeUser, ID: userID})
 	}
 	for channelID := range channelIDs {
 		peers = append(peers, domain.Peer{Type: domain.PeerTypeChannel, ID: channelID})
+	}
+	// Раунд 49 (анти-мерцание): сам текущий канал едет в каждом пуш-объекте
+	// edit-fan-out (tgChannelChatMin) — его вектор проектируется там же.
+	if res.Channel.ID != 0 {
+		peers = append(peers, domain.Peer{Type: domain.PeerTypeChannel, ID: res.Channel.ID})
 	}
 	return peers
 }
@@ -1102,6 +1119,8 @@ func (r *Router) enqueueChannelEditMessageFanout(ctx context.Context, originUser
 		func(bgCtx context.Context, viewers []int64) {
 			r.prefetchChannelFanoutUsers(bgCtx, fanoutCache, viewers, ownerIDs)
 			usernames = r.usernameRegistryMap(bgCtx, usernamePeers)
+			// Раунд 49 (анти-мерцание): один батч иконок на весь edit-fan-out.
+			fanoutCache.primeBotVerificationIcons(bgCtx, usernamePeers)
 		},
 		func(bgCtx context.Context, viewerUserID int64) *tg.Updates {
 			return r.channelEditMessageUpdatesWithPeerCacheAndUsernames(bgCtx, viewerUserID, res, fanoutCache, usernames)
@@ -1122,6 +1141,8 @@ func (r *Router) enqueueChannelMessagesFanout(ctx context.Context, originUserID,
 		func(bgCtx context.Context, viewers []int64) {
 			r.prefetchChannelFanoutUsers(bgCtx, fanoutCache, viewers, ownerIDs)
 			usernames = r.usernameRegistryMap(bgCtx, usernamePeers)
+			// Раунд 49 (анти-мерцание): один батч иконок на весь batch-фан-аут.
+			fanoutCache.primeBotVerificationIcons(bgCtx, usernamePeers)
 		},
 		func(bgCtx context.Context, viewerUserID int64) *tg.Updates {
 			return r.channelMessagesUpdatesWithPeerCacheAndUsernames(bgCtx, viewerUserID, results, nil, false, extraUserIDs, fanoutCache, usernames)

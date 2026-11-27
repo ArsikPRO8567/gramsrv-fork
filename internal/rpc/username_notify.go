@@ -19,6 +19,10 @@ func (r *Router) NotifyPeerUsernamesChanged(ctx context.Context, peer domain.Pee
 	if peer.ID <= 0 {
 		return fmt.Errorf("notify peer usernames changed: invalid peer id %d", peer.ID)
 	}
+	// Раунд 49 (анти-мерцание): коммит реестра сбрасывает TTL-вердикт пуш-оверлея,
+	// чтобы следующая серия пушей перечитала реестр, а не полагалась на старое
+	// «коллекционных строк нет».
+	r.usernameNegativesDrop([]domain.Peer{{Type: peer.Type, ID: peer.ID}})
 	switch peer.Type {
 	case domain.PeerTypeUser:
 		return r.notifyUserUsernamesChanged(ctx, peer.ID)

@@ -141,16 +141,43 @@ func (r *Router) applyBotOwnerViewToUsers(ctx context.Context, viewerUserID int6
 	if len(ids) == 0 {
 		return
 	}
+	// Раунд 49 (анти-мерцание): профили ботов идут через короткий TTL-кэш,
+	// чтобы пуш-фан-аут с упоминавшим ботом не платил BotInfos-батч на
+	// каждого получателя, а повторные оверлеи одного события стали бесплатными.
 	profiles := map[int64]domain.BotProfile{}
-	if batch, ok := r.deps.Bots.(botProfileBatchResolver); ok {
-		if loaded, err := batch.BotInfos(ctx, ids); err == nil {
-			profiles = loaded
-		}
-	} else {
-		for _, id := range ids {
-			if profile, found, err := r.deps.Bots.BotInfo(ctx, id); err == nil && found {
+	misses := make([]int64, 0, len(ids))
+	for _, id := range ids {
+		if profile, found, ok := r.botOwnerViewLookup(id); ok {
+			if found {
 				profiles[id] = profile
 			}
+			continue
+		}
+		misses = append(misses, id)
+	}
+	if len(misses) > 0 {
+		loaded := map[int64]domain.BotProfile{}
+		loadedOK := false
+		if batch, ok := r.deps.Bots.(botProfileBatchResolver); ok {
+			if loadedByID, err := batch.BotInfos(ctx, misses); err == nil {
+				loaded = loadedByID
+				loadedOK = true
+			}
+		} else {
+			loadedOK = true
+			for _, id := range misses {
+				if profile, found, err := r.deps.Bots.BotInfo(ctx, id); err == nil && found {
+					loaded[id] = profile
+				}
+			}
+		}
+		if loadedOK {
+			prime := make(map[int64]domain.BotProfile, len(loaded))
+			for id, profile := range loaded {
+				profiles[id] = profile
+				prime[id] = profile
+			}
+			r.botOwnerViewPrime(prime, misses)
 		}
 	}
 	for id, items := range byID {

@@ -3,6 +3,7 @@ package rpc
 import (
 	"context"
 
+	"github.com/iamxvbaba/td/tg"
 	"go.uber.org/zap"
 
 	"telesrv/internal/app/peerview"
@@ -17,6 +18,9 @@ type viewerPeerCache struct {
 	users        *peerview.BatchCache
 	channels     map[int64]map[int64]domain.Channel
 	missingChats map[int64]map[int64]struct{}
+	// Раунд 49 (анти-мерцание): job-область верификационных иконок, см.
+	// primeBotVerificationIcons.
+	verificationIcons map[domain.Peer]int64
 }
 
 func newViewerPeerCache(r *Router) *viewerPeerCache {
@@ -57,6 +61,68 @@ func (c *viewerPeerCache) primeUsers(viewerUserID int64, users []domain.User) {
 		return
 	}
 	c.users.Prime(viewerUserID, users)
+}
+
+// Раунд 49 (анти-мерцание): job-область сторонних верификационных иконок
+// (user#b1b8cc83 bot_verification_icon:flags2.14 / channel#d49f34c6
+// bot_verification_icon:flags2.13). Пуш-фан-ауты затирают кэш пира клиента
+// каждым сообщением, поэтому иконка должна ехать в КАЖДОМ peer-объекте.
+// Иконки резолвятся один раз на весь fan-out (primeBotVerificationIcons) и
+// штампуются билдерами через botVerificationIcons; пуш-оверлей на границе
+// доставки видит выставленный флаг и не перечитывает реестр на каждого
+// получателя.
+func (c *viewerPeerCache) primeBotVerificationIcons(ctx context.Context, peers []domain.Peer) {
+	if c == nil || c.r == nil || len(peers) == 0 {
+		return
+	}
+	byPeer := c.r.botVerificationMap(ctx, peers)
+	if len(byPeer) == 0 {
+		return
+	}
+	if c.verificationIcons == nil {
+		c.verificationIcons = make(map[domain.Peer]int64, len(byPeer))
+	}
+	for peer, mark := range byPeer {
+		if mark.IconDocumentID <= 0 {
+			continue
+		}
+		c.verificationIcons[peer] = mark.IconDocumentID
+	}
+}
+
+// botVerificationIcons возвращает снимок job-области иконок (только чтение).
+func (c *viewerPeerCache) botVerificationIcons() map[domain.Peer]int64 {
+	if c == nil {
+		return nil
+	}
+	return c.verificationIcons
+}
+
+// applyBotVerificationIconsFromSnapshot штампует заранее разрешённые иконки на
+// peer-объекты одного fan-out. Объекты без записи в снимке остаются без флага —
+// их дозакрывает пуш-оверлей на границе доставки.
+func applyBotVerificationIconsFromSnapshot(users []tg.UserClass, chats []tg.ChatClass, icons map[domain.Peer]int64) {
+	if len(icons) == 0 {
+		return
+	}
+	for _, item := range users {
+		u, ok := item.(*tg.User)
+		if !ok || u == nil || u.ID == 0 {
+			continue
+		}
+		if icon, ok := icons[domain.Peer{Type: domain.PeerTypeUser, ID: u.ID}]; ok && icon > 0 {
+			u.SetBotVerificationIcon(icon)
+		}
+	}
+	for _, item := range chats {
+		ch, ok := item.(*tg.Channel)
+		if !ok || ch == nil || ch.ID == 0 {
+			continue
+		}
+		if icon, ok := icons[domain.Peer{Type: domain.PeerTypeChannel, ID: ch.ID}]; ok && icon > 0 {
+			ch.SetBotVerificationIcon(icon)
+		}
+	}
 }
 
 func (c *viewerPeerCache) channelsForIDs(ctx context.Context, viewerUserID int64, ids []int64) []domain.Channel {

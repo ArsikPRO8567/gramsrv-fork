@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"time"
 
 	"github.com/iamxvbaba/td/tg"
 	"github.com/iamxvbaba/td/tlprofile"
@@ -416,6 +417,13 @@ func applyUsernamesFromRegistry(users []tg.UserClass, chats []tg.ChatClass, byPe
 // through PeerUsernames so a one-object projection does not pay for a batch
 // round trip; anything larger goes through UsernamesBatch (no N+1). Any error
 // yields an empty map, which the caller treats as "keep the legacy scalar".
+//
+// Раунд 49 (анти-мерцание): каждый выполненный реестр-челлендж пишет вердикт в
+// короткий TTL-кэш usernameNoCollectible (см. applyPushPeerOverlays): «коллек-
+// ционных строк нет» — пишется, «есть» — запись сбрасывается. Кэш ЧИТАЕТ только
+// пуш-оверлей на границе доставки; ответная граница всегда читает реестр
+// напрямую, поэтому свежекупленный коллекционный юзернейм в ответах не может
+// «застрять» в устаревшем вердикте.
 func (r *Router) usernameRegistryMap(ctx context.Context, peers []domain.Peer) map[domain.Peer][]domain.Username {
 	if r.deps.Usernames == nil || len(peers) == 0 {
 		return nil
@@ -423,7 +431,15 @@ func (r *Router) usernameRegistryMap(ctx context.Context, peers []domain.Peer) m
 	if len(peers) == 1 {
 		list, err := r.deps.Usernames.PeerUsernames(ctx, peers[0])
 		if err != nil || len(list) == 0 {
+			if err == nil {
+				r.usernameNegativesPrime(peers)
+			}
 			return nil
+		}
+		if hasCollectibleUsername(list) {
+			r.usernameNegativesDrop(peers)
+		} else {
+			r.usernameNegativesPrime(peers)
 		}
 		return map[domain.Peer][]domain.Username{peers[0]: list}
 	}
@@ -431,5 +447,79 @@ func (r *Router) usernameRegistryMap(ctx context.Context, peers []domain.Peer) m
 	if err != nil {
 		return nil
 	}
+	prime := make([]domain.Peer, 0, len(peers))
+	drop := make([]domain.Peer, 0, len(peers))
+	for _, peer := range peers {
+		if hasCollectibleUsername(byPeer[peer]) {
+			drop = append(drop, peer)
+		} else {
+			prime = append(prime, peer)
+		}
+	}
+	r.usernameNegativesPrime(prime)
+	r.usernameNegativesDrop(drop)
 	return byPeer
+}
+
+// usernameNegativesTTL живёт несколько секунд — окно покрывает серию пушей
+// одного события (fan-out / notify-волна). Изменение реестра всегда
+// сопровождается push-уведомлением (которое сбрасывает запись) и инвалидацией
+// проекций, поэтому окно устаревания вердикта не наблюдаемо в UX: пуш-оверлей
+// может пропустить перечитывание максимум до ближайшего ответного RPC.
+const usernameNegativesTTL = 5 * time.Second
+
+// usernameNegativesLimit — ёмкость отрицательного кэша; переполнение
+// представляет собой полный сброс (профиль нагрузки — пуш-шторм, где дешевле
+// перечитать, чем выгрезать LRU).
+const usernameNegativesLimit = 8192
+
+// usernameNegativesPrime запоминает вердикт «коллекционных строк нет» до TTL.
+func (r *Router) usernameNegativesPrime(peers []domain.Peer) {
+	if len(peers) == 0 {
+		return
+	}
+	r.usernameNoCollectibleMu.Lock()
+	defer r.usernameNoCollectibleMu.Unlock()
+	if r.usernameNoCollectible == nil {
+		r.usernameNoCollectible = make(map[domain.Peer]int64, len(peers))
+	}
+	if len(r.usernameNoCollectible)+len(peers) > usernameNegativesLimit {
+		r.usernameNoCollectible = make(map[domain.Peer]int64, len(peers))
+	}
+	until := int64(r.clock.Now().Add(usernameNegativesTTL).Unix())
+	for _, peer := range peers {
+		r.usernameNoCollectible[peer] = until
+	}
+}
+
+// usernameNegativesDrop сбрасывает вердикт (коммит реестра с коллекционными
+// строками или прямое уведомление об изменении).
+func (r *Router) usernameNegativesDrop(peers []domain.Peer) {
+	if len(peers) == 0 || r.usernameNoCollectible == nil {
+		return
+	}
+	r.usernameNoCollectibleMu.Lock()
+	defer r.usernameNoCollectibleMu.Unlock()
+	for _, peer := range peers {
+		delete(r.usernameNoCollectible, peer)
+	}
+}
+
+// usernameNegativesPending возвращает пиры, чей вердикт устарел/отсутствует и
+// требует чтения реестра. Читает ТОЛЬКО пуш-оверлей на границе доставки.
+func (r *Router) usernameNegativesPending(peers []domain.Peer) []domain.Peer {
+	if len(peers) == 0 || r.usernameNoCollectible == nil {
+		return peers
+	}
+	freshUntil := int64(r.clock.Now().Add(usernameNegativesTTL).Unix())
+	r.usernameNoCollectibleMu.Lock()
+	defer r.usernameNoCollectibleMu.Unlock()
+	out := make([]domain.Peer, 0, len(peers))
+	for _, peer := range peers {
+		if until, ok := r.usernameNoCollectible[peer]; ok && until >= freshUntil {
+			continue
+		}
+		out = append(out, peer)
+	}
+	return out
 }

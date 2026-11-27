@@ -157,6 +157,16 @@ type Router struct {
 	// 故可无 TTL 缓存。userIsBot 在 PFS 连接上被 announceSessionOnline 每 RPC 调用，不缓存则每次一发
 	// Users.ByID 重投影——开群洪峰 ~50 并发时退化成 ~300ms herd（既拖尾延迟也飙 PG CPU）。零值即可用。
 	botStatus sync.Map // userID(int64) -> bool
+	// botOwnerView (раунд 49, анти-мерцание): короткий TTL-кэш профилей
+	// ботов для оверлея владельца (applyBotOwnerViewToUsers). Он работает и на
+	// границе ответов, и на границе доставки пушей; без кэша фан-аут с
+	// упоминавшим ботом платил бы BotInfos-батч на каждого получателя.
+	// Хранит found=тоже (отсутствие профиля — это детерминированное
+	// bot_can_edit=false, см. OwnsBot). Ошибки чтения кэш не прогревают.
+	botOwnerViewMu          sync.Mutex
+	botOwnerViewCache       map[int64]botOwnerViewEntry
+	usernameNoCollectibleMu sync.Mutex
+	usernameNoCollectible   map[domain.Peer]int64
 	// lastSeenPersist 记录每个 user 最近一次 last_seen 落库时刻（unix），用于写去抖：
 	// updateStatus 高频续期时数秒内只落一次 DB。
 	lastSeenPersist sync.Map // userID(int64) -> int64(unix)
@@ -779,6 +789,54 @@ func (r *Router) dispatch(ctx context.Context, b *bin.Buffer, depth int, meta *r
 			r.log.Debug("RPC inner handled", fields...)
 		}
 		return enc, err
+	}
+}
+
+// botOwnerViewTTL — окно актуальности профиля бота в кэше оверлея
+// владельца. Смена владельца/профиля экстременно редки и сопровождается
+// инвалидацией проекций, поэтому окно устаревания не наблюдаемо в UX.
+const botOwnerViewTTL = 5 * time.Second
+
+// botOwnerViewLimit — ёмкость кэша; переполнение — полный сброс.
+const botOwnerViewLimit = 8192
+
+type botOwnerViewEntry struct {
+	profile domain.BotProfile
+	found   bool
+	until   int64
+}
+
+// botOwnerViewLookup возвращает свежий вердикт из кэша (ok=false — мисс).
+func (r *Router) botOwnerViewLookup(botUserID int64) (domain.BotProfile, bool, bool) {
+	freshUntil := int64(r.clock.Now().Add(botOwnerViewTTL).Unix())
+	r.botOwnerViewMu.Lock()
+	defer r.botOwnerViewMu.Unlock()
+	entry, ok := r.botOwnerViewCache[botUserID]
+	if !ok || entry.until < freshUntil {
+		return domain.BotProfile{}, false, false
+	}
+	return entry.profile, entry.found, true
+}
+
+// botOwnerViewPrime запоминает вердикты прочитанного батча профилей.
+func (r *Router) botOwnerViewPrime(profiles map[int64]domain.BotProfile, misses []int64) {
+	if len(profiles)+len(misses) == 0 {
+		return
+	}
+	until := int64(r.clock.Now().Add(botOwnerViewTTL).Unix())
+	r.botOwnerViewMu.Lock()
+	defer r.botOwnerViewMu.Unlock()
+	if r.botOwnerViewCache == nil {
+		r.botOwnerViewCache = make(map[int64]botOwnerViewEntry, len(profiles)+len(misses))
+	}
+	if len(r.botOwnerViewCache)+len(profiles)+len(misses) > botOwnerViewLimit {
+		r.botOwnerViewCache = make(map[int64]botOwnerViewEntry, len(profiles)+len(misses))
+	}
+	for id, profile := range profiles {
+		r.botOwnerViewCache[id] = botOwnerViewEntry{profile: profile, found: true, until: until}
+	}
+	for _, id := range misses {
+		r.botOwnerViewCache[id] = botOwnerViewEntry{found: false, until: until}
 	}
 }
 

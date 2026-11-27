@@ -285,6 +285,11 @@ func (r *Router) channelMessagesUpdatesWithPeerCacheAndUsernames(ctx context.Con
 		Seq:     0,
 	}
 	applyUsernamesFromRegistry(out.Users, out.Chats, usernames)
+	// Раунд 49 (анти-мерцание): сторонняя верификация — peer-wide факт, и он
+	// должен ехать в КАЖДОМ пуш-объекте, иначе клиент затирает кэш пира и значок
+	// «мерцает» между профилями. Иконки загружены один раз на весь fan-out
+	// (primeBotVerificationIcons), поэтому штамп бесплатен.
+	applyBotVerificationIconsFromSnapshot(out.Users, out.Chats, cache.botVerificationIcons())
 	return out
 }
 
@@ -331,6 +336,9 @@ func (r *Router) channelEditMessageUpdatesWithPeerCacheAndUsernames(ctx context.
 		Seq:     0,
 	}
 	applyUsernamesFromRegistry(out.Users, out.Chats, usernames)
+	// Раунд 49 (анти-мерцание): та же прививка иконки верификации для edit-
+	// fan-out; см. комментарий в channelMessagesUpdatesWithPeerCacheAndUsernames.
+	applyBotVerificationIconsFromSnapshot(out.Users, out.Chats, cache.botVerificationIcons())
 	return out
 }
 

@@ -1092,6 +1092,55 @@ func (s *Service) TonTotalReceived(ctx context.Context, userID int64) (int64, er
         return reader.TonTotalReceived(ctx, userID)
 }
 
+// TonReceivedDaily — дневные суммы кредитных проводок личного TON-леджера
+// (раунд 49, график статистики баланса: TON-график для пользователя и бота).
+// Опционально, как TonTotalReceived: хранилища без метода дают пустую серию,
+// и RPC оставляет нейтральный StatsGraphError-стаб вместо графика.
+func (s *Service) TonReceivedDaily(ctx context.Context, userID int64) ([]domain.StarsDailyPoint, error) {
+        if s == nil || s.lifecycle == nil || userID <= 0 {
+                return nil, nil
+        }
+        reader, ok := s.lifecycle.(interface {
+                TonReceivedDaily(ctx context.Context, userID int64) ([]domain.StarsDailyPoint, error)
+        })
+        if !ok {
+                return nil, nil
+        }
+        return reader.TonReceivedDaily(ctx, userID)
+}
+
+// ChannelStarsReceivedDaily — дневные суммы кредитных проводок канального
+// Stars-леджера (раунд 49, график статистики баланса: звёздный график для
+// каналов и групп). Опционально: без метода — пустая серия.
+func (s *Service) ChannelStarsReceivedDaily(ctx context.Context, channelID int64) ([]domain.StarsDailyPoint, error) {
+        if s == nil || s.lifecycle == nil || channelID <= 0 {
+                return nil, nil
+        }
+        reader, ok := s.lifecycle.(interface {
+                ChannelStarsReceivedDaily(ctx context.Context, channelID int64) ([]domain.StarsDailyPoint, error)
+        })
+        if !ok {
+                return nil, nil
+        }
+        return reader.ChannelStarsReceivedDaily(ctx, channelID)
+}
+
+// ChannelTonReceivedDaily — дневные суммы кредитных проводок канального
+// TON-леджера (раунд 49, график статистики баланса: TON-график для
+// broadcast-каналов). Опционально: без метода — пустая серия.
+func (s *Service) ChannelTonReceivedDaily(ctx context.Context, channelID int64) ([]domain.StarsDailyPoint, error) {
+        if s == nil || s.lifecycle == nil || channelID <= 0 {
+                return nil, nil
+        }
+        reader, ok := s.lifecycle.(interface {
+                ChannelTonReceivedDaily(ctx context.Context, channelID int64) ([]domain.StarsDailyPoint, error)
+        })
+        if !ok {
+                return nil, nil
+        }
+        return reader.ChannelTonReceivedDaily(ctx, channelID)
+}
+
 // ChannelStarsTransactionsByID 按公开交易 ID 批量读取频道 Stars 流水。
 func (s *Service) ChannelStarsTransactionsByID(ctx context.Context, channelID int64, ids []string) ([]domain.StarsTransaction, error) {
         if s == nil || s.lifecycle == nil || len(ids) == 0 {
