@@ -293,6 +293,10 @@ func (r *Router) DispatchAdmitted(
 		r.log.Debug("RPC inner handled", fields...)
 	}
 	if err == nil && result != nil {
+		// Единая проекция peer-объектов на границе ответа: usernames /
+		// верификационные значки / bot_can_edit должны быть согласованы в
+		// КАЖДОМ ответе, иначе клиентский кэш пользователей «мигает».
+		r.projectResponsePeerObjects(ctx, result)
 		if !profileKnown || !profileEvidenceFresh {
 			// A generated wire-invariant terminal can safely complete before the
 			// client profile is known, but it is not evidence that this physical

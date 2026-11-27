@@ -655,6 +655,15 @@ func tgChannelFull(view domain.ChannelView, publicBaseURL ...string) *tg.Channel
         if ch.ReactionPolicy.Limit > 0 {
                 full.SetReactionsLimit(ch.ReactionPolicy.Limit)
         }
+        if view.Self.Role == domain.ChannelRoleCreator || (view.Self.Role == domain.ChannelRoleAdmin && view.Self.AdminRights.PostMessages) {
+                // can_view_revenue / can_view_stars_revenue - the official gates of
+                // the monetization screen (core.telegram.org/api/revenue). The rights
+                // mirror checkStarGiftOwnerPermission so the UI never promises what
+                // the ledger RPC would reject. Megagroups carry the same flags: the
+                // fork extends monetization to groups too.
+                full.CanViewRevenue = true
+                full.CanViewStarsRevenue = true
+        }
         if ch.Broadcast && !ch.Megagroup {
                 // Android uses paid_media_allowed as the capability gate for showing the
                 // paid-reaction setting; paid_reactions_available below remains the saved
@@ -668,24 +677,7 @@ func tgChannelFull(view domain.ChannelView, publicBaseURL ...string) *tg.Channel
         if ch.Broadcast && !ch.Megagroup && ch.ReactionPolicy.PaidEnabled {
                 full.SetPaidReactionsAvailable(true)
         }
-        // Раунд 47 (вкладки балансов): can_view_stars_revenue / can_view_revenue
-        // открывают клиентский экран баланса Stars/TON (StatisticActivity →
-        // ChannelMonetizationLayout, строка «Balance» в профиле канала и группы).
-        // Правило совпадает с checkStarGiftOwnerPermission (создатель или админ
-        // с правом PostMessages), чтобы вкладка никогда не открывалась тому,
-        // кому леджер ответит CHAT_ADMIN_REQUIRED.
-        if canManageChannelStarsLedger(view.Self) {
-                full.CanViewRevenue = true
-                full.CanViewStarsRevenue = true
-        }
         return full
-}
-
-// canManageChannelStarsLedger повторяет правило доступа к канальному
-// Stars/TON леджеру из checkStarGiftOwnerPermission.
-func canManageChannelStarsLedger(member domain.ChannelMember) bool {
-        return member.Role == domain.ChannelRoleCreator ||
-                (member.Role == domain.ChannelRoleAdmin && member.AdminRights.PostMessages)
 }
 
 func channelMemberIsAdmin(member domain.ChannelMember) bool {
