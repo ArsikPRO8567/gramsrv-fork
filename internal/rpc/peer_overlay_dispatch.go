@@ -5,6 +5,7 @@ import (
 	"reflect"
 
 	"github.com/iamxvbaba/td/tg"
+	"github.com/iamxvbaba/td/tlprofile"
 
 	"telesrv/internal/domain"
 )
@@ -20,13 +21,13 @@ import (
 //
 // applyResponsePeerOverlays — единая точка в dispatch(): после успешного
 // обработчика ответ проходит рефлексией, из него собираются все слайсы
-// []tg.UserClass / []tg.ChatClass и к ним применяются батч-овераеи:
+// []tg.UserClass / []tg.ChatClass и к ним применяются батч-овераи:
 //   - applyUsernamesToPeerObjects — полные username#b4073647 вектора
 //     (editable/active из реестра; коллекционные юзернеймы перестают
 //     мигать между скаляром и вектором);
 //   - applyBotVerificationIconsToPeerObjects — user/channel
 //     bot_verification_icon (кастомная верификация на всех экранах);
-//   - applyBotOwnerViewToUsers — bot-флагы профиля и bot_can_edit
+//   - applyBotOwnerViewToUsers — bot-флаги профиля и bot_can_edit
 //     (flags2.1) строго для владельца бота.
 //
 // Все три операции идемпотентны, поэтому ответы, чей обработчик уже применил
@@ -64,7 +65,28 @@ func (r *Router) applyResponsePeerOverlays(ctx context.Context, resp any) {
 // указателям). Собираются поля любого имени: важен тип, а не соглашение,
 // потому что вложенные envelope-типы (users.userFull, payments.starsStatus,
 // updates.difference и т.п.) несут Users/Chats под разными ветками.
+//
+// Раунд 52 (краш сервера при подключении клиента): DispatchAdmitted передаёт
+// сюда обёртку tlprofile.Result, чьи поля prepared/call/value неэкспортируемы.
+// Обход заходил в них — reflect помечает такие значения флагом flagRO, и
+// первый же Users/Chats канонического tg-ответа под value ронял сервер
+// паникой «Interface: cannot return value obtained from unexported field»
+// (reflect/value.go:1484). Путь dispatch() в router.go разворачивает обёртку
+// сам через CanonicalValue, поэтому там дефекта не было; здесь разворачивание
+// делается до обхода, для всех вызывающих сторон операция идемпотентна:
+// tg-типы и []tg.UserClass интерфейс Result не реализуют.
+//
+// Неэкспортируемые поля структур пропускаются целиком, вместе с поддеревом:
+// любые значения под ними несут flagRO и Interface() для них запрещён, а
+// пиры tg-типы всегда несут в экспортируемых полях. CanInterface() —
+// страховка от будущих источников flagRO: функция в hot-path RPC не должна
+// уметь паниковать.
 func collectResponsePeerSlices(resp any) ([]tg.UserClass, []tg.ChatClass) {
+	if wrapper, ok := resp.(tlprofile.Result); ok {
+		if canonical := wrapper.CanonicalValue(); canonical != nil {
+			resp = canonical
+		}
+	}
 	var users []tg.UserClass
 	var chats []tg.ChatClass
 	visited := make(map[uintptr]struct{}, 8)
@@ -90,6 +112,12 @@ func collectResponsePeerSlices(resp any) ([]tg.UserClass, []tg.ChatClass) {
 		case reflect.Struct:
 			for i := 0; i < v.NumField(); i++ {
 				field := v.Field(i)
+				if !field.CanInterface() {
+					// Значение получено через неэкспортируемое поле
+					// (flagRO): Interface() на нём паникует. Пропускаем
+					// поле целиком, вместе с поддеревом.
+					continue
+				}
 				switch field.Kind() {
 				case reflect.Slice:
 					if field.Type() == userClassSliceType {
